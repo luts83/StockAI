@@ -414,7 +414,10 @@ header {
 </div>
 
 <script>
-const API = window.location.origin;
+  const IS_LOCAL = ["localhost", "127.0.0.1", ""].includes(window.location.hostname);
+  const API = IS_LOCAL
+    ? "http://localhost:8000"
+    : "https://web-production-3b251.up.railway.app";
 let period = "6mo";
 
 if (typeof marked !== 'undefined') marked.setOptions({ breaks: true, gfm: true });
