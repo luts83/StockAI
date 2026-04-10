@@ -3,7 +3,10 @@ import pandas as pd
 from typing import List, Dict
 from analyzer import get_summary_stats
 
-client = anthropic.Anthropic()  # ANTHROPIC_API_KEY 환경변수 자동 참조
+
+def _get_client():
+    """모듈 로드 시점이 아니라 호출 시 생성 (httpx/anthropic 버전 이슈·키 없을 때 import 실패 방지)"""
+    return anthropic.Anthropic()
 
 SYSTEM_PROMPT = """You are an expert technical analyst and financial researcher.
 Analyze the provided stock chart image and data thoroughly.
@@ -65,7 +68,7 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str, new
     prompt = build_analysis_prompt(ticker, stats, news_items)
 
     try:
-        message = client.messages.create(
+        message = _get_client().messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=4000,
             system=SYSTEM_PROMPT,

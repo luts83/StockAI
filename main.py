@@ -1,22 +1,26 @@
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
-from typing import Optional
 import anthropic
 import math
 import os
 import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+from typing import Optional
 
 from analyzer import get_stock_data, calculate_indicators
+from ai import analyze_with_claude
 from chart import generate_chart
 from news import fetch_news
-from ai import analyze_with_claude
 
 load_dotenv(override=True)
+
+
+def _get_claude():
+    return anthropic.Anthropic()
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -28,9 +32,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-claude = anthropic.Anthropic()
-
 
 class AnalyzeRequest(BaseModel):
     ticker: str
@@ -136,7 +137,7 @@ async def news_summary_stream(req: NewsSummaryRequest):
             yield "Anthropic API 키가 설정되지 않아 뉴스 요약을 생성할 수 없습니다."
             return
         try:
-            with claude.messages.stream(
+            with _get_claude().messages.stream(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=600,
                 messages=[{"role": "user", "content": prompt}]
@@ -167,4 +168,9 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     # Render/Railway 등은 PORT를 주입하므로 reload 끔
     reload = os.getenv("PORT") is None
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)
+    kw = {"host": "0.0.0.0", "port": port, "reload": reload}
+    if reload:
+        # .venv 안 패키지 변경까지 감시하면 재시작 폭주 → 제외
+        kw["reload_dirs"] = [str(BASE_DIR)]
+        kw["reload_excludes"] = [".venv", "**/.venv/**", "__pycache__"]
+    uvicorn.run("main:app", **kw)

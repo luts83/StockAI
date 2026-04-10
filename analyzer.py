@@ -1,3 +1,5 @@
+import time
+
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
@@ -18,17 +20,22 @@ def _last_valid(series: pd.Series, default: float = 0.0) -> float:
     return float(valid.iloc[-1])
 
 def get_stock_data(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    """yfinance로 OHLCV 데이터 수집"""
-    try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period, interval=interval)
-        if df.empty:
-            return None
-        df.index = pd.to_datetime(df.index)
-        return df
-    except Exception as e:
-        print(f"데이터 수집 오류: {e}")
-        return None
+    """yfinance로 OHLCV 데이터 수집 (Yahoo 일시 오류 시 짧게 재시도)"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period=period, interval=interval)
+            if df is not None and not df.empty:
+                df.index = pd.to_datetime(df.index)
+                return df
+        except Exception as e:
+            last_err = e
+        if attempt < 2:
+            time.sleep(0.8 * (attempt + 1))
+    if last_err:
+        print(f"데이터 수집 오류 ({ticker}): {last_err}")
+    return None
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """기술적 지표 계산"""
