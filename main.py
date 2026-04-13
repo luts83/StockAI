@@ -192,6 +192,8 @@ async def analyze(
             indicators=indicators, analysis=analysis,
             signal=signal, news=news_items,
             chart_b64=chart_b64, user_id=user_id,
+            current_price=safe(df["Close"].iloc[-1]),
+            change_pct=safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
         )
 
     return {
@@ -392,30 +394,30 @@ def _extract_card_data_sync(claude_client, analysis_text: str) -> dict:
 JSON만 반환, 코드블록이나 설명 없이. 없는 데이터는 null로.
 
 {{
-  "trend_summary": "트렌드 한줄요약 (40자 이내)",
-  "resistance": ["1차저항 $XXX", "2차저항 $XXX"],
-  "support": ["1차지지 $XXX", "2차지지 $XXX"],
-  "volume_note": "거래량 한줄 (없으면 null)",
+  "trend_summary": "전반적 추세 2~3문장으로 상세히 (100자 이내)",
+  "resistance": ["1차저항 $XXX", "2차저항 $XXX", "3차저항 $XXX"],
+  "support": ["1차지지 $XXX", "2차지지 $XXX", "3차지지 $XXX"],
+  "volume_note": "거래량 현황 (평균 대비 몇%, 없으면 null)",
   "bull_prob": 강세확률정수(0-100),
   "bear_prob": 약세확률정수(0-100),
-  "bull_targets": ["1차 목표 $XXX", "2차 목표 $XXX"],
-  "bull_conditions": ["강세 조건1", "강세 조건2", "강세 조건3"],
-  "bear_warnings": ["약세 경고1", "약세 경고2", "약세 경고3"],
-  "stop_loss": "손절 레벨 $XXX",
-  "strategy_conservative": "보수적 투자자 전략 (40자 이내)",
-  "strategy_aggressive": "공격적 투자자 전략 (40자 이내)",
-  "checkpoints": ["체크포인트1", "체크포인트2", "체크포인트3"],
-  "conclusion": "종합 결론 한줄 (50자 이내)",
-  "key_event": "주요 이벤트/날짜 (없으면 null)"
+  "bull_targets": ["1차 목표 $XXX", "2차 목표 $XXX", "최대 목표 $XXX"],
+  "bull_conditions": ["강세 조건1", "강세 조건2", "강세 조건3", "강세 조건4", "강세 조건5"],
+  "bear_warnings": ["약세 경고1", "약세 경고2", "약세 경고3", "약세 경고4", "약세 경고5"],
+  "stop_loss": "손절 레벨 $XXX (구체적 수치)",
+  "strategy_conservative": "보수적 투자자 전략 2~3문장 (80자 이내)",
+  "strategy_aggressive": "공격적 투자자 전략 2~3문장 (80자 이내)",
+  "checkpoints": ["체크포인트1 (구체적 설명 포함)", "체크포인트2 (구체적 설명 포함)", "체크포인트3 (구체적 설명 포함)"],
+  "conclusion": "종합 결론 2~3문장 (100자 이내)",
+  "key_event": "주요 이벤트/날짜/촉매 (없으면 null)"
 }}
 
 분석 텍스트:
-{analysis_text[:3000]}
+{analysis_text[:4000]}
 """
     try:
         msg = claude_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}]
         )
         text = msg.content[0].text.strip()

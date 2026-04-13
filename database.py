@@ -23,21 +23,24 @@ def get_db():
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
                   analysis: str, signal: str, news: list, chart_b64: str,
-                  user_id: str = "") -> str:
+                  user_id: str = "", current_price: float = None,
+                  change_pct: float = None) -> str:
     db = get_db()
     doc_id = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     doc = {
-        "_id":        doc_id,
-        "ticker":     ticker,
-        "period":     period,
-        "created_at": datetime.now().isoformat(),
-        "indicators": indicators,
-        "analysis":   analysis,
-        "signal":     signal,
-        "news":       news,
-        "chart_b64":  chart_b64,
-        "chat_history": [],
-        "user_id":     user_id,
+        "_id":           doc_id,
+        "ticker":        ticker,
+        "period":        period,
+        "created_at":    datetime.now().isoformat(),
+        "current_price": current_price,
+        "change_pct":    change_pct,
+        "indicators":    indicators,
+        "analysis":      analysis,
+        "signal":        signal,
+        "news":          news,
+        "chart_b64":     chart_b64,
+        "chat_history":  [],
+        "user_id":       user_id,
     }
     db["analyses"].insert_one(doc)
     return doc_id
