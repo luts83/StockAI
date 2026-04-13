@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Cookie
+from fastapi import FastAPI, HTTPException, Request, Cookie, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
@@ -73,8 +73,13 @@ def extract_signal(analysis: str) -> str:
     m = re.search(r"SIGNAL:(BUY|WATCH|SELL)", analysis)
     return m.group(1) if m else "WATCH"
 
-def get_current_user(token: Optional[str]) -> Optional[dict]:
-    """쿠키 토큰으로 현재 유저 반환"""
+def get_current_user(
+    token: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> Optional[dict]:
+    """Authorization 헤더(Bearer) 또는 쿠키 토큰으로 현재 유저 반환"""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):]
     if not token:
         return None
     return decode_jwt(token)
@@ -110,25 +115,19 @@ async def auth_callback(request: Request, code: str):
     # JWT 발급
     jwt_token = create_jwt(user_id, email, name, picture)
 
-    # 프론트로 리다이렉트하면서 쿠키 설정
+    # 프론트로 리다이렉트 — URL 파라미터로 토큰 전달 (크로스 도메인 쿠키 문제 우회)
     is_local = "localhost" in str(request.base_url) or "127.0.0.1" in str(request.base_url)
-    frontend_url = "http://127.0.0.1:5500/index.html" if is_local else "https://luts83.github.io/StockAI/"
-
-    response = RedirectResponse(url=frontend_url)
-    response.set_cookie(
-        key="stockai_token",
-        value=jwt_token,
-        httponly=False,   # JS에서 읽을 수 있게
-        max_age=30 * 24 * 3600,
-        samesite="lax",
-        secure=not is_local,
-    )
-    return response
+    frontend_base = "http://127.0.0.1:5500/index.html" if is_local else "https://luts83.github.io/StockAI/"
+    frontend_url = f"{frontend_base}?token={jwt_token}"
+    return RedirectResponse(url=frontend_url)
 
 @app.get("/auth/me")
-async def get_me(stockai_token: Optional[str] = Cookie(None)):
+async def get_me(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),   # 로컬 하위 호환
+):
     """현재 로그인 유저 정보"""
-    user = get_current_user(stockai_token)
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         return {"user": None}
     return {"user": {
@@ -140,16 +139,18 @@ async def get_me(stockai_token: Optional[str] = Cookie(None)):
 
 @app.post("/auth/logout")
 async def logout():
-    response = JSONResponse({"ok": True})
-    response.delete_cookie("stockai_token")
-    return response
+    return JSONResponse({"ok": True})
 
 # ── 분석 엔드포인트 ────────────────────────────────────
 
 @app.post("/analyze")
-async def analyze(req: AnalyzeRequest, stockai_token: Optional[str] = Cookie(None)):
+async def analyze(
+    req: AnalyzeRequest,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
     ticker = req.ticker.upper().strip()
-    user = get_current_user(stockai_token)
+    user = get_current_user(token=stockai_token, authorization=authorization)
     user_id = user.get("sub", "") if user else ""
 
     df = get_stock_data(ticker, req.period, req.interval)
@@ -195,8 +196,12 @@ async def analyze(req: AnalyzeRequest, stockai_token: Optional[str] = Cookie(Non
     }
 
 @app.post("/chat")
-async def chat_stream(req: ChatRequest, stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def chat_stream(
+    req: ChatRequest,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
@@ -247,8 +252,11 @@ async def chat_stream(req: ChatRequest, stockai_token: Optional[str] = Cookie(No
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
 @app.get("/history")
-async def all_history(stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def all_history(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     items = get_all_history(limit=20, user_id=user.get("sub", ""))
@@ -257,8 +265,12 @@ async def all_history(stockai_token: Optional[str] = Cookie(None)):
     return items
 
 @app.get("/history/{ticker}")
-async def ticker_history(ticker: str, stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def ticker_history(
+    ticker: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     items = get_history(ticker.upper(), limit=10, user_id=user.get("sub", ""))
@@ -267,8 +279,12 @@ async def ticker_history(ticker: str, stockai_token: Optional[str] = Cookie(None
     return items
 
 @app.get("/analysis/{doc_id}")
-async def load_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def load_analysis(
+    doc_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     doc = get_analysis(doc_id)
@@ -279,8 +295,12 @@ async def load_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(None)
     return doc
 
 @app.delete("/analysis/{doc_id}")
-async def remove_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def remove_analysis(
+    doc_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     doc = get_analysis(doc_id)
@@ -290,8 +310,12 @@ async def remove_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(Non
     return {"deleted": doc_id}
 
 @app.post("/compare")
-async def compare_analyses(req: CompareRequest, stockai_token: Optional[str] = Cookie(None)):
-    user = get_current_user(stockai_token)
+async def compare_analyses(
+    req: CompareRequest,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 

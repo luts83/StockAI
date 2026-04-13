@@ -609,15 +609,32 @@ const API = IS_LOCAL
 const fmtNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—");
 const fmtDollar = (v) => (typeof v === "number" && Number.isFinite(v) ? "$" + v.toLocaleString() : "—");
 
+// ── 토큰 관리 (localStorage 기반, 쿠키 크로스도메인 문제 해결) ──
+function getToken() { return localStorage.getItem("stockai_token") || null; }
+function setToken(t) { localStorage.setItem("stockai_token", t); }
+function clearToken() { localStorage.removeItem("stockai_token"); }
+function authHeaders() {
+  const t = getToken();
+  return t ? { "Authorization": `Bearer ${t}` } : {};
+}
+
 let currentUser = null;
 let period = "6mo";
 
 if (typeof marked !== 'undefined') marked.setOptions({ breaks: true, gfm: true });
 
 async function initAuth() {
+  // OAuth 콜백에서 URL 파라미터로 전달된 토큰 저장
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlToken = urlParams.get("token");
+  if (urlToken) {
+    setToken(urlToken);
+    window.history.replaceState({}, "", window.location.pathname);
+  }
+
   try {
     const res = await fetch(`${API}/auth/me`, {
-      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       mode: "cors"
     });
     const data = await res.json();
@@ -625,7 +642,7 @@ async function initAuth() {
   } catch (_) {
     currentUser = null;
   }
-  if (!currentUser) clearSensitiveContent(); // 비로그인 시 즉시 데이터 삭제
+  if (!currentUser) { clearToken(); clearSensitiveContent(); }
   renderAuthArea();
   updateLockUI();
   goHome();
@@ -697,9 +714,10 @@ async function logout() {
   try {
     await fetch(`${API}/auth/logout`, {
       method: "POST",
-      credentials: "include",
+      headers: { ...authHeaders() },
       mode: "cors"
     });
+    clearToken();
   } catch (_) {}
   currentUser = null;
   clearSensitiveContent(); // 로그아웃 즉시 데이터 삭제
@@ -763,8 +781,7 @@ async function runAnalysis() {
 
   try {
     const res = await fetch(`${API}/analyze`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      credentials: "include",
+      method:"POST", headers:{"Content-Type":"application/json", ...authHeaders()},
       body: JSON.stringify({ ticker, period, interval:"1d" })
     });
     if(!res.ok) { const e=await res.json(); throw new Error(e.detail||"분석 실패"); }
@@ -929,8 +946,7 @@ async function toggleNews(idx) {
 
   try {
     const res = await fetch(`${API}/news/summary`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      credentials: "include",
+      method:"POST", headers:{"Content-Type":"application/json", ...authHeaders()},
       body: JSON.stringify({ title:n.title, summary:n.summary||"", url:n.url||"", source:n.source||"", ticker:currentTicker })
     });
     if(!res.ok) throw new Error("요약 실패");
@@ -1005,8 +1021,7 @@ async function sendChat() {
 
   try {
     const res = await fetch(`${API}/chat`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      credentials: "include",
+      method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()},
       body: JSON.stringify({ doc_id: currentDocId, question, section: selectedSection })
     });
     if (!res.ok) throw new Error("답변 실패");
@@ -1065,7 +1080,7 @@ function toggleHistory() {
 // 히스토리 불러오기
 async function loadHistory() {
   try {
-    const res = await fetch(`${API}/history`, { credentials: "include" });
+    const res = await fetch(`${API}/history`, { headers: { ...authHeaders() } });
     if (!res.ok) return;
     const items = await res.json();
     renderHistory(items);
@@ -1157,7 +1172,7 @@ function renderHistory(items) {
 
 async function loadSavedAnalysis(docId) {
   try {
-    const res = await fetch(`${API}/analysis/${docId}`, { credentials: "include" });
+    const res = await fetch(`${API}/analysis/${docId}`, { headers: { ...authHeaders() } });
     const doc = await res.json();
     const inds = doc.indicators || {};
 
@@ -1254,7 +1269,7 @@ async function loadSavedAnalysis(docId) {
 
 async function deleteHistory(docId) {
   if (!confirm("이 분석을 삭제할까요?")) return;
-  await fetch(`${API}/analysis/${docId}`, { method: "DELETE", credentials: "include" });
+  await fetch(`${API}/analysis/${docId}`, { method: "DELETE", headers: { ...authHeaders() } });
   loadHistory();
 }
 
@@ -1300,8 +1315,7 @@ async function runCompare() {
 
   try {
     const res = await fetch(`${API}/compare`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      credentials: "include",
+      method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()},
       body: JSON.stringify({doc_id_a: compareIds[0].id, doc_id_b: compareIds[1].id})
     });
     const reader = res.body.getReader();
