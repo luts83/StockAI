@@ -115,7 +115,7 @@ header {
 #error-msg { display:none; margin:32px auto; max-width:440px; background:rgba(248,113,113,0.06); border:1px solid rgba(248,113,113,0.25); border-radius:12px; padding:24px; text-align:center; color:var(--red); font-size:14px; }
 
 /* RESULTS */
-#results { display:none; position:relative; }
+#results { display:none; }
 
 /* TICKER HEADER */
 .ticker-header { display:flex; flex-wrap:wrap; align-items:flex-start; gap:20px; margin-bottom:20px; background:var(--card); border:1px solid var(--border2); border-radius:14px; padding:22px 26px; }
@@ -147,12 +147,11 @@ header {
 
 /* 인스타 카드 버튼 */
 #insta-card-btn {
-  /* 데스크톱: results 내 우측 상단에 절대 위치 */
-  position:absolute; top:14px; right:20px;
+  margin-left:auto;
   font-size:11px; padding:4px 10px;
   background:var(--blue); border:none; border-radius:6px;
   color:#fff; cursor:pointer; font-weight:600;
-  transition:opacity .15s, transform .1s; white-space:nowrap; z-index:10;
+  transition:opacity .15s, transform .1s; white-space:nowrap;
 }
 #insta-card-btn:hover  { opacity:.85; transform:translateY(-1px); }
 #insta-card-btn:active { transform:translateY(0); }
@@ -556,16 +555,14 @@ header {
       <button class="tab-btn" onclick="switchTab(1, this)">📰 뉴스</button>
     </div>
 
-    <!-- 인스타 카드 저장 버튼: 데스크톱=패널 헤더 우측, 모바일=화면 우하단 고정 -->
-    <button id="insta-card-btn" style="display:none" onclick="downloadCards()">
-      📸 카드 저장
-    </button>
-
     <div class="two-col">
       <div class="panel tab-active" id="panel-0">
         <div class="panel-head">
           <span class="panel-icon">🤖</span>
           <span class="panel-title">AI 분석 리포트</span>
+          <button id="insta-card-btn" style="display:none" onclick="downloadCards()">
+            📸 카드 저장
+          </button>
         </div>
         <div class="panel-body">
           <div id="signal-area"></div>
