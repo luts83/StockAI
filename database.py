@@ -1,6 +1,10 @@
 from pymongo import MongoClient
 from datetime import datetime
+from dotenv import load_dotenv
+import certifi
 import os
+
+load_dotenv()
 
 MONGO_URI = os.getenv("MONGODB_URI", "")
 _client = None
@@ -8,7 +12,12 @@ _client = None
 def get_db():
     global _client
     if _client is None:
-        _client = MongoClient(MONGO_URI)
+        _client = MongoClient(
+            MONGO_URI,
+            tls=True,
+            tlsCAFile=certifi.where(),
+            serverSelectionTimeoutMS=10000,
+        )
     return _client["stockai"]
 
 # ── 분석 저장 ──────────────────────────────────────────

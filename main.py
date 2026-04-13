@@ -25,7 +25,13 @@ from auth import (
 app = FastAPI(title="Stock Analyzer API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+        "http://127.0.0.1:8000",
+        "https://luts83.github.io",
+        "https://web-production-3b251.up.railway.app",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
@@ -209,6 +215,12 @@ async def chat_stream(req: ChatRequest, stockai_token: Optional[str] = Cookie(No
 질문이 특정 섹션({req.section})에 관한 것이라면 해당 부분에 집중해서 답변하세요.
 한국어로 답변하고, 구체적인 수치와 근거를 포함하세요.
 
+답변 규칙:
+- 서론 없이 바로 본론으로 시작
+- 핵심 내용만 간결하게 (3~5문장 이내)
+- 숫자와 구체적 근거 반드시 포함
+- 추가 궁금한 점은 사용자가 직접 질문하도록 유도
+
 === 기존 분석 ===
 {doc['analysis']}
 === 분석 종료 ==="""
@@ -223,7 +235,7 @@ async def chat_stream(req: ChatRequest, stockai_token: Optional[str] = Cookie(No
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=1500,
+            max_tokens=600,
             system=system,
             messages=messages,
         ) as stream:

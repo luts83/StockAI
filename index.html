@@ -258,6 +258,7 @@ header {
 
 /* HISTORY SECTION */
 .history-section { background:var(--card); border:1px solid var(--border2); border-radius:14px; overflow:hidden; margin-top:20px; }
+.history-section.locked { overflow:visible; }
 .history-head { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card2); cursor:pointer; }
 .history-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.7px; color:var(--muted); display:flex; align-items:center; gap:8px; }
 .history-toggle { color:var(--dim); font-size:11px; transition:transform 0.2s; }
@@ -303,24 +304,45 @@ header {
 
 /* LOCK OVERLAY */
 .lock-overlay { position:relative; }
-.lock-overlay::after { display:none; }
-.lock-overlay.locked::after {
-  content:''; position:absolute; inset:0;
-  background:rgba(9,12,16,0.6); border-radius:inherit;
-  backdrop-filter:blur(2px); z-index:10;
-  cursor:pointer;
-}
+.locked { pointer-events:none; user-select:none; }
 .lock-badge {
-  display:none; position:absolute; top:50%; left:50%;
-  transform:translate(-50%,-50%); z-index:11;
-  background:var(--card2); border:1px solid var(--border2);
-  border-radius:10px; padding:12px 18px; text-align:center;
-  pointer-events:none;
+  display:none; position:absolute; top:10px; right:12px; z-index:20;
+  background:rgba(20,24,32,0.92); border:1px solid var(--border2);
+  border-radius:20px; padding:5px 10px;
+  display:flex; align-items:center; gap:5px;
+  font-size:11px; font-weight:600; color:var(--muted);
+  white-space:nowrap; pointer-events:auto; cursor:pointer;
+  box-shadow:0 2px 8px rgba(0,0,0,0.35);
+  opacity:1 !important;
+  transition:background 0.15s;
 }
-.lock-overlay.locked .lock-badge { display:block; }
-.lock-badge-icon { font-size:20px; margin-bottom:4px; }
-.lock-badge-text { font-size:12px; color:var(--muted); }
-.lock-badge-cta { font-size:12px; color:var(--blue); font-weight:700; margin-top:4px; }
+.locked .lock-badge { display:flex; }
+.lock-badge:hover { background:rgba(40,48,64,0.95); color:#fff; }
+.lock-badge-icon { font-size:12px; line-height:1; }
+.lock-badge-text { font-size:11px; }
+.lock-badge-cta { display:none; }
+.lock-badge-icon-large { display:none; }
+
+/* RECENT ANALYSIS PREVIEW */
+#recent-preview {
+  display:none; max-width:640px; margin:20px auto 0; padding:0 24px;
+  box-sizing:border-box;
+}
+.recent-preview-head {
+  display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:10px;
+}
+.recent-preview-title {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.8px; color:var(--muted);
+}
+.recent-preview-all {
+  font-size:11px; color:var(--blue); cursor:pointer; background:none;
+  border:none; font-family:inherit; padding:0;
+}
+.recent-preview-all:hover { text-decoration:underline; }
+.recent-preview-list { display:flex; flex-direction:column; gap:6px; }
+@media(max-width:600px){ #recent-preview { padding:0 14px; } }
 
 /* LOGIN MODAL */
 .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center; }
@@ -368,12 +390,17 @@ header {
   .main { padding: 14px 14px 60px; }
 
   /* 가격 헤더: 세로 스택 */
-  .ticker-header { flex-direction: column; gap: 14px; padding: 16px; margin-bottom: 14px; }
-  .th-left { min-width: unset; }
+  .ticker-header { flex-direction: column; align-items: stretch; gap: 12px; padding: 16px; margin-bottom: 14px; }
+  .th-left { min-width: unset; width: 100%; }
   .th-price { font-size: 36px; letter-spacing: -1px; }
-  .ind-strip { min-width: unset; grid-template-columns: 1fr 1fr; }
-  .ind-cell { padding: 12px 14px; }
+  .th-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-start; align-items: center; }
+  .badge { font-size: 11px; padding: 4px 9px; }
+  /* 지표 2×2 그리드 — flex:2 및 min-width 해제 후 100% 너비 */
+  .ind-strip { flex: none; min-width: unset; width: 100%; grid-template-columns: 1fr 1fr; }
+  .ind-cell { padding: 14px 10px; align-items: center; text-align: center; }
+  .ind-lbl { text-align: center; font-size: 9px; }
   .ind-val { font-size: 18px; }
+  .ind-sub { font-size: 10px; }
 
   /* 차트 topbar pills 숨김 */
   .chart-pills { display: none; }
@@ -414,7 +441,7 @@ header {
 <body>
 
 <header>
-  <div class="logo">
+  <div class="logo" onclick="goHome()" style="cursor:pointer" title="홈으로">
     <div class="logo-icon">📈</div>
     StockAI
   </div>
@@ -449,6 +476,13 @@ header {
       <span class="q-chip" onclick="setTicker('035420.KS')">NAVER</span>
     </div>
   </div>
+</div>
+
+<div id="recent-preview">
+  <div class="recent-preview-head">
+    <span class="recent-preview-title">최근 분석</span>
+  </div>
+  <div class="recent-preview-list" id="recent-preview-list"></div>
 </div>
 
 <div class="main">
@@ -525,7 +559,7 @@ header {
 
 
     <!-- CHAT SECTION -->
-    <div class="chat-section lock-overlay" id="chat-section" style="display:none"><div class="lock-badge"><div class="lock-badge-icon">🔒</div><div class="lock-badge-text">추가 질문은 회원 전용</div><div class="lock-badge-cta">로그인하기 →</div></div>
+    <div class="chat-section lock-overlay" id="chat-section" style="display:none"><div class="lock-badge"><span class="lock-badge-icon">🔒</span><span class="lock-badge-text">로그인 필요</span></div>
       <div class="chat-section-head">
         <span style="font-size:14px">💬</span>
         <span class="chat-section-title">추가 질문하기</span>
@@ -547,7 +581,7 @@ header {
     </div>
 
     <!-- HISTORY SECTION -->
-    <div class="history-section lock-overlay" id="history-section" style="display:none"><div class="lock-badge"><div class="lock-badge-icon">🔒</div><div class="lock-badge-text">히스토리는 회원 전용</div><div class="lock-badge-cta">로그인하기 →</div></div>
+    <div class="history-section lock-overlay" id="history-section" style="display:none"><div class="lock-badge"><span class="lock-badge-icon">🔒</span><span class="lock-badge-text">로그인 필요</span></div>
       <div class="history-head" onclick="toggleHistory()">
         <span class="history-title">🕐 분석 히스토리</span>
         <span class="history-toggle">▼</span>
@@ -569,12 +603,120 @@ header {
 // 로컬이면 localhost, 배포 환경이면 Railway URL 자동 선택
 const IS_LOCAL = ["localhost", "127.0.0.1", ""].includes(window.location.hostname);
 const API = IS_LOCAL
-  ? "http://localhost:8000"
-  : "https://stockai-production.up.railway.app";
+  ? "http://127.0.0.1:8000"
+  : "https://web-production-3b251.up.railway.app";
 
+const fmtNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—");
+const fmtDollar = (v) => (typeof v === "number" && Number.isFinite(v) ? "$" + v.toLocaleString() : "—");
+
+let currentUser = null;
 let period = "6mo";
 
 if (typeof marked !== 'undefined') marked.setOptions({ breaks: true, gfm: true });
+
+async function initAuth() {
+  try {
+    const res = await fetch(`${API}/auth/me`, {
+      credentials: "include",
+      mode: "cors"
+    });
+    const data = await res.json();
+    currentUser = data?.user || null;
+  } catch (_) {
+    currentUser = null;
+  }
+  if (!currentUser) clearSensitiveContent(); // 비로그인 시 즉시 데이터 삭제
+  renderAuthArea();
+  updateLockUI();
+  goHome();
+  if (currentUser) loadHistory();
+}
+
+// 비로그인 상태에서 이전 사용자의 데이터를 DOM에서 완전히 제거
+function clearSensitiveContent() {
+  const historyList = document.getElementById("history-list");
+  if (historyList) historyList.innerHTML = "";
+  const chatMessages = document.getElementById("chat-messages");
+  if (chatMessages) chatMessages.innerHTML = "";
+  const recentList = document.getElementById("recent-preview-list");
+  if (recentList) recentList.innerHTML = "";
+  const compareResult = document.getElementById("compare-result");
+  if (compareResult) { compareResult.innerHTML = ""; compareResult.style.display = "none"; }
+  // 분석 결과도 초기화
+  const resAnalysis = document.getElementById("res-analysis");
+  if (resAnalysis) resAnalysis.innerHTML = "";
+  currentDocId = "";
+  currentTicker = "";
+  newsData = [];
+}
+
+function renderAuthArea() {
+  const authArea = document.getElementById("auth-area");
+  if (!authArea) return;
+  if (currentUser) {
+    const displayName = currentUser.name || currentUser.email || "회원";
+    const avatar = currentUser.picture
+      ? `<img src="${currentUser.picture}" alt="profile" style="width:22px;height:22px;border-radius:50%;object-fit:cover">`
+      : "";
+    authArea.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px">
+        ${avatar}
+        <span style="font-size:12px;color:var(--muted)">${displayName}</span>
+        <button class="logout-btn" onclick="logout()">로그아웃</button>
+      </div>
+    `;
+  } else {
+    authArea.innerHTML = `<button class="login-btn" onclick="loginWithGoogle()">Google 로그인</button>`;
+  }
+}
+
+function updateLockUI() {
+  const locked = !currentUser;
+  const chatSection = document.getElementById("chat-section");
+  const historySection = document.getElementById("history-section");
+
+  [chatSection, historySection].forEach(el => {
+    if (!el) return;
+    el.classList.toggle("locked", locked);
+
+    const badge = el.querySelector(".lock-badge");
+    if (badge) {
+      badge.style.display = locked ? "flex" : "none";
+      badge.onclick = locked
+        ? (e) => { e.stopPropagation(); showLoginModal(); }
+        : null;
+    }
+  });
+}
+
+function loginWithGoogle() {
+  window.location.href = `${API}/auth/login`;
+}
+
+async function logout() {
+  try {
+    await fetch(`${API}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      mode: "cors"
+    });
+  } catch (_) {}
+  currentUser = null;
+  clearSensitiveContent(); // 로그아웃 즉시 데이터 삭제
+  renderAuthArea();
+  updateLockUI();
+  goHome();
+}
+
+function showLoginModal() {
+  const modal = document.getElementById("login-modal");
+  if (modal) modal.classList.add("open");
+}
+
+function closeLoginModal() {
+  const modal = document.getElementById("login-modal");
+  if (modal) modal.classList.remove("open");
+}
 
 // 탭 전환 (모바일)
 function switchTab(idx, btn) {
@@ -611,6 +753,8 @@ async function runAnalysis() {
   document.getElementById("results").style.display = "none";
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("loading").style.display = "block";
+  const preview = document.getElementById("recent-preview");
+  if (preview) preview.style.display = "none";
   document.getElementById("loading-ticker").textContent = ticker;
   document.getElementById("analyze-btn").disabled = true;
   document.querySelectorAll(".step-pill").forEach(p => p.className="step-pill");
@@ -620,6 +764,7 @@ async function runAnalysis() {
   try {
     const res = await fetch(`${API}/analyze`, {
       method:"POST", headers:{"Content-Type":"application/json"},
+      credentials: "include",
       body: JSON.stringify({ ticker, period, interval:"1d" })
     });
     if(!res.ok) { const e=await res.json(); throw new Error(e.detail||"분석 실패"); }
@@ -643,40 +788,44 @@ function renderResults(data) {
   const inds = data.indicators;
 
   document.getElementById("res-ticker").textContent = data.ticker + "  ·  1D  ·  " + new Date().toLocaleDateString("ko-KR");
-  document.getElementById("res-price").textContent = "$" + data.current_price.toLocaleString();
+  document.getElementById("res-price").textContent = fmtDollar(data.current_price);
 
   const chEl = document.getElementById("res-change");
-  const up = data.change_pct >= 0;
-  chEl.textContent = (up?"▲ +":"▼ ") + data.change_pct + "%";
+  const up = (data.change_pct ?? 0) >= 0;
+  chEl.textContent = (up?"▲ +":"▼ ") + (data.change_pct ?? "—") + "%";
   chEl.className = "badge " + (up?"badge-up":"badge-dn");
-  document.getElementById("res-ma-status").textContent = data.current_price > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래";
-  document.getElementById("res-vol-status").textContent = "MA20  $" + inds.ma20.toLocaleString();
+  document.getElementById("res-ma-status").textContent =
+    (data.current_price != null && inds.ma200 != null)
+      ? (data.current_price > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래")
+      : "—";
+  document.getElementById("res-vol-status").textContent = "MA20  " + fmtDollar(inds.ma20);
 
-  const rsi=inds.rsi, rsiC=rsi>70?"c-red":rsi<30?"c-green":"c-muted";
-  const rsiLbl=rsi>70?"과매수":rsi<30?"과매도":"중립";
-  const macdBull=inds.macd>inds.macd_signal;
-  const ma60val=inds.ma60??inds.ma200;
+  const rsi = inds.rsi ?? null;
+  const rsiC = rsi == null ? "c-muted" : rsi > 70 ? "c-red" : rsi < 30 ? "c-green" : "c-muted";
+  const rsiLbl = rsi == null ? "—" : rsi > 70 ? "과매수" : rsi < 30 ? "과매도" : "중립";
+  const macdBull = (inds.macd ?? 0) > (inds.macd_signal ?? 0);
+  const ma60val = inds.ma60 ?? inds.ma200 ?? 0;
 
   document.getElementById("res-indicators").innerHTML = `
     <div class="ind-cell">
       <div class="ind-lbl">RSI (14)</div>
-      <div class="ind-val ${rsiC}">${rsi}</div>
+      <div class="ind-val ${rsiC}">${rsi ?? "—"}</div>
       <div class="ind-sub ${rsiC}">${rsiLbl}</div>
     </div>
     <div class="ind-cell">
       <div class="ind-lbl">MACD</div>
-      <div class="ind-val ${macdBull?"c-green":"c-red"}">${inds.macd}</div>
+      <div class="ind-val ${macdBull?"c-green":"c-red"}">${inds.macd ?? "—"}</div>
       <div class="ind-sub ${macdBull?"c-green":"c-red"}">${macdBull?"▲ 골든크로스":"▼ 데드크로스"}</div>
     </div>
     <div class="ind-cell">
       <div class="ind-lbl">MA 60</div>
-      <div class="ind-val c-blue">$${Number(ma60val).toLocaleString()}</div>
-      <div class="ind-sub c-muted">${data.current_price>(ma60val||0)?"▲ 위":"▼ 아래"}</div>
+      <div class="ind-val c-blue">${fmtDollar(ma60val || null)}</div>
+      <div class="ind-sub c-muted">${(data.current_price ?? 0) > (ma60val || 0)?"▲ 위":"▼ 아래"}</div>
     </div>
     <div class="ind-cell">
       <div class="ind-lbl">MA 200</div>
-      <div class="ind-val c-yellow">$${inds.ma200.toLocaleString()}</div>
-      <div class="ind-sub c-muted">${data.current_price>inds.ma200?"▲ 위":"▼ 아래"}</div>
+      <div class="ind-val c-yellow">${fmtDollar(inds.ma200)}</div>
+      <div class="ind-sub c-muted">${(data.current_price ?? 0) > (inds.ma200 ?? 0)?"▲ 위":"▼ 아래"}</div>
     </div>`;
 
   document.getElementById("res-chart").src = "data:image/png;base64," + data.chart_image;
@@ -716,6 +865,9 @@ function renderResults(data) {
   document.getElementById("history-section").style.display = "block";
   updateLockUI();
   if (currentUser) loadHistory();
+
+  const rp = document.getElementById("recent-preview");
+  if (rp) rp.style.display = "none";
 
   document.getElementById("results").style.display = "block";
   document.getElementById("results").scrollIntoView({ behavior:"smooth", block:"start" });
@@ -778,6 +930,7 @@ async function toggleNews(idx) {
   try {
     const res = await fetch(`${API}/news/summary`, {
       method:"POST", headers:{"Content-Type":"application/json"},
+      credentials: "include",
       body: JSON.stringify({ title:n.title, summary:n.summary||"", url:n.url||"", source:n.source||"", ticker:currentTicker })
     });
     if(!res.ok) throw new Error("요약 실패");
@@ -828,14 +981,19 @@ document.getElementById("chat-input").addEventListener("input", function() {
   this.style.height = Math.min(this.scrollHeight, 100) + "px";
 });
 document.getElementById("chat-input").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
 });
 
+let chatInFlight = false;
+
 async function sendChat() {
+  if (!currentUser) { showLoginModal(); return; }
+  if (chatInFlight) return;
   const input = document.getElementById("chat-input");
   const question = input.value.trim();
   if (!question || !currentDocId) return;
 
+  chatInFlight = true;
   input.value = ""; input.style.height = "auto";
   document.getElementById("chat-send-btn").disabled = true;
 
@@ -848,6 +1006,7 @@ async function sendChat() {
   try {
     const res = await fetch(`${API}/chat`, {
       method: "POST", headers: {"Content-Type": "application/json"},
+      credentials: "include",
       body: JSON.stringify({ doc_id: currentDocId, question, section: selectedSection })
     });
     if (!res.ok) throw new Error("답변 실패");
@@ -866,6 +1025,7 @@ async function sendChat() {
   } catch(err) {
     assistantBubble.innerHTML = `<span style="color:var(--red)">오류: ${err.message}</span>`;
   } finally {
+    chatInFlight = false;
     document.getElementById("chat-send-btn").disabled = false;
   }
 }
@@ -898,17 +1058,77 @@ function appendChatBubble(role, content, section, streaming=false) {
 
 // 히스토리 토글
 function toggleHistory() {
+  if (!currentUser) { showLoginModal(); return; }
   document.getElementById("history-section").classList.toggle("open");
 }
 
 // 히스토리 불러오기
 async function loadHistory() {
   try {
-    const res = await fetch(`${API}/history`);
+    const res = await fetch(`${API}/history`, { credentials: "include" });
+    if (!res.ok) return;
     const items = await res.json();
     renderHistory(items);
+    renderRecentPreview(items);
     document.getElementById("history-section").style.display = "block";
   } catch(e) { console.error("히스토리 로드 실패", e); }
+}
+
+function renderRecentPreview(items) {
+  const wrap = document.getElementById("recent-preview");
+  const list = document.getElementById("recent-preview-list");
+  if (!wrap || !list) return;
+
+  // 분석 결과가 표시 중이면 최근 분석 섹션을 열지 않음
+  const resultsVisible = document.getElementById("results").style.display === "block";
+  if (resultsVisible) { wrap.style.display = "none"; return; }
+
+  if (!items || !items.length) { wrap.style.display = "none"; return; }
+
+  const recent = items.slice(0, 3);
+  list.innerHTML = recent.map(item => {
+    const date = new Date(item.created_at).toLocaleDateString("ko-KR", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
+    const sigClass = item.signal === "BUY" ? "sig-buy" : item.signal === "SELL" ? "sig-sell" : "sig-watch";
+    const sigText = item.signal === "BUY" ? "🟢 매수" : item.signal === "SELL" ? "🔴 매도" : "👀 관망";
+    const chatCount = (item.chat_history || []).length / 2 | 0;
+    return `<div class="history-item" onclick="loadSavedAnalysis('${item._id}')">
+      <span class="history-ticker">${item.ticker}</span>
+      <span class="history-date">${date}</span>
+      <span class="history-signal ${sigClass}">${sigText}</span>
+      ${chatCount ? `<span class="history-chats">💬${chatCount}</span>` : ""}
+      <div class="history-actions" onclick="event.stopPropagation()">
+        <button class="history-btn compare-btn" onclick="selectCompare('${item._id}', '${item.ticker}', '${date}')">비교</button>
+        <button class="history-btn" onclick="deleteHistory('${item._id}')">삭제</button>
+      </div>
+    </div>`;
+  }).join("");
+
+  wrap.style.display = "block";
+}
+
+function scrollToHistory() {
+  const sec = document.getElementById("history-section");
+  if (!sec) return;
+  sec.classList.add("open");
+  sec.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function goHome() {
+  // 결과/로딩 숨기기
+  document.getElementById("results").style.display = "none";
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("error-msg").style.display = "none";
+  document.getElementById("chat-section").style.display = "none";
+  document.getElementById("history-section").style.display = "none";
+  // 최근 분석 미리보기 복원 (로그인 상태일 때만)
+  if (currentUser) {
+    const rp = document.getElementById("recent-preview");
+    if (rp && document.getElementById("recent-preview-list").children.length > 0) {
+      rp.style.display = "block";
+    }
+  }
+  // 검색창으로 스크롤
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function renderHistory(items) {
@@ -937,31 +1157,96 @@ function renderHistory(items) {
 
 async function loadSavedAnalysis(docId) {
   try {
-    const res = await fetch(`${API}/analysis/${docId}`);
+    const res = await fetch(`${API}/analysis/${docId}`, { credentials: "include" });
     const doc = await res.json();
+    const inds = doc.indicators || {};
 
-    // 분석 결과 화면에 렌더링
     currentDocId = docId;
-    document.getElementById("res-ticker").textContent = doc.ticker + "  ·  " + doc.period + "  ·  " + doc.created_at.slice(0,10);
-    document.getElementById("res-price").textContent = "$" + (doc.indicators?.ma20 || "—");
+    currentTicker = doc.ticker;
+    newsData = doc.news || [];
 
-    const cleanAnalysis = doc.analysis.replace(/\nSIGNAL:(BUY|WATCH|SELL)\s*$/m, "").trim();
+    // 티커 헤더
+    document.getElementById("res-ticker").textContent =
+      doc.ticker + "  ·  " + (doc.period || "") + "  ·  " + (doc.created_at || "").slice(0, 10);
+
+    // 가격 — 저장된 분석에는 current_price 없으므로 MA20을 참조가로 표시
+    const savedPrice = inds.ma20 || null;
+    document.getElementById("res-price").textContent = savedPrice ? fmtDollar(savedPrice) : "—";
+
+    // 배지
+    document.getElementById("res-change").textContent = "저장된 분석";
+    document.getElementById("res-change").className = "badge badge-gray";
+    document.getElementById("res-ma-status").textContent =
+      inds.ma200 ? (inds.ma20 > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래") : "—";
+    document.getElementById("res-vol-status").textContent = "MA20  " + fmtDollar(inds.ma20);
+
+    // 지표 스트립 (RSI / MACD / MA60 / MA200)
+    const rsi = inds.rsi ?? null;
+    const rsiC = rsi == null ? "c-muted" : rsi > 70 ? "c-red" : rsi < 30 ? "c-green" : "c-muted";
+    const rsiLbl = rsi == null ? "—" : rsi > 70 ? "과매수" : rsi < 30 ? "과매도" : "중립";
+    const macdBull = (inds.macd ?? 0) > (inds.macd_signal ?? 0);
+    const ma60val = inds.ma60 ?? inds.ma200 ?? 0;
+
+    document.getElementById("res-indicators").innerHTML = `
+      <div class="ind-cell">
+        <div class="ind-lbl">RSI (14)</div>
+        <div class="ind-val ${rsiC}">${rsi ?? "—"}</div>
+        <div class="ind-sub ${rsiC}">${rsiLbl}</div>
+      </div>
+      <div class="ind-cell">
+        <div class="ind-lbl">MACD</div>
+        <div class="ind-val ${macdBull?"c-green":"c-red"}">${inds.macd ?? "—"}</div>
+        <div class="ind-sub ${macdBull?"c-green":"c-red"}">${macdBull?"▲ 골든크로스":"▼ 데드크로스"}</div>
+      </div>
+      <div class="ind-cell">
+        <div class="ind-lbl">MA 60</div>
+        <div class="ind-val c-blue">${fmtDollar(ma60val || null)}</div>
+        <div class="ind-sub c-muted">${inds.ma20 > (ma60val||0)?"▲ 위":"▼ 아래"}</div>
+      </div>
+      <div class="ind-cell">
+        <div class="ind-lbl">MA 200</div>
+        <div class="ind-val c-yellow">${fmtDollar(inds.ma200)}</div>
+        <div class="ind-sub c-muted">${inds.ma20 > (inds.ma200??0)?"▲ 위":"▼ 아래"}</div>
+      </div>`;
+
+    // 차트
+    if (doc.chart_b64) document.getElementById("res-chart").src = "data:image/png;base64," + doc.chart_b64;
+
+    // 시그널
+    const analysis = doc.analysis || "";
+    const sigMatch = analysis.match(/SIGNAL:(BUY|WATCH|SELL)/);
+    let signal = "watch", sigIcon = "👀", sigText = "관망 구간", sigSub = "방향성 확인 필요";
+    if (sigMatch) {
+      if (sigMatch[1] === "BUY")  { signal="buy";  sigIcon="🟢"; sigText="매수 검토 구간"; sigSub="기술적 지표 + 추세 긍정적"; }
+      if (sigMatch[1] === "SELL") { signal="warn"; sigIcon="🔴"; sigText="매수 자제 구간"; sigSub="하락 추세 또는 악재 지속"; }
+    }
+    document.getElementById("signal-area").innerHTML = `
+      <div class="signal-box ${signal}">
+        <div class="signal-icon">${sigIcon}</div>
+        <div><div class="signal-text">${sigText}</div><div class="signal-sub">${sigSub}</div></div>
+      </div>`;
+
+    // 분석 텍스트
+    const cleanAnalysis = analysis.replace(/\nSIGNAL:(BUY|WATCH|SELL)\s*$/m, "").trim();
     document.getElementById("res-analysis").innerHTML = typeof marked !== "undefined"
       ? marked.parse(cleanAnalysis) : cleanAnalysis.replace(/\n/g, "<br>");
 
-    if (doc.chart_b64) document.getElementById("res-chart").src = "data:image/png;base64," + doc.chart_b64;
+    // 뉴스 렌더링
+    renderNews(newsData);
 
-    // 대화 히스토리 복원
+    // 채팅 히스토리 복원
     const chatContainer = document.getElementById("chat-messages");
     chatContainer.innerHTML = "";
-    const history = doc.chat_history || [];
-    for (let i = 0; i < history.length; i++) {
-      appendChatBubble(history[i].role, history[i].content, history[i].section);
-    }
+    (doc.chat_history || []).forEach(m => appendChatBubble(m.role, m.content, m.section));
 
+    // 섹션 표시
     document.getElementById("chat-section").style.display = "block";
+    document.getElementById("history-section").style.display = "block";
+    updateLockUI();
+    const rpEl = document.getElementById("recent-preview");
+    if (rpEl) rpEl.style.display = "none";
     document.getElementById("results").style.display = "block";
-    document.getElementById("results").scrollIntoView({behavior: "smooth"});
+    document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch(e) {
     alert("분석을 불러올 수 없습니다.");
   }
@@ -969,7 +1254,7 @@ async function loadSavedAnalysis(docId) {
 
 async function deleteHistory(docId) {
   if (!confirm("이 분석을 삭제할까요?")) return;
-  await fetch(`${API}/analysis/${docId}`, {method: "DELETE"});
+  await fetch(`${API}/analysis/${docId}`, { method: "DELETE", credentials: "include" });
   loadHistory();
 }
 
@@ -1016,6 +1301,7 @@ async function runCompare() {
   try {
     const res = await fetch(`${API}/compare`, {
       method: "POST", headers: {"Content-Type": "application/json"},
+      credentials: "include",
       body: JSON.stringify({doc_id_a: compareIds[0].id, doc_id_b: compareIds[1].id})
     });
     const reader = res.body.getReader();
@@ -1033,10 +1319,12 @@ async function runCompare() {
   }
 }
 
+initAuth();
+
 </script>
 
 <!-- LOGIN MODAL -->
-<div class="modal-backdrop" id="login-modal">
+<div class="modal-backdrop" id="login-modal" onclick="if(event.target===this)closeLoginModal()">
   <div class="modal-box">
     <div class="modal-title">🔒 회원 전용 기능</div>
     <div class="modal-sub">로그인하면 아래 기능을 모두 사용할 수 있어요</div>
