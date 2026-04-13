@@ -16,8 +16,8 @@ WATERMARK = f"StockAI · {_HANDLE}"
 
 # ── 팔레트 ────────────────────────────────────────────────
 BG     = "#0a0e14"
+BG2    = "#0d1117"
 CARD   = "#161b22"
-CARD2  = "#0d1117"
 BORDER = "#21262d"
 ACCENT = "#4d9fff"
 GREEN  = "#34d399"
