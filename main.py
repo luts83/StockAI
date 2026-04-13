@@ -4,7 +4,9 @@ from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import anthropic
+import io
 import math
+import zipfile
 import uvicorn
 
 from analyzer import get_stock_data, calculate_indicators
@@ -373,6 +375,43 @@ async def news_summary_stream(req: NewsSummaryRequest):
                 yield text
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+
+@app.get("/card/{doc_id}")
+async def create_card(
+    doc_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """분석 결과 → 인스타그램 카드 4장 ZIP 다운로드"""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+
+    doc = get_analysis(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
+    if doc.get("user_id") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+    from card import generate_cards
+    cards = generate_cards(doc)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, data in cards:
+            zf.writestr(filename, data)
+    zip_buf.seek(0)
+
+    ticker = doc.get("ticker", "card")
+    date   = (doc.get("created_at") or "")[:10].replace("-", "")
+    fname  = f"{ticker}_{date}_cards.zip"
+
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
 
 @app.get("/health")
 def health():

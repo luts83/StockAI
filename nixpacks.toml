@@ -1,0 +1,5 @@
+[phases.setup]
+aptPkgs = ["fonts-nanum", "fonts-nanum-coding", "fontconfig"]
+
+[phases.build]
+cmds = ["fc-cache -fv"]
