@@ -4,9 +4,12 @@ from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import anthropic
+import asyncio
 import io
+import json as _json
 import math
 import os
+import re as _re
 import zipfile
 import uvicorn
 from dotenv import load_dotenv
@@ -383,6 +386,47 @@ async def news_summary_stream(req: NewsSummaryRequest):
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
+def _extract_card_data_sync(claude_client, analysis_text: str) -> dict:
+    """Claude로 분석 텍스트 → 카드뉴스용 구조화 JSON 추출"""
+    prompt = f"""아래 주식 분석 텍스트에서 카드뉴스용 데이터를 JSON으로 추출해줘.
+JSON만 반환, 코드블록이나 설명 없이. 없는 데이터는 null로.
+
+{{
+  "trend_summary": "트렌드 한줄요약 (40자 이내)",
+  "resistance": ["1차저항 $XXX", "2차저항 $XXX"],
+  "support": ["1차지지 $XXX", "2차지지 $XXX"],
+  "volume_note": "거래량 한줄 (없으면 null)",
+  "bull_prob": 강세확률정수(0-100),
+  "bear_prob": 약세확률정수(0-100),
+  "bull_targets": ["1차 목표 $XXX", "2차 목표 $XXX"],
+  "bull_conditions": ["강세 조건1", "강세 조건2", "강세 조건3"],
+  "bear_warnings": ["약세 경고1", "약세 경고2", "약세 경고3"],
+  "stop_loss": "손절 레벨 $XXX",
+  "strategy_conservative": "보수적 투자자 전략 (40자 이내)",
+  "strategy_aggressive": "공격적 투자자 전략 (40자 이내)",
+  "checkpoints": ["체크포인트1", "체크포인트2", "체크포인트3"],
+  "conclusion": "종합 결론 한줄 (50자 이내)",
+  "key_event": "주요 이벤트/날짜 (없으면 null)"
+}}
+
+분석 텍스트:
+{analysis_text[:3000]}
+"""
+    try:
+        msg = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = msg.content[0].text.strip()
+        match = _re.search(r'\{[\s\S]*\}', text)
+        if match:
+            return _json.loads(match.group())
+    except Exception as e:
+        print(f"[card_data extract error] {e}")
+    return {}
+
+
 @app.get("/card/{doc_id}")
 async def create_card(
     doc_id: str,
@@ -404,8 +448,13 @@ async def create_card(
     if doc.get("user_id") != user.get("sub"):
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
+    # Claude로 분석 텍스트 구조화 추출 (스레드풀 — sync 클라이언트)
+    card_data = await asyncio.to_thread(
+        _extract_card_data_sync, claude, doc.get("analysis", "")
+    )
+
     from card import generate_cards
-    cards = await generate_cards(doc)
+    cards = await generate_cards(doc, card_data)
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:

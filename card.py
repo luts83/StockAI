@@ -302,32 +302,62 @@ def _html_chart(ticker: str, chart_b64: str, indicators: dict, created_at: str) 
 
 # ── 카드 3: 트렌드 + 지표 분석 (1080×1350) ──────────────
 
-def _html_analysis(ticker: str, analysis: str, signal: str, created_at: str) -> str:
+def _html_analysis(ticker: str, analysis: str, signal: str,
+                   created_at: str, card_data: dict = None) -> str:
+    cd = card_data or {}
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
-    _, sig_color = _signal_info(signal)
 
     clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
                    flags=re.MULTILINE).strip()
 
-    trend  = _extract_section(clean, ["트렌드", "추세", "전반적", "종합 분석"], 3)
-    if not trend:
-        trend = [_clean(l) for l in clean.split("\n")
-                 if l.strip() and not l.strip().startswith("#")][:3]
+    # 트렌드 요약
+    trend_summary = cd.get("trend_summary") or ""
+    if trend_summary:
+        trend = [trend_summary]
+    else:
+        trend = _extract_section(clean, ["트렌드", "추세", "전반적", "종합 분석"], 2)
+        if not trend:
+            trend = [_clean(l) for l in clean.split("\n")
+                     if l.strip() and not l.strip().startswith("#")][:2]
 
-    sr     = _extract_section(clean, ["지지", "저항", "Support", "Resistance"], 4)
-    if not sr:
-        sr = [_clean(l) for l in clean.split("\n") if re.search(r"\$[\d,]+", l)][:3]
+    # 지지 / 저항
+    resistance = [r for r in (cd.get("resistance") or []) if r]
+    support    = [s for s in (cd.get("support") or []) if s]
+    if resistance or support:
+        sr_html = ""
+        if resistance:
+            sr_html += f'<div style="margin-bottom:14px"><span style="color:{RED};font-size:20px;font-weight:700">저항선</span><br>'
+            sr_html += "".join(f'<div style="color:{WHITE};font-size:24px;margin-top:6px">▲ {_clean(r)}</div>' for r in resistance)
+            sr_html += "</div>"
+        if support:
+            sr_html += f'<div><span style="color:{GREEN};font-size:20px;font-weight:700">지지선</span><br>'
+            sr_html += "".join(f'<div style="color:{WHITE};font-size:24px;margin-top:6px">▼ {_clean(s)}</div>' for s in support)
+            sr_html += "</div>"
+    else:
+        sr_fallback = _extract_section(clean, ["지지", "저항", "Support", "Resistance"], 4) or \
+                      [_clean(l) for l in clean.split("\n") if re.search(r"\$[\d,]+", l)][:3]
+        sr_html = _ul(sr_fallback, YELLOW, 26)
 
-    news   = _extract_section(clean, ["뉴스", "이슈", "News", "catalyst", "모멘텀"], 3)
+    # 거래량
+    vol_note = cd.get("volume_note")
+    vol_html = f'<div style="color:{MUTED};font-size:22px">📊 {_clean(vol_note)}</div>' if vol_note else ""
+
+    # 핵심 이슈
+    key_event = cd.get("key_event")
+    news_section = _extract_section(clean, ["뉴스", "이슈", "News", "catalyst", "모멘텀"], 2)
+    news_items = []
+    if key_event:
+        news_items.append(f"📅 {_clean(key_event)}")
+    news_items += [_clean(n) for n in news_section if _clean(n)]
 
     content = f"""
     {_header(ticker, date_str, "트렌드 분석")}
 
-    <div style="flex:1;overflow:hidden;padding:28px 40px;display:flex;flex-direction:column;gap:0">
-      {_section_card("📈", "전반적 추세", _ul(trend, ACCENT, 26), ACCENT)}
-      {_section_card("🎯", "지지 · 저항선", _ul(sr, YELLOW, 26), YELLOW)}
+    <div style="flex:1;overflow:hidden;padding:24px 40px;display:flex;flex-direction:column;gap:0">
+      {_section_card("📈", "전반적 추세", _ul(trend, ACCENT, 26) + vol_html, ACCENT)}
+      {_section_card("🎯", "지지 · 저항선", sr_html, YELLOW)}
       {_section_card("📰", "핵심 이슈 / 모멘텀",
-                     _ul(news, MUTED, 24) if news else f'<p style="color:{MUTED};font-size:24px">최근 주요 이슈 없음</p>',
+                     _ul(news_items, MUTED, 24) if news_items else f'<p style="color:{MUTED};font-size:24px">최근 주요 이슈 없음</p>',
                      MUTED)}
     </div>
 
@@ -338,67 +368,99 @@ def _html_analysis(ticker: str, analysis: str, signal: str, created_at: str) -> 
 
 # ── 카드 4: 시나리오 (1080×1350) ─────────────────────────
 
-def _html_scenarios(ticker: str, analysis: str, signal: str, created_at: str) -> str:
+def _html_scenarios(ticker: str, analysis: str, signal: str,
+                    created_at: str, card_data: dict = None) -> str:
+    cd = card_data or {}
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
     sig_text, sig_color = _signal_info(signal)
 
     clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
                    flags=re.MULTILINE).strip()
 
-    bull = _extract_section(clean,
-        ["강세 시나리오", "상승 시나리오", "Bullish", "매수 조건", "상승 조건", "강세"], 4)
-    bear = _extract_section(clean,
-        ["약세 시나리오", "하락 시나리오", "Bearish", "매도 조건", "하락 조건", "약세"], 4)
-
+    # 확률 — card_data 우선, fallback 신호 기반
     sig = signal.upper() if signal else "WATCH"
-    bull_pct = 65 if sig == "BUY" else 35 if sig == "SELL" else 50
-    bear_pct = 100 - bull_pct
+    raw_bull = cd.get("bull_prob")
+    raw_bear = cd.get("bear_prob")
+    if raw_bull is not None and raw_bear is not None:
+        try:
+            bull_pct = int(raw_bull)
+            bear_pct = int(raw_bear)
+        except (ValueError, TypeError):
+            bull_pct = 65 if sig == "BUY" else 35 if sig == "SELL" else 50
+            bear_pct = 100 - bull_pct
+    else:
+        bull_pct = 65 if sig == "BUY" else 35 if sig == "SELL" else 50
+        bear_pct = 100 - bull_pct
+
+    # 강세 내용
+    bull_conditions = [_clean(c) for c in (cd.get("bull_conditions") or []) if c]
+    bull_targets    = [_clean(t) for t in (cd.get("bull_targets") or []) if t]
+    if not bull_conditions:
+        bull_conditions = _extract_section(clean,
+            ["강세 시나리오", "상승 시나리오", "Bullish", "매수 조건", "강세"], 3)
+
+    # 약세 내용
+    bear_warnings = [_clean(w) for w in (cd.get("bear_warnings") or []) if w]
+    stop_loss     = _clean(cd.get("stop_loss") or "")
+    if not bear_warnings:
+        bear_warnings = _extract_section(clean,
+            ["약세 시나리오", "하락 시나리오", "Bearish", "매도 조건", "약세"], 3)
 
     def progress_bar(pct: int, color: str) -> str:
         return f"""
-        <div style="background:{BORDER};border-radius:4px;height:10px;margin-bottom:16px;overflow:hidden">
-          <div style="width:{pct}%;height:100%;background:{color};border-radius:4px;
-                      transition:width 0.3s"></div>
+        <div style="background:{BORDER};border-radius:4px;height:12px;
+                    margin-bottom:8px;overflow:hidden">
+          <div style="width:{pct}%;height:100%;background:{color};border-radius:4px"></div>
         </div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;
-                    font-weight:700;color:{color};margin-bottom:16px">{pct}%</div>"""
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;
+                    font-weight:800;color:{color};margin-bottom:14px">{pct}%</div>"""
+
+    def target_row(items: list, color: str, label: str) -> str:
+        if not items:
+            return ""
+        return f"""<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <span style="font-size:18px;color:{MUTED}">{label}:</span>
+          {"".join(f'<span style="background:{_rgba(color,0.2)};border:1px solid {color}66;border-radius:6px;padding:3px 12px;font-size:18px;color:{color};font-weight:700">{t}</span>' for t in items[:2])}
+        </div>"""
 
     content = f"""
     {_header(ticker, date_str, "매수/매도 시나리오")}
 
     <!-- 시그널 배지 -->
-    <div style="display:flex;justify-content:center;padding:20px 40px;
+    <div style="display:flex;justify-content:center;padding:18px 40px;
                 background:{_rgba(sig_color, 0.12)};border-bottom:1px solid {BORDER}">
       <div style="padding:12px 44px;border-radius:50px;background:{_rgba(sig_color, 0.2)};
-                  border:2px solid {sig_color};font-size:26px;font-weight:700;color:{sig_color}">
+                  border:2px solid {sig_color};font-size:24px;font-weight:700;color:{sig_color}">
         {sig_text}
       </div>
     </div>
 
-    <div style="flex:1;overflow:hidden;padding:24px 40px;display:flex;flex-direction:column;gap:16px">
+    <div style="flex:1;overflow:hidden;padding:20px 40px;display:flex;flex-direction:column;gap:14px">
 
-      <!-- 강세 시나리오 -->
+      <!-- 강세 -->
       <div style="flex:1;background:{CARD};border:1px solid {GREEN}33;
-                  border-left:4px solid {GREEN};border-radius:14px;padding:28px 32px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <span style="font-size:26px">🟢</span>
-          <span style="font-family:'Space Grotesk',sans-serif;font-size:24px;
+                  border-left:4px solid {GREEN};border-radius:14px;padding:24px 28px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:24px">🟢</span>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:22px;
                        font-weight:700;color:{GREEN}">강세 시나리오</span>
         </div>
         {progress_bar(bull_pct, GREEN)}
-        {_ul(bull or ["데이터 없음"], GREEN, 24)}
+        {_ul(bull_conditions or ["데이터 없음"], GREEN, 22)}
+        {target_row(bull_targets, GREEN, "목표가")}
       </div>
 
-      <!-- 약세 시나리오 -->
+      <!-- 약세 -->
       <div style="flex:1;background:{CARD};border:1px solid {RED}33;
-                  border-left:4px solid {RED};border-radius:14px;padding:28px 32px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <span style="font-size:26px">🔴</span>
-          <span style="font-family:'Space Grotesk',sans-serif;font-size:24px;
+                  border-left:4px solid {RED};border-radius:14px;padding:24px 28px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:24px">🔴</span>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:22px;
                        font-weight:700;color:{RED}">약세 시나리오</span>
         </div>
         {progress_bar(bear_pct, RED)}
-        {_ul(bear or ["데이터 없음"], RED, 24)}
+        {_ul(bear_warnings or ["데이터 없음"], RED, 22)}
+        {f'<div style="display:flex;align-items:center;gap:8px;margin-top:10px"><span style="font-size:18px;color:{MUTED}">손절:</span><span style="background:{_rgba(RED,0.2)};border:1px solid {RED}66;border-radius:6px;padding:3px 12px;font-size:18px;color:{RED};font-weight:700">{stop_loss}</span></div>' if stop_loss else ""}
       </div>
     </div>
 
@@ -410,87 +472,91 @@ def _html_scenarios(ticker: str, analysis: str, signal: str, created_at: str) ->
 # ── 카드 5: 종합 (1080×1080) ─────────────────────────────
 
 def _html_summary(ticker: str, analysis: str, signal: str,
-                  indicators: dict, created_at: str) -> str:
+                  indicators: dict, created_at: str, card_data: dict = None) -> str:
+    cd = card_data or {}
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
     sig_text, sig_color = _signal_info(signal)
 
     clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
                    flags=re.MULTILINE).strip()
 
-    summary = _extract_section(clean, ["종합 의견", "종합", "결론", "총평", "Conclusion"], 2)
-    if not summary:
+    # 종합 결론
+    conclusion = _clean(cd.get("conclusion") or "")
+    if not conclusion:
         paras = [p.strip() for p in clean.split("\n\n") if p.strip()]
-        last = _clean(paras[-1]) if paras else _clean(clean)
-        summary = textwrap.wrap(last[:100], 38)[:2]
+        conclusion = _clean(paras[-1])[:80] if paras else ""
 
-    cons  = _extract_section(clean, ["보수적", "Conservative", "장기 투자", "안정"], 2)
-    aggr  = _extract_section(clean, ["공격적", "Aggressive", "단기", "단기 투자"], 2)
-    check = _extract_section(clean, ["모니터링", "주목", "확인", "주시", "핵심"], 3)
+    # 투자자 전략
+    cons_txt = _clean(cd.get("strategy_conservative") or "")
+    aggr_txt = _clean(cd.get("strategy_aggressive") or "")
+    if not cons_txt:
+        cons_list = _extract_section(clean, ["보수적", "Conservative", "장기 투자", "안정"], 1)
+        cons_txt = cons_list[0] if cons_list else ""
+    if not aggr_txt:
+        aggr_list = _extract_section(clean, ["공격적", "Aggressive", "단기", "트레이더"], 1)
+        aggr_txt = aggr_list[0] if aggr_list else ""
 
-    rsi       = indicators.get("rsi")
-    ma20      = indicators.get("ma20")
-    macd      = indicators.get("macd", 0) or 0
-    macd_s    = indicators.get("macd_signal", 0) or 0
-    macd_bull = macd > macd_s
-
-    if not check:
-        check = []
+    # 체크포인트
+    checkpoints = [_clean(c) for c in (cd.get("checkpoints") or []) if c]
+    if not checkpoints:
+        checkpoints = _extract_section(clean, ["모니터링", "주목", "확인", "주시", "핵심"], 3)
+    if not checkpoints:
+        rsi  = indicators.get("rsi")
+        ma20 = indicators.get("ma20")
+        macd = indicators.get("macd", 0) or 0
+        macd_s = indicators.get("macd_signal", 0) or 0
         if rsi:
-            check.append(f"RSI {rsi:.0f} — {'과매수 주의' if rsi > 70 else '과매도 반등 가능' if rsi < 30 else '중립 구간'}")
-        check.append("MACD " + ("골든크로스 → 상승 모멘텀" if macd_bull else "데드크로스 → 하락 주의"))
+            checkpoints.append(f"RSI {rsi:.0f} — {'과매수 주의' if rsi > 70 else '과매도 반등' if rsi < 30 else '중립 구간'}")
+        checkpoints.append("MACD " + ("골든크로스 → 상승 모멘텀" if macd > macd_s else "데드크로스 → 하락 주의"))
         if ma20:
-            check.append(f"MA20(${ma20:,.0f}) 지지 여부 확인")
+            checkpoints.append(f"MA20(${ma20:,.0f}) 지지 여부 확인")
 
-    strategy_html = ""
-    if cons or aggr:
-        strategy_html = f"""
-        <div style="display:flex;gap:14px;margin-bottom:0">
-          <div style="flex:1;background:{BG};border-radius:10px;padding:18px 20px">
-            <div style="font-size:16px;color:{YELLOW};font-weight:700;margin-bottom:10px">🛡 보수적 투자자</div>
-            {_ul(cons or ["데이터 없음"], YELLOW, 20)}
-          </div>
-          <div style="flex:1;background:{BG};border-radius:10px;padding:18px 20px">
-            <div style="font-size:16px;color:{GREEN};font-weight:700;margin-bottom:10px">⚡ 공격적 투자자</div>
-            {_ul(aggr or ["데이터 없음"], GREEN, 20)}
-          </div>
-        </div>"""
-    else:
-        strategy_html = _ul(check[:2], ACCENT, 24)
+    strategy_html = f"""
+    <div style="display:flex;gap:12px">
+      <div style="flex:1;background:{BG};border-radius:10px;padding:16px 18px">
+        <div style="font-size:17px;color:{YELLOW};font-weight:700;margin-bottom:8px">🛡 보수적</div>
+        <div style="font-size:21px;color:{WHITE};line-height:1.5">{cons_txt or "데이터 없음"}</div>
+      </div>
+      <div style="flex:1;background:{BG};border-radius:10px;padding:16px 18px">
+        <div style="font-size:17px;color:{GREEN};font-weight:700;margin-bottom:8px">⚡ 공격적</div>
+        <div style="font-size:21px;color:{WHITE};line-height:1.5">{aggr_txt or "데이터 없음"}</div>
+      </div>
+    </div>"""
 
     content = f"""
     {_header(ticker, date_str, "종합 의견")}
 
     <!-- 시그널 -->
-    <div style="display:flex;justify-content:center;align-items:center;padding:20px 40px;
+    <div style="display:flex;justify-content:center;align-items:center;padding:16px 40px;
                 background:{_rgba(sig_color, 0.12)};border-bottom:1px solid {BORDER}">
-      <div style="padding:14px 50px;border-radius:50px;border:2px solid {sig_color};
+      <div style="padding:12px 48px;border-radius:50px;border:2px solid {sig_color};
                   background:{_rgba(sig_color, 0.2)};
-                  font-size:28px;font-weight:700;color:{sig_color}">{sig_text}</div>
+                  font-size:26px;font-weight:700;color:{sig_color}">{sig_text}</div>
     </div>
 
-    <div style="flex:1;overflow:hidden;padding:24px 40px;display:flex;flex-direction:column;gap:16px">
+    <div style="flex:1;overflow:hidden;padding:20px 40px;display:flex;flex-direction:column;gap:14px">
 
-      <!-- 종합 의견 -->
-      <div style="background:{CARD};border-left:4px solid {ACCENT};border-radius:0 12px 12px 0;padding:24px 28px">
-        <div style="font-size:18px;color:{ACCENT};font-weight:700;margin-bottom:12px">💬 종합 의견</div>
-        {"".join(f'<p style="font-size:24px;color:{WHITE};line-height:1.6;margin-bottom:6px">{_clean(l)[:64]}</p>' for l in summary)}
+      <!-- 종합 결론 -->
+      <div style="background:{CARD};border-left:4px solid {ACCENT};border-radius:0 12px 12px 0;padding:20px 26px">
+        <div style="font-size:17px;color:{ACCENT};font-weight:700;margin-bottom:10px">💬 종합 결론</div>
+        <p style="font-size:23px;color:{WHITE};line-height:1.65">{conclusion[:80] if conclusion else "—"}</p>
       </div>
 
       <!-- 투자자 전략 -->
-      <div style="background:{CARD};border-radius:12px;padding:22px 28px">
-        <div style="font-size:18px;color:{ACCENT};font-weight:700;margin-bottom:14px">👤 투자자 유형별 전략</div>
+      <div style="background:{CARD};border-radius:12px;padding:20px 26px">
+        <div style="font-size:17px;color:{ACCENT};font-weight:700;margin-bottom:12px">👤 투자자 유형별 전략</div>
         {strategy_html}
       </div>
 
       <!-- 핵심 체크포인트 -->
-      <div style="background:{CARD};border-radius:12px;padding:22px 28px">
-        <div style="font-size:18px;color:{ACCENT};font-weight:700;margin-bottom:14px">🔍 핵심 체크포인트</div>
-        {"".join(f'<div style="display:flex;gap:10px;margin-bottom:8px"><span style="color:{ACCENT};font-size:20px;font-weight:700;min-width:24px">{i+1}.</span><span style="font-size:20px;color:{WHITE};line-height:1.5">{_clean(pt)[:58]}</span></div>' for i, pt in enumerate(check[:3]))}
+      <div style="background:{CARD};border-radius:12px;padding:20px 26px">
+        <div style="font-size:17px;color:{ACCENT};font-weight:700;margin-bottom:12px">🔍 핵심 체크포인트</div>
+        {"".join(f'<div style="display:flex;gap:10px;margin-bottom:8px"><span style="color:{ACCENT};font-size:20px;font-weight:700;min-width:26px">{i+1}.</span><span style="font-size:20px;color:{WHITE};line-height:1.5">{_clean(pt)[:58]}</span></div>' for i, pt in enumerate(checkpoints[:3]))}
       </div>
 
       <!-- 해시태그 -->
-      <div style="text-align:center;padding:8px 0">
-        <span style="font-size:18px;color:{MUTED}">#StockAI &nbsp; #기술적분석 &nbsp; #주식 &nbsp; #{ticker}</span>
+      <div style="text-align:center;padding:4px 0">
+        <span style="font-size:17px;color:{MUTED}">#StockAI &nbsp; #기술적분석 &nbsp; #주식 &nbsp; #{ticker}</span>
       </div>
     </div>
 
@@ -501,9 +567,9 @@ def _html_summary(ticker: str, analysis: str, signal: str,
 
 # ── 공개 API ─────────────────────────────────────────────
 
-async def generate_cards(doc: dict) -> list:
+async def generate_cards(doc: dict, card_data: dict = None) -> list:
     """
-    MongoDB 분석 doc → 5장 카드 PNG 생성
+    MongoDB 분석 doc + Claude 추출 card_data → 5장 카드 PNG 생성
     Returns: [(filename, bytes), ...]
     """
     ticker     = doc.get("ticker", "TICKER")
@@ -512,13 +578,14 @@ async def generate_cards(doc: dict) -> list:
     analysis   = doc.get("analysis", "")
     chart_b64  = doc.get("chart_b64", "")
     created_at = doc.get("created_at", datetime.now().isoformat())
+    cd         = card_data or {}
 
     cards_html = [
-        (f"{ticker}_1_cover.png",    _html_cover(ticker, signal, indicators, created_at),    1080, 1080),
-        (f"{ticker}_2_chart.png",    _html_chart(ticker, chart_b64, indicators, created_at), 1080, 1350),
-        (f"{ticker}_3_analysis.png", _html_analysis(ticker, analysis, signal, created_at),   1080, 1350),
-        (f"{ticker}_4_scenarios.png",_html_scenarios(ticker, analysis, signal, created_at),  1080, 1350),
-        (f"{ticker}_5_summary.png",  _html_summary(ticker, analysis, signal, indicators, created_at), 1080, 1080),
+        (f"{ticker}_1_cover.png",     _html_cover(ticker, signal, indicators, created_at),               1080, 1080),
+        (f"{ticker}_2_chart.png",     _html_chart(ticker, chart_b64, indicators, created_at),            1080, 1350),
+        (f"{ticker}_3_analysis.png",  _html_analysis(ticker, analysis, signal, created_at, cd),          1080, 1350),
+        (f"{ticker}_4_scenarios.png", _html_scenarios(ticker, analysis, signal, created_at, cd),         1080, 1350),
+        (f"{ticker}_5_summary.png",   _html_summary(ticker, analysis, signal, indicators, created_at, cd), 1080, 1080),
     ]
 
     from playwright.async_api import async_playwright
