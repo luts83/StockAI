@@ -6,8 +6,11 @@ from typing import Optional
 import anthropic
 import io
 import math
+import os
 import zipfile
 import uvicorn
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 from analyzer import get_stock_data, calculate_indicators
 from chart import generate_chart
@@ -132,11 +135,13 @@ async def get_me(
     user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         return {"user": None}
+    email = user.get("email", "")
     return {"user": {
-        "id":      user.get("sub"),
-        "email":   user.get("email"),
-        "name":    user.get("name"),
-        "picture": user.get("picture"),
+        "id":       user.get("sub"),
+        "email":    email,
+        "name":     user.get("name"),
+        "picture":  user.get("picture"),
+        "is_admin": bool(ADMIN_EMAIL and email == ADMIN_EMAIL),
     }}
 
 @app.post("/auth/logout")
@@ -382,10 +387,14 @@ async def create_card(
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
-    """분석 결과 → 인스타그램 카드 4장 ZIP 다운로드"""
+    """분석 결과 → 인스타그램 카드 4장 ZIP 다운로드 (관리자 전용)"""
     user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+
+    # 관리자 이메일 체크
+    if ADMIN_EMAIL and user.get("email") != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="관리자 전용 기능입니다.")
 
     doc = get_analysis(doc_id)
     if not doc:
