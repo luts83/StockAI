@@ -25,3 +25,6 @@ certifi>=2024.0.0
 
 # Auth
 python-jose[cryptography]==3.5.0
+
+# 카드 생성 (HTML → PNG)
+playwright>=1.40.0

@@ -9,7 +9,9 @@ import math
 import os
 import zipfile
 import uvicorn
+from dotenv import load_dotenv
 
+load_dotenv()  # .env 먼저 로드 후 환경변수 읽기
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 from analyzer import get_stock_data, calculate_indicators
@@ -403,7 +405,7 @@ async def create_card(
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
     from card import generate_cards
-    cards = generate_cards(doc)
+    cards = await generate_cards(doc)
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
