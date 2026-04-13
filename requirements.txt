@@ -3,12 +3,9 @@ uvicorn[standard]==0.30.0
 python-dotenv==1.0.1
 
 # 데이터
-# - PyPI pandas-ta 0.4.x 는 Requires-Python >=3.12 만 제공됨 → 3.11 이하에서는 ft-pandas-ta(동일 import: pandas_ta) 사용
-yfinance>=0.2.40
-pandas>=2.2.2,<3.0; python_version < "3.12"
-pandas>=2.3.2; python_version >= "3.12"
-ft-pandas-ta==0.3.16; python_version < "3.12"
-pandas-ta==0.4.71b0; python_version >= "3.12"
+yfinance==0.2.40
+pandas==2.2.2
+pandas-ta==0.3.14b
 
 # 차트
 matplotlib==3.9.0
@@ -16,6 +13,12 @@ matplotlib==3.9.0
 # 뉴스
 feedparser==6.0.11
 
-# AI — httpx 0.28+ 는 Client(proxies=...) 제거; 구버전 anthropic 과 충돌 시 아래 상한으로 맞춤
-httpx>=0.27.0,<0.28.0
-anthropic>=0.40.0,<1
+# AI
+anthropic==0.34.0
+
+# DB
+pymongo==4.7.2
+
+# Auth
+python-jose[cryptography]==3.3.0
+httpx==0.27.0

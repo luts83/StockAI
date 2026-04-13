@@ -1,43 +1,42 @@
-from pathlib import Path
-
-import anthropic
-import math
-import os
-import uvicorn
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Cookie
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+import anthropic
+import math
+import uvicorn
 
 from analyzer import get_stock_data, calculate_indicators
-from ai import analyze_with_claude
 from chart import generate_chart
 from news import fetch_news
-
-load_dotenv(override=True)
-
-
-def _get_claude():
-    return anthropic.Anthropic()
-
-BASE_DIR = Path(__file__).resolve().parent
+from ai import analyze_with_claude
+from database import (
+    save_analysis, get_analysis, get_history,
+    get_all_history, append_chat, delete_analysis,
+    upsert_user
+)
+from auth import (
+    get_redirect_uri, get_google_auth_url,
+    exchange_code_for_token, get_google_userinfo,
+    create_jwt, decode_jwt
+)
 
 app = FastAPI(title="Stock Analyzer API")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+claude = anthropic.Anthropic()
 
+# ── 모델 ──────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
     ticker: str
     period: Optional[str] = "6mo"
     interval: Optional[str] = "1d"
-
 
 class NewsSummaryRequest(BaseModel):
     title: str
@@ -46,131 +45,302 @@ class NewsSummaryRequest(BaseModel):
     source: str
     ticker: str
 
+class ChatRequest(BaseModel):
+    doc_id: str
+    question: str
+    section: Optional[str] = "전체"
 
-def _last_valid_or(df, col: str, fallback: float) -> float:
-    valid = df[col].dropna()
-    if valid.empty:
-        return fallback
-    return float(valid.iloc[-1])
+class CompareRequest(BaseModel):
+    doc_id_a: str
+    doc_id_b: str
 
-
-def _safe(v: float, fallback: float = 0.0) -> float:
-    """NaN / Inf 값을 fallback으로 대체해 JSON 직렬화 오류 방지"""
+# ── 유틸 ──────────────────────────────────────────────
+def safe(val, decimals=2):
     try:
-        f = float(v)
-        return fallback if not math.isfinite(f) else f
-    except (TypeError, ValueError):
-        return fallback
+        f = round(float(val), decimals)
+        return None if math.isnan(f) or math.isinf(f) else f
+    except:
+        return None
 
+def extract_signal(analysis: str) -> str:
+    import re
+    m = re.search(r"SIGNAL:(BUY|WATCH|SELL)", analysis)
+    return m.group(1) if m else "WATCH"
+
+def get_current_user(token: Optional[str]) -> Optional[dict]:
+    """쿠키 토큰으로 현재 유저 반환"""
+    if not token:
+        return None
+    return decode_jwt(token)
+
+# ── 인증 엔드포인트 ────────────────────────────────────
+
+@app.get("/auth/login")
+async def login(request: Request):
+    """Google 로그인 시작"""
+    redirect_uri = get_redirect_uri(str(request.base_url))
+    auth_url = get_google_auth_url(redirect_uri)
+    return RedirectResponse(auth_url)
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, code: str):
+    """Google OAuth 콜백 — JWT 발급 후 프론트로 리다이렉트"""
+    redirect_uri = get_redirect_uri(str(request.base_url))
+
+    token_data = await exchange_code_for_token(code, redirect_uri)
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Google 인증 실패")
+
+    userinfo = await get_google_userinfo(access_token)
+    user_id  = userinfo.get("id", "")
+    email    = userinfo.get("email", "")
+    name     = userinfo.get("name", "")
+    picture  = userinfo.get("picture", "")
+
+    # DB에 유저 저장
+    upsert_user(user_id, email, name, picture)
+
+    # JWT 발급
+    jwt_token = create_jwt(user_id, email, name, picture)
+
+    # 프론트로 리다이렉트하면서 쿠키 설정
+    is_local = "localhost" in str(request.base_url) or "127.0.0.1" in str(request.base_url)
+    frontend_url = "http://127.0.0.1:5500/index.html" if is_local else "https://luts83.github.io/StockAI/"
+
+    response = RedirectResponse(url=frontend_url)
+    response.set_cookie(
+        key="stockai_token",
+        value=jwt_token,
+        httponly=False,   # JS에서 읽을 수 있게
+        max_age=30 * 24 * 3600,
+        samesite="lax",
+        secure=not is_local,
+    )
+    return response
+
+@app.get("/auth/me")
+async def get_me(stockai_token: Optional[str] = Cookie(None)):
+    """현재 로그인 유저 정보"""
+    user = get_current_user(stockai_token)
+    if not user:
+        return {"user": None}
+    return {"user": {
+        "id":      user.get("sub"),
+        "email":   user.get("email"),
+        "name":    user.get("name"),
+        "picture": user.get("picture"),
+    }}
+
+@app.post("/auth/logout")
+async def logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("stockai_token")
+    return response
+
+# ── 분석 엔드포인트 ────────────────────────────────────
 
 @app.post("/analyze")
-async def analyze(req: AnalyzeRequest):
+async def analyze(req: AnalyzeRequest, stockai_token: Optional[str] = Cookie(None)):
     ticker = req.ticker.upper().strip()
+    user = get_current_user(stockai_token)
+    user_id = user.get("sub", "") if user else ""
 
     df = get_stock_data(ticker, req.period, req.interval)
     if df is None or df.empty:
-        raise HTTPException(
-            status_code=404, detail=f"티커 '{ticker}' 데이터를 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail=f"티커 '{ticker}' 데이터를 찾을 수 없습니다.")
 
     df = calculate_indicators(df)
     chart_b64 = generate_chart(df, ticker)
     news_items = fetch_news(ticker)
     analysis = await analyze_with_claude(chart_b64, df, ticker, news_items)
+    signal = extract_signal(analysis)
 
-    close_series = df["Close"].dropna()
-    if close_series.empty:
-        raise HTTPException(status_code=500, detail="주가 데이터가 유효하지 않습니다.")
-    close_now = float(close_series.iloc[-1])
-    close_prev = float(close_series.iloc[-2]) if len(close_series) > 1 else close_now
-
-    ma20 = _last_valid_or(df, "MA20", close_now)
-    ma60 = _last_valid_or(df, "MA60", close_now)
-    ma200 = _last_valid_or(df, "MA200", ma60)
-    rsi = _last_valid_or(df, "RSI", 50.0)
-    macd = _last_valid_or(df, "MACD", 0.0)
-    macd_signal = _last_valid_or(df, "MACD_Signal", 0.0)
-
-    change_pct = (close_now - close_prev) / close_prev * 100 if close_prev != 0 else 0.0
-
-    return {
-        "ticker": ticker,
-        "current_price": _safe(round(close_now, 2)),
-        "change_pct": _safe(round(change_pct, 2)),
-        "indicators": {
-            "rsi":          _safe(round(rsi, 2), 50.0),
-            "macd":         _safe(round(macd, 4)),
-            "macd_signal":  _safe(round(macd_signal, 4)),
-            "ma20":         _safe(round(ma20, 2)),
-            "ma60":         _safe(round(ma60, 2)),
-            "ma200":        _safe(round(ma200, 2)),
-        },
-        "chart_image": chart_b64,
-        "news": news_items,
-        "analysis": analysis,
+    indicators = {
+        "rsi":         safe(df["RSI"].iloc[-1]),
+        "macd":        safe(df["MACD"].iloc[-1], 4),
+        "macd_signal": safe(df["MACD_Signal"].iloc[-1], 4),
+        "ma20":        safe(df["MA20"].iloc[-1]),
+        "ma60":        safe(df["MA60"].iloc[-1]),
+        "ma200":       safe(df["MA200"].iloc[-1]),
     }
 
+    # 로그인 유저만 DB 저장
+    doc_id = ""
+    if user_id:
+        doc_id = save_analysis(
+            ticker=ticker, period=req.period,
+            indicators=indicators, analysis=analysis,
+            signal=signal, news=news_items,
+            chart_b64=chart_b64, user_id=user_id,
+        )
 
-@app.post("/news/summary")
-async def news_summary_stream(req: NewsSummaryRequest):
-    """뉴스 원문 → 한국어 번역+요약 스트리밍"""
+    return {
+        "doc_id":        doc_id,
+        "ticker":        ticker,
+        "current_price": safe(df["Close"].iloc[-1]),
+        "change_pct":    safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
+        "indicators":    indicators,
+        "chart_image":   chart_b64,
+        "news":          news_items,
+        "analysis":      analysis,
+        "signal":        signal,
+        "is_saved":      bool(user_id),
+    }
 
-    prompt = f"""다음 주식 뉴스를 한국어로 번역하고 요약해줘.
+@app.post("/chat")
+async def chat_stream(req: ChatRequest, stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
-종목: {req.ticker}
-출처: {req.source}
-제목: {req.title}
-내용: {req.summary or "(본문 없음 — 제목 기반으로 분석)"}
+    doc = get_analysis(req.doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="분석 데이터를 찾을 수 없습니다.")
 
-아래 형식으로 작성해줘:
+    # 본인 분석인지 확인
+    if doc.get("user_id") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
-**📌 핵심 요약**
-3~4줄로 핵심 내용 요약 (한국어)
+    history = doc.get("chat_history", [])[-8:]
+    messages = []
+    system = f"""당신은 주식 기술적 분석 전문가입니다.
+아래는 {doc['ticker']} 종목에 대해 이미 수행된 분석입니다. 이 분석을 바탕으로 사용자의 후속 질문에 답변하세요.
+질문이 특정 섹션({req.section})에 관한 것이라면 해당 부분에 집중해서 답변하세요.
+한국어로 답변하고, 구체적인 수치와 근거를 포함하세요.
 
-**📈 주가 영향**
-이 뉴스가 {req.ticker} 주가에 미칠 영향을 긍정/부정/중립으로 평가하고 이유 설명
+=== 기존 분석 ===
+{doc['analysis']}
+=== 분석 종료 ==="""
 
-**🔍 주목 포인트**
-투자자가 주목해야 할 핵심 내용 2~3가지 (bullet)"""
+    for h in history:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": req.question})
+
+    append_chat(req.doc_id, "user", req.question, req.section)
+    full_response = []
 
     def generate():
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            yield "Anthropic API 키가 설정되지 않아 뉴스 요약을 생성할 수 없습니다."
-            return
-        try:
-            with _get_claude().messages.stream(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}]
-            ) as stream:
-                for text in stream.text_stream:
-                    yield text
-        except Exception:
-            yield "뉴스 요약 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        with claude.messages.stream(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=1500,
+            system=system,
+            messages=messages,
+        ) as stream:
+            for text in stream.text_stream:
+                full_response.append(text)
+                yield text
+        append_chat(req.doc_id, "assistant", "".join(full_response), req.section)
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
+@app.get("/history")
+async def all_history(stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    items = get_all_history(limit=20, user_id=user.get("sub", ""))
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+@app.get("/history/{ticker}")
+async def ticker_history(ticker: str, stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    items = get_history(ticker.upper(), limit=10, user_id=user.get("sub", ""))
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+@app.get("/analysis/{doc_id}")
+async def load_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    doc = get_analysis(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
+    if doc.get("user_id") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    return doc
+
+@app.delete("/analysis/{doc_id}")
+async def remove_analysis(doc_id: str, stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    doc = get_analysis(doc_id)
+    if doc and doc.get("user_id") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    delete_analysis(doc_id)
+    return {"deleted": doc_id}
+
+@app.post("/compare")
+async def compare_analyses(req: CompareRequest, stockai_token: Optional[str] = Cookie(None)):
+    user = get_current_user(stockai_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+
+    doc_a = get_analysis(req.doc_id_a)
+    doc_b = get_analysis(req.doc_id_b)
+    if not doc_a or not doc_b:
+        raise HTTPException(status_code=404, detail="분석 데이터를 찾을 수 없습니다.")
+
+    prompt = f"""다음 두 시점의 {doc_a['ticker']} 분석을 비교해줘.
+
+=== 분석 A ({doc_a['created_at'][:10]}) ===
+지표: RSI {doc_a['indicators'].get('rsi')}, MACD {doc_a['indicators'].get('macd')}
+시그널: {doc_a.get('signal')}
+{doc_a['analysis'][:1500]}
+
+=== 분석 B ({doc_b['created_at'][:10]}) ===
+지표: RSI {doc_b['indicators'].get('rsi')}, MACD {doc_b['indicators'].get('macd')}
+시그널: {doc_b.get('signal')}
+{doc_b['analysis'][:1500]}
+
+## 1. 주요 지표 변화
+## 2. 추세 변화
+## 3. 예측 vs 실제
+## 4. 현재 시점 시사점"""
+
+    def generate():
+        with claude.messages.stream(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+
+@app.post("/news/summary")
+async def news_summary_stream(req: NewsSummaryRequest):
+    prompt = f"""다음 주식 뉴스를 한국어로 번역하고 요약해줘.
+종목: {req.ticker} / 출처: {req.source}
+제목: {req.title}
+내용: {req.summary or "(본문 없음)"}
+
+**📌 핵심 요약** (3~4줄)
+**📈 주가 영향** (긍정/부정/중립 + 이유)
+**🔍 주목 포인트** (2~3가지 bullet)"""
+
+    def generate():
+        with claude.messages.stream(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}]
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-
-@app.get("/")
-def serve_index():
-    """배포 시 같은 도메인에서 UI 제공 (index.html만 노출)"""
-    path = BASE_DIR / "index.html"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="index.html not found")
-    return FileResponse(path, media_type="text/html; charset=utf-8")
-
-
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    # Render/Railway 등은 PORT를 주입하므로 reload 끔
-    reload = os.getenv("PORT") is None
-    kw = {"host": "0.0.0.0", "port": port, "reload": reload}
-    if reload:
-        # .venv 안 패키지 변경까지 감시하면 재시작 폭주 → 제외
-        kw["reload_dirs"] = [str(BASE_DIR)]
-        kw["reload_excludes"] = [".venv", "**/.venv/**", "__pycache__"]
-    uvicorn.run("main:app", **kw)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
