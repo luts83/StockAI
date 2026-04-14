@@ -146,7 +146,7 @@ async def get_me(
         "email":    email,
         "name":     user.get("name"),
         "picture":  user.get("picture"),
-        "is_admin": bool(ADMIN_EMAIL and email == ADMIN_EMAIL),
+        "is_admin": bool(ADMIN_EMAIL and email.strip().lower() == ADMIN_EMAIL.strip().lower()),
     }}
 
 @app.post("/auth/logout")
@@ -441,7 +441,7 @@ async def create_card(
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
     # 관리자 이메일 체크
-    if ADMIN_EMAIL and user.get("email") != ADMIN_EMAIL:
+    if ADMIN_EMAIL and user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
         raise HTTPException(status_code=403, detail="관리자 전용 기능입니다.")
 
     doc = get_analysis(doc_id)
