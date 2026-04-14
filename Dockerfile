@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     libcups2 libxkbcommon0 libxcomposite1 libxdamage1 \
     libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
     libcairo2 libx11-6 libxcursor1 libxi6 \
-    fonts-nanum fonts-nanum-coding fontconfig \
+    fonts-nanum fontconfig \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
