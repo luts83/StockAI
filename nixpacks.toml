@@ -12,5 +12,9 @@ aptPkgs = [
 [phases.build]
 cmds = [
   "fc-cache -fv",
-  "playwright install chromium"
+  "pip install playwright",
+  "playwright install chromium --with-deps"
 ]
+
+[variables]
+PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright"

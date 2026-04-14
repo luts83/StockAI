@@ -1379,8 +1379,11 @@ async function downloadCards() {
   try {
     const res = await fetch(`${API}/card/${currentDocId}`, {
       headers: { ...authHeaders() }
-    });
-    if (!res.ok) throw new Error(`서버 오류 ${res.status}`);
+    }).catch(err => { throw new Error(`네트워크 오류: ${err.message}`); });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`서버 오류 ${res.status}: ${body.slice(0, 200)}`);
+    }
 
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
