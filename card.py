@@ -145,13 +145,38 @@ body {{ width:{W}px; height:{H}px; background:{BG};
 
 # ── Playwright 스크린샷 ───────────────────────────────────
 
+_CHROMIUM_PATHS = [
+    None,                          # Playwright 기본 캐시 경로
+    "/usr/bin/chromium",           # apt/nixpkgs 설치 경로
+    "/usr/bin/chromium-browser",   # Ubuntu 대안 경로
+    "/run/current-system/sw/bin/chromium",  # NixOS 시스템 경로
+]
+
+_LAUNCH_ARGS = [
+    "--no-sandbox", "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage", "--disable-gpu",
+    "--disable-software-rasterizer",
+]
+
+async def _launch_browser(p):
+    """시스템에 설치된 Chromium 경로를 순서대로 시도"""
+    for path in _CHROMIUM_PATHS:
+        try:
+            kwargs = {"args": _LAUNCH_ARGS}
+            if path:
+                kwargs["executable_path"] = path
+            browser = await p.chromium.launch(**kwargs)
+            print(f"[Playwright] Chromium launched: {path or 'default'}")
+            return browser
+        except Exception as e:
+            print(f"[Playwright] Failed ({path or 'default'}): {e}")
+    raise RuntimeError("Chromium 실행 파일을 찾을 수 없습니다. playwright install chromium 실행 필요")
+
+
 async def _screenshot(html: str, width: int, height: int) -> bytes:
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"]
-        )
+        browser = await _launch_browser(p)
         page = await browser.new_page(viewport={"width": width, "height": height})
         await page.set_content(html, wait_until="networkidle")
         await page.evaluate("document.fonts.ready")
@@ -682,10 +707,7 @@ async def generate_cards(doc: dict, card_data: dict = None) -> list:
     from playwright.async_api import async_playwright
     results = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"]
-        )
+        browser = await _launch_browser(p)
         for filename, html in cards_html:
             page = await browser.new_page(viewport={"width": W, "height": H})
             await page.set_content(html, wait_until="networkidle")

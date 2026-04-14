@@ -1,17 +1,27 @@
 [phases.setup]
-aptPkgs = [
-  "fonts-nanum", "fonts-nanum-coding", "fontconfig",
-  # Playwright Chromium 의존성
-  "libnss3", "libnspr4", "libatk1.0-0", "libatk-bridge2.0-0",
-  "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1",
-  "libxdamage1", "libxrandr2", "libgbm1", "libasound2",
-  "libpango-1.0-0", "libcairo2", "libx11-6", "libxext6",
-  "libxfixes3", "libdbus-1-3", "libglib2.0-0"
+nixPkgs = [
+  "chromium",
+  "nss",
+  "nspr",
+  "at-spi2-atk",
+  "cups",
+  "libxkbcommon",
+  "libxcomposite",
+  "libxdamage",
+  "libxrandr",
+  "mesa",
+  "alsa-lib",
+  "pango",
+  "cairo",
+  "xorg.libX11",
+  "xorg.libXcursor",
+  "xorg.libXi",
+  "nanum-fonts"
 ]
 
 [phases.build]
 cmds = [
-  "fc-cache -fv",
-  "pip install playwright",
-  "PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers playwright install chromium --with-deps"
+  "pip install -r requirements.txt",
+  "playwright install chromium",
+  "playwright install-deps chromium"
 ]
