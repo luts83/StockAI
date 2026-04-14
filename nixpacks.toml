@@ -13,5 +13,5 @@ aptPkgs = [
 cmds = [
   "fc-cache -fv",
   "pip install playwright",
-  "playwright install chromium --with-deps"
+  "PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers playwright install chromium --with-deps"
 ]
