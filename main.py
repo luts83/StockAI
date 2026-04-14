@@ -479,5 +479,18 @@ async def create_card(
 def health():
     return {"status": "ok"}
 
+@app.get("/debug/admin")
+def debug_admin():
+    """임시 디버그: ADMIN_EMAIL 설정 확인 (값 일부만 노출)"""
+    raw = os.getenv("ADMIN_EMAIL", "")
+    masked = (raw[:3] + "***" + raw[-8:]) if len(raw) > 11 else ("SET" if raw else "NOT_SET")
+    return {
+        "admin_email_set": bool(raw),
+        "admin_email_masked": masked,
+        "admin_email_len": len(raw),
+        "has_leading_space": raw != raw.lstrip(),
+        "has_trailing_space": raw != raw.rstrip(),
+    }
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
