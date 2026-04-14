@@ -145,7 +145,7 @@ header {
 .chart-pill { font-size:11px; padding:3px 8px; border-radius:5px; background:var(--border); color:var(--muted); font-family:'JetBrains Mono',monospace; }
 .chart-wrap img { width:100%; display:block; }
 
-/* 인스타 카드 버튼 */
+/* 인스타 카드 버튼 — 데스크톱 (panel-head 안) */
 #insta-card-btn {
   margin-left:auto;
   font-size:11px; padding:4px 10px;
@@ -158,6 +158,17 @@ header {
 #insta-card-btn:disabled { opacity:.4; cursor:not-allowed; transform:none; }
 #insta-card-btn .spin  { display:inline-block; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
+/* 모바일 플로팅 버튼 (panel-head 바깥) */
+#insta-card-btn-mobile {
+  display:none;
+  position:fixed; bottom:24px; right:16px; z-index:999;
+  font-size:13px; padding:11px 18px; border-radius:24px;
+  background:var(--blue); border:none; color:#fff;
+  cursor:pointer; font-weight:700; white-space:nowrap;
+  box-shadow:0 4px 20px rgba(77,159,255,.5);
+  transition:opacity .15s, transform .1s;
+}
+#insta-card-btn-mobile:disabled { opacity:.4; cursor:not-allowed; }
 
 /* TWO COL → 모바일에서 탭으로 */
 .two-col { display:grid; grid-template-columns:3fr 2fr; gap:20px; }
@@ -433,12 +444,7 @@ header {
 
   .two-col .panel.tab-active { display: block !important; }
   .panel-head { display: none; }  /* 모바일에서 패널 헤더 숨김 (탭이 대신) */
-  /* 모바일: 화면 우하단 고정 플로팅 버튼 */
-  #insta-card-btn {
-    position: fixed !important; bottom: 24px; right: 16px; top: auto !important; z-index: 999;
-    font-size: 13px !important; padding: 11px 18px !important; border-radius: 24px !important;
-    box-shadow: 0 4px 20px rgba(77,159,255,.5);
-  }
+  #insta-card-btn { display: none !important; }  /* 데스크톱 버튼 모바일에서 숨김 */
   .panel-body { padding: 16px; }
 
   .signal-box { padding: 12px 14px; }
@@ -520,6 +526,9 @@ header {
   </div>
 
   <div id="error-msg"></div>
+
+  <!-- 모바일 전용 플로팅 카드 저장 버튼 (panel-head 바깥) -->
+  <button id="insta-card-btn-mobile" onclick="downloadCards()">📸 카드 저장</button>
 
   <div id="results">
     <div class="ticker-header">
@@ -901,8 +910,10 @@ function renderResults(data) {
 
   // 인스타 카드 버튼: 관리자 + 저장된 분석이 있을 때만 노출
   const cardBtn = document.getElementById("insta-card-btn");
-  if (cardBtn) cardBtn.style.display =
-    (currentUser?.is_admin && currentDocId) ? "inline-block" : "none";
+  const cardBtnM = document.getElementById("insta-card-btn-mobile");
+  const showCard = (currentUser?.is_admin && currentDocId) ? "inline-block" : "none";
+  if (cardBtn)  cardBtn.style.display  = showCard;
+  if (cardBtnM) cardBtnM.style.display = showCard;
 
   // 채팅/히스토리 섹션 표시 (로그인 여부와 무관하게 보이지만 잠금 처리)
   document.getElementById("chat-messages").innerHTML = "";
@@ -1290,9 +1301,11 @@ async function loadSavedAnalysis(docId) {
     if (rpEl) rpEl.style.display = "none";
 
     // 인스타 카드 버튼 표시 (관리자 전용)
+    const showCardBtn = currentUser?.is_admin ? "inline-block" : "none";
     const cardBtn2 = document.getElementById("insta-card-btn");
-    if (cardBtn2) cardBtn2.style.display =
-      currentUser?.is_admin ? "inline-block" : "none";
+    const cardBtn2M = document.getElementById("insta-card-btn-mobile");
+    if (cardBtn2)  cardBtn2.style.display  = showCardBtn;
+    if (cardBtn2M) cardBtn2M.style.display = showCardBtn;
 
     document.getElementById("results").style.display = "block";
     document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1372,9 +1385,13 @@ async function downloadCards() {
   if (!currentUser?.is_admin) return;
   if (!currentDocId) { alert("저장된 분석이 없습니다. 먼저 분석을 실행해주세요."); return; }
 
-  const btn = document.getElementById("insta-card-btn");
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spin">⏳</span> 생성 중...';
+  // 데스크톱/모바일 버튼 둘 다 제어
+  const btn  = document.getElementById("insta-card-btn");
+  const btnM = document.getElementById("insta-card-btn-mobile");
+  const activeBtn = (btn && btn.style.display !== "none") ? btn : btnM;
+  if (!activeBtn) return;
+  activeBtn.disabled = true;
+  activeBtn.innerHTML = '<span class="spin">⏳</span> 생성 중...';
 
   try {
     const res = await fetch(`${API}/card/${currentDocId}`, {
@@ -1395,12 +1412,13 @@ async function downloadCards() {
     a.remove();
     URL.revokeObjectURL(url);
 
-    btn.innerHTML = "✅ 완료!";
-    setTimeout(() => { btn.innerHTML = "📸 카드 저장"; btn.disabled = false; }, 2500);
+    activeBtn.innerHTML = "✅ 완료!";
+    setTimeout(() => { activeBtn.innerHTML = "📸 카드 저장"; activeBtn.disabled = false; }, 2500);
   } catch(e) {
-    btn.innerHTML = "❌ 오류";
-    btn.disabled = false;
+    activeBtn.innerHTML = "❌ 오류";
+    activeBtn.disabled = false;
     console.error(e);
+    alert(e.message);
   }
 }
 

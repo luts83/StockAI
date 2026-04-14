@@ -15,6 +15,3 @@ cmds = [
   "pip install playwright",
   "playwright install chromium --with-deps"
 ]
-
-[variables]
-PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright"
