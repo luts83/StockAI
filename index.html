@@ -1385,40 +1385,44 @@ async function downloadCards() {
   if (!currentUser?.is_admin) return;
   if (!currentDocId) { alert("저장된 분석이 없습니다. 먼저 분석을 실행해주세요."); return; }
 
-  // 데스크톱/모바일 버튼 둘 다 제어
+  // 데스크톱/모바일 버튼 모두 제어
   const btn  = document.getElementById("insta-card-btn");
   const btnM = document.getElementById("insta-card-btn-mobile");
-  const activeBtn = (btn && btn.style.display !== "none") ? btn : btnM;
-  if (!activeBtn) return;
-  activeBtn.disabled = true;
-  activeBtn.innerHTML = '<span class="spin">⏳</span> 생성 중...';
+  const setAll = (html, disabled) => {
+    [btn, btnM].forEach(b => { if (b) { b.innerHTML = html; b.disabled = disabled; } });
+  };
+
+  setAll('<span class="spin">⏳</span> 생성 중...', true);
 
   try {
     const res = await fetch(`${API}/card/${currentDocId}`, {
-      headers: { ...authHeaders() }
-    }).catch(err => { throw new Error(`네트워크 오류: ${err.message}`); });
+      headers: { Authorization: `Bearer ${localStorage.getItem("stockai_token")}` }
+    });
+
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`서버 오류 ${res.status}: ${body.slice(0, 200)}`);
+      let detail = "카드 생성 실패";
+      try { const j = await res.json(); detail = j.detail || detail; } catch {}
+      throw new Error(detail);
     }
 
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${currentTicker}_cards.zip`;
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `${currentTicker || "cards"}_cards.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
 
-    activeBtn.innerHTML = "✅ 완료!";
-    setTimeout(() => { activeBtn.innerHTML = "📸 카드 저장"; activeBtn.disabled = false; }, 2500);
+    setAll("✅ 저장 완료!", true);
+    setTimeout(() => setAll("📸 카드 저장", false), 2500);
+
   } catch(e) {
-    activeBtn.innerHTML = "❌ 오류";
-    activeBtn.disabled = false;
-    console.error(e);
-    alert(e.message);
+    console.error("[downloadCards]", e);
+    setAll("❌ 오류 발생", false);
+    alert(`카드 생성 오류: ${e.message}`);
+    setTimeout(() => setAll("📸 카드 저장", false), 2000);
   }
 }
 
