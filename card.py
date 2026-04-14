@@ -293,31 +293,38 @@ def _html_cover(ticker: str, signal: str, indicators: dict, created_at: str,
 
 # ── 카드 2: 차트 (1080×1350) ─────────────────────────────
 
-def _html_chart(ticker: str, chart_b64: str, indicators: dict, created_at: str) -> str:
-    date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
-    rsi      = indicators.get("rsi")
-    macd     = indicators.get("macd", 0) or 0
-    macd_sig = indicators.get("macd_signal", 0) or 0
-    ma20     = indicators.get("ma20")
-    ma200    = indicators.get("ma200")
-    rsi_col  = RED if (rsi or 50) > 70 else GREEN if (rsi or 50) < 30 else MUTED
-    rsi_lbl  = "과매수" if (rsi or 50) > 70 else "과매도" if (rsi or 50) < 30 else "중립"
+def _html_chart(ticker: str, chart_b64: str, indicators: dict, created_at: str,
+                valuation: dict = None) -> str:
+    date_str  = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+    val       = valuation or {}
+    rsi       = indicators.get("rsi")
+    macd      = indicators.get("macd", 0) or 0
+    macd_sig  = indicators.get("macd_signal", 0) or 0
+    ma20      = indicators.get("ma20")
+    ma200     = indicators.get("ma200")
+    rsi_col   = RED if (rsi or 50) > 70 else GREEN if (rsi or 50) < 30 else MUTED
+    rsi_lbl   = "과매수" if (rsi or 50) > 70 else "과매도" if (rsi or 50) < 30 else "중립"
     macd_bull = macd > macd_sig
+
+    per  = val.get("per")
+    pbr  = val.get("pbr")
 
     chart_src = f"data:image/png;base64,{chart_b64}" if chart_b64 else ""
 
     cells = [
-        ("RSI 14",  f"{rsi:.1f}" if rsi else "—",           rsi_lbl,    rsi_col),
-        ("MACD",    "▲ 강세" if macd_bull else "▼ 약세",     "모멘텀",   GREEN if macd_bull else RED),
-        ("MA 20",   f"${ma20:,.0f}" if ma20 else "—",        "단기 추세", ACCENT),
-        ("MA 200",  f"${ma200:,.0f}" if ma200 else "—",      "장기 추세", YELLOW),
+        ("RSI 14",  f"{rsi:.1f}" if rsi else "—",              rsi_lbl,      rsi_col),
+        ("MACD",    "▲ 강세" if macd_bull else "▼ 약세",        "모멘텀",     GREEN if macd_bull else RED),
+        ("MA 20",   f"${ma20:,.0f}" if ma20 else "—",           "단기 추세",  ACCENT),
+        ("MA 200",  f"${ma200:,.0f}" if ma200 else "—",         "장기 추세",  YELLOW),
+        ("PER",     f"{per:.1f}x" if per else "—",              "주가수익비", WHITE),
+        ("PBR",     f"{pbr:.2f}x" if pbr else "—",              "주가순자산", WHITE),
     ]
     grid_html = "".join(f"""
-      <div style="background:{BG};border-radius:10px;padding:24px 16px;text-align:center;flex:1">
-        <div style="font-size:18px;color:{MUTED};margin-bottom:10px">{lbl}</div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:32px;
+      <div style="background:{BG};border-radius:10px;padding:20px 14px;text-align:center">
+        <div style="font-size:16px;color:{MUTED};margin-bottom:8px">{lbl}</div>
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;
                     font-weight:700;color:{col}">{val}</div>
-        <div style="font-size:16px;color:{MUTED};margin-top:8px">{sub}</div>
+        <div style="font-size:14px;color:{MUTED};margin-top:6px">{sub}</div>
       </div>""" for lbl, val, sub, col in cells)
 
     content = f"""
@@ -328,9 +335,9 @@ def _html_chart(ticker: str, chart_b64: str, indicators: dict, created_at: str) 
       {'<img src="' + chart_src + '" style="width:100%;height:100%;object-fit:contain">' if chart_src else f'<div style="display:flex;align-items:center;justify-content:center;height:100%;color:{MUTED};font-size:28px">차트 없음</div>'}
     </div>
 
-    <!-- 지표 그리드 -->
-    <div style="display:flex;gap:12px;padding:24px;background:{CARD};
-                border-top:1px solid {BORDER}">
+    <!-- 지표 그리드 (3×2) -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
+                padding:20px 24px;background:{CARD};border-top:1px solid {BORDER}">
       {grid_html}
     </div>
 
@@ -689,6 +696,7 @@ async def generate_cards(doc: dict, card_data: dict = None) -> list:
     ticker        = doc.get("ticker", "TICKER")
     signal        = doc.get("signal", "WATCH")
     indicators    = doc.get("indicators", {})
+    valuation     = doc.get("valuation", {})
     analysis      = doc.get("analysis", "")
     chart_b64     = doc.get("chart_b64", "")
     created_at    = doc.get("created_at", datetime.now().isoformat())
@@ -698,7 +706,7 @@ async def generate_cards(doc: dict, card_data: dict = None) -> list:
 
     cards_html = [
         (f"{ticker}_1_cover.png",     _html_cover(ticker, signal, indicators, created_at, current_price, change_pct)),
-        (f"{ticker}_2_chart.png",     _html_chart(ticker, chart_b64, indicators, created_at)),
+        (f"{ticker}_2_chart.png",     _html_chart(ticker, chart_b64, indicators, created_at, valuation)),
         (f"{ticker}_3_analysis.png",  _html_analysis(ticker, analysis, signal, created_at, cd, indicators)),
         (f"{ticker}_4_scenarios.png", _html_scenarios(ticker, analysis, signal, created_at, cd)),
         (f"{ticker}_5_summary.png",   _html_summary(ticker, analysis, signal, indicators, created_at, cd)),

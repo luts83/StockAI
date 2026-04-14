@@ -13,11 +13,27 @@ Analyze the provided stock chart image and data thoroughly.
 Respond in Korean. Be direct, specific, and actionable.
 Structure your response with clear sections using markdown."""
 
-def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict]) -> str:
+def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
+                          valuation: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:8] if item.get("title")
     ]) or "뉴스 없음"
+
+    val = valuation or {}
+    def _fv(v, suffix=""):
+        return f"{v}{suffix}" if v else "—"
+
+    valuation_text = f"""
+### 밸류에이션
+- PER: {_fv(val.get('per'), 'x')} (Forward: {_fv(val.get('forward_per'), 'x')})
+- PBR: {_fv(val.get('pbr'), 'x')}
+- PSR: {_fv(val.get('psr'), 'x')}
+- EPS: {_fv(val.get('eps'), '$') if val.get('eps') else '—'}
+- 매출 성장률: {_fv(val.get('revenue_growth'), '% YoY')}
+- 영업이익률: {_fv(val.get('profit_margin'), '%')}
+- 섹터: {val.get('sector') or '—'}
+""" if val else ""
 
     return f"""다음 주식을 분석해줘:
 
@@ -33,7 +49,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict]) -> s
 - 스토캐스틱 K: {stats['stoch_k']} / D: {stats['stoch_d']}
 - 52주 고가: ${stats['52w_high']} / 저가: ${stats['52w_low']}
 - 현재 거래량: {stats['volume']:,} / 평균 거래량: {stats['avg_volume']:,}
-
+{valuation_text}
 ### 최신 뉴스
 {news_text}
 
@@ -46,6 +62,11 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict]) -> s
 
 ## 2. 기술적 지표 해석
 RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
+
+## 2.5 밸류에이션 분석
+- PER/PBR이 섹터 평균 대비 고평가/저평가 여부
+- 성장률 대비 밸류에이션 적정성 (PEG 관점)
+- 현재 주가 수준의 밸류에이션 리스크
 
 ## 3. 거래량 분석
 최근 거래량 추이, 평균 대비 수준, 의미
@@ -62,10 +83,11 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 
 ⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다."""
 
-async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str, news_items: List[Dict]) -> str:
-    """Claude Vision API로 차트 + 뉴스 종합 분석"""
+async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
+                              news_items: List[Dict], valuation: dict = None) -> str:
+    """Claude Vision API로 차트 + 뉴스 + 밸류에이션 종합 분석"""
     stats  = get_summary_stats(df)
-    prompt = build_analysis_prompt(ticker, stats, news_items)
+    prompt = build_analysis_prompt(ticker, stats, news_items, valuation)
 
     try:
         message = _get_client().messages.create(

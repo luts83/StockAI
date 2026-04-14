@@ -85,6 +85,33 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def get_valuation_data(ticker: str) -> dict:
+    """yfinance에서 밸류에이션 지표 수집 (없으면 0 반환)"""
+    try:
+        info = yf.Ticker(ticker).info
+        def _r(val, decimals=1):
+            try:
+                v = float(val or 0)
+                return round(v, decimals) if v else 0
+            except:
+                return 0
+        return {
+            "per":            _r(info.get("trailingPE"), 1),
+            "forward_per":    _r(info.get("forwardPE"), 1),
+            "pbr":            _r(info.get("priceToBook"), 2),
+            "psr":            _r(info.get("priceToSalesTrailing12Months"), 2),
+            "eps":            _r(info.get("trailingEps"), 2),
+            "revenue_growth": _r((info.get("revenueGrowth") or 0) * 100, 1),
+            "profit_margin":  _r((info.get("profitMargins") or 0) * 100, 1),
+            "dividend_yield": _r((info.get("dividendYield") or 0) * 100, 2),
+            "market_cap":     info.get("marketCap"),
+            "sector":         info.get("sector", ""),
+        }
+    except Exception as e:
+        print(f"[valuation] {ticker} 데이터 수집 실패: {e}")
+        return {}
+
+
 def get_summary_stats(df: pd.DataFrame) -> dict:
     """분석용 핵심 통계 추출"""
     latest = df.iloc[-1]

@@ -138,6 +138,42 @@ header {
 .c-green{color:var(--green)} .c-red{color:var(--red)} .c-blue{color:var(--blue)} .c-yellow{color:var(--yellow)} .c-muted{color:var(--muted)}
 
 /* CHART */
+/* 밸류에이션 스트립 */
+.val-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.val-cell {
+  background: var(--card);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.val-lbl {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  font-weight: 600;
+}
+.val-num {
+  font-size: 18px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+.val-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
 .chart-wrap { background:var(--card); border:1px solid var(--border2); border-radius:14px; overflow:hidden; margin-bottom:20px; }
 .chart-topbar { display:flex; align-items:center; justify-content:space-between; padding:12px 18px; border-bottom:1px solid var(--border); }
 .chart-label { font-size:12px; color:var(--muted); font-weight:600; letter-spacing:0.5px; text-transform:uppercase; }
@@ -427,6 +463,11 @@ header {
   .ind-val { font-size: 18px; }
   .ind-sub { font-size: 10px; }
 
+  /* 밸류에이션 스트립: 모바일 3×2 */
+  .val-strip { grid-template-columns: repeat(3, 1fr); }
+  .val-cell { padding: 12px 10px; }
+  .val-num { font-size: 15px; }
+
   /* 차트 topbar pills 숨김 */
   .chart-pills { display: none; }
   .chart-topbar { padding: 10px 14px; }
@@ -544,6 +585,40 @@ header {
       <div class="ind-strip" id="res-indicators"></div>
     </div>
 
+    <!-- 밸류에이션 스트립 -->
+    <div class="val-strip" id="val-strip" style="display:none">
+      <div class="val-cell">
+        <span class="val-lbl">PER</span>
+        <span class="val-num" id="val-per">—</span>
+        <span class="val-sub" id="val-fper">Fwd —</span>
+      </div>
+      <div class="val-cell">
+        <span class="val-lbl">PBR</span>
+        <span class="val-num" id="val-pbr">—</span>
+        <span class="val-sub" id="val-sector"></span>
+      </div>
+      <div class="val-cell">
+        <span class="val-lbl">PSR</span>
+        <span class="val-num" id="val-psr">—</span>
+        <span class="val-sub">주가매출비율</span>
+      </div>
+      <div class="val-cell">
+        <span class="val-lbl">EPS</span>
+        <span class="val-num" id="val-eps">—</span>
+        <span class="val-sub">주당순이익</span>
+      </div>
+      <div class="val-cell">
+        <span class="val-lbl">매출성장</span>
+        <span class="val-num" id="val-rev">—</span>
+        <span class="val-sub">YoY</span>
+      </div>
+      <div class="val-cell">
+        <span class="val-lbl">배당수익</span>
+        <span class="val-num" id="val-div">—</span>
+        <span class="val-sub" id="val-margin"></span>
+      </div>
+    </div>
+
     <div class="chart-wrap">
       <div class="chart-topbar">
         <span class="chart-label">Technical Chart</span>
@@ -640,6 +715,7 @@ const API = IS_LOCAL
 
 const fmtNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—");
 const fmtDollar = (v) => (typeof v === "number" && Number.isFinite(v) ? "$" + v.toLocaleString() : "—");
+const fmtVal = (v, suffix = "") => (v && v !== 0 ? `${v}${suffix}` : "—");
 
 // ── 토큰 관리 (localStorage 기반, 쿠키 크로스도메인 문제 해결) ──
 function getToken() { return localStorage.getItem("stockai_token") || null; }
@@ -879,6 +955,8 @@ function renderResults(data) {
 
   document.getElementById("res-chart").src = "data:image/png;base64," + data.chart_image;
 
+  renderValuation(data.valuation);
+
   const analysis = data.analysis || "";
   // Claude가 직접 판단한 SIGNAL 파싱
   let signal="watch", sigIcon="👀", sigText="관망 구간", sigSub="방향성 확인 필요";
@@ -927,6 +1005,36 @@ function renderResults(data) {
 
   document.getElementById("results").style.display = "block";
   document.getElementById("results").scrollIntoView({ behavior:"smooth", block:"start" });
+}
+
+// ── 밸류에이션 렌더링 ──
+function renderValuation(val) {
+  const strip = document.getElementById("val-strip");
+  if (!val || Object.keys(val).length === 0) {
+    strip.style.display = "none";
+    return;
+  }
+  strip.style.display = "grid";
+
+  const colorFor = (v, goodLow = true) => {
+    if (!v || v === 0) return "";
+    return "";
+  };
+
+  document.getElementById("val-per").textContent   = fmtVal(val.per, "x");
+  document.getElementById("val-fper").textContent  = val.forward_per ? `Fwd ${val.forward_per}x` : "Fwd —";
+  document.getElementById("val-pbr").textContent   = fmtVal(val.pbr, "x");
+  document.getElementById("val-sector").textContent = val.sector || "";
+  document.getElementById("val-psr").textContent   = fmtVal(val.psr, "x");
+  document.getElementById("val-eps").textContent   = val.eps ? `$${val.eps}` : "—";
+
+  const revEl = document.getElementById("val-rev");
+  const rev = val.revenue_growth;
+  revEl.textContent = rev ? `${rev > 0 ? "+" : ""}${rev}%` : "—";
+  revEl.style.color = rev > 0 ? "var(--green)" : rev < 0 ? "var(--red)" : "";
+
+  document.getElementById("val-div").textContent   = fmtVal(val.dividend_yield, "%");
+  document.getElementById("val-margin").textContent = val.profit_margin ? `이익률 ${val.profit_margin}%` : "";
 }
 
 // ── News ──
@@ -1265,6 +1373,9 @@ async function loadSavedAnalysis(docId) {
 
     // 차트
     if (doc.chart_b64) document.getElementById("res-chart").src = "data:image/png;base64," + doc.chart_b64;
+
+    // 밸류에이션
+    renderValuation(doc.valuation);
 
     // 시그널
     const analysis = doc.analysis || "";

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()  # .env 먼저 로드 후 환경변수 읽기
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
-from analyzer import get_stock_data, calculate_indicators
+from analyzer import get_stock_data, calculate_indicators, get_valuation_data
 from chart import generate_chart
 from news import fetch_news
 from ai import analyze_with_claude
@@ -172,7 +172,8 @@ async def analyze(
     df = calculate_indicators(df)
     chart_b64 = generate_chart(df, ticker)
     news_items = fetch_news(ticker)
-    analysis = await analyze_with_claude(chart_b64, df, ticker, news_items)
+    valuation = await asyncio.to_thread(get_valuation_data, ticker)
+    analysis = await analyze_with_claude(chart_b64, df, ticker, news_items, valuation)
     signal = extract_signal(analysis)
 
     indicators = {
@@ -194,6 +195,7 @@ async def analyze(
             chart_b64=chart_b64, user_id=user_id,
             current_price=safe(df["Close"].iloc[-1]),
             change_pct=safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
+            valuation=valuation,
         )
 
     return {
@@ -202,6 +204,7 @@ async def analyze(
         "current_price": safe(df["Close"].iloc[-1]),
         "change_pct":    safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
         "indicators":    indicators,
+        "valuation":     valuation,
         "chart_image":   chart_b64,
         "news":          news_items,
         "analysis":      analysis,

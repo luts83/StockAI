@@ -24,7 +24,7 @@ def get_db():
 def save_analysis(ticker: str, period: str, indicators: dict,
                   analysis: str, signal: str, news: list, chart_b64: str,
                   user_id: str = "", current_price: float = None,
-                  change_pct: float = None) -> str:
+                  change_pct: float = None, valuation: dict = None) -> str:
     db = get_db()
     doc_id = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     doc = {
@@ -35,6 +35,7 @@ def save_analysis(ticker: str, period: str, indicators: dict,
         "current_price": current_price,
         "change_pct":    change_pct,
         "indicators":    indicators,
+        "valuation":     valuation or {},
         "analysis":      analysis,
         "signal":        signal,
         "news":          news,
