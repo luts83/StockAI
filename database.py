@@ -94,6 +94,36 @@ def delete_analysis(doc_id: str):
     get_db()["analyses"].delete_one({"_id": doc_id})
 
 
+# ── 시황 저장/조회 ──────────────────────────────────────
+def save_market_brief(brief: dict) -> str:
+    db = get_db()
+    db["market_briefs"].replace_one(
+        {"_id": brief["_id"]},
+        brief,
+        upsert=True,
+    )
+    return brief["_id"]
+
+def get_latest_market_brief(brief_type: str = None) -> dict | None:
+    db = get_db()
+    query = {"type": brief_type} if brief_type else {}
+    return db["market_briefs"].find_one(
+        query,
+        sort=[("created_at", -1)],
+    )
+
+def get_market_briefs(limit: int = 10) -> list:
+    db = get_db()
+    cursor = db["market_briefs"].find(
+        {},
+        {"market_data": 0},
+    ).sort("created_at", -1).limit(limit)
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+
 # ── 유저 저장/조회 ──────────────────────────────────────
 def upsert_user(user_id: str, email: str, name: str, picture: str) -> dict:
     """Google 로그인 시 유저 생성 또는 업데이트"""

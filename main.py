@@ -24,8 +24,11 @@ from ai import analyze_with_claude
 from database import (
     save_analysis, get_analysis, get_history,
     get_all_history, append_chat, delete_analysis,
-    upsert_user
+    upsert_user,
+    save_market_brief, get_latest_market_brief, get_market_briefs,
 )
+from market_brief import generate_market_brief
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from auth import (
     get_redirect_uri, get_google_auth_url,
     exchange_code_for_token, get_google_userinfo,
@@ -494,6 +497,73 @@ def debug_admin():
         "has_leading_space": raw != raw.lstrip(),
         "has_trailing_space": raw != raw.rstrip(),
     }
+
+# ── 시황 엔드포인트 ────────────────────────────────────
+
+@app.get("/market/brief/latest")
+async def latest_brief():
+    """최신 시황 조회 (비회원 접근 가능)"""
+    brief = get_latest_market_brief()
+    if not brief:
+        return {"brief": None}
+    brief["_id"] = str(brief["_id"])
+    return {"brief": brief}
+
+
+@app.get("/market/brief/list")
+async def brief_list():
+    """시황 목록 조회"""
+    return get_market_briefs(limit=10)
+
+
+@app.post("/market/brief/generate")
+async def generate_brief(
+    brief_type: str = "close",
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """수동 시황 생성 (관리자 전용)"""
+    token = stockai_token or (
+        authorization.replace("Bearer ", "") if authorization else None
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    user = decode_jwt(token)
+    if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
+        raise HTTPException(status_code=403, detail="관리자 전용")
+
+    brief = await generate_market_brief(brief_type)
+    save_market_brief(brief)
+    return {"ok": True, "id": brief["_id"], "signal": brief["signal"]}
+
+
+# ── 스케줄러 ───────────────────────────────────────────
+
+async def _run_brief(brief_type: str):
+    try:
+        brief = await generate_market_brief(brief_type)
+        save_market_brief(brief)
+        print(f"[scheduler] 시황 생성 완료: {brief['_id']}")
+    except Exception as e:
+        print(f"[scheduler] 시황 생성 오류: {e}")
+
+
+@app.on_event("startup")
+async def start_scheduler():
+    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+    # 장전 시황: 평일 오전 8:30 KST
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_brief("premarket")),
+        "cron", day_of_week="mon-fri", hour=8, minute=30,
+    )
+    # 마감 시황: 평일 오전 6:30 KST (미국 마감 후)
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_brief("close")),
+        "cron", day_of_week="mon-fri", hour=6, minute=30,
+    )
+    scheduler.start()
+    print("[scheduler] 시황 스케줄러 시작 (장전 08:30 / 마감 06:30 KST)")
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

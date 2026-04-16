@@ -104,6 +104,7 @@ header {
 #loading { display:none; text-align:center; padding:80px 20px; }
 .spinner { width:44px; height:44px; margin:0 auto 24px; border-radius:50%; border:2px solid var(--border2); border-top-color:var(--blue); animation:spin 0.7s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 #loading-ticker { font-size:30px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--blue); margin-bottom:6px; }
 #loading-status { font-size:13px; color:var(--muted); }
 .loading-steps { display:flex; gap:8px; justify-content:center; margin-top:20px; flex-wrap:wrap; }
@@ -519,6 +520,72 @@ header {
 </header>
 
 <div class="hero">
+
+  <!-- 시황 배너 -->
+  <div id="market-banner" style="display:none;
+    max-width:640px; margin:0 auto 20px;
+    background:var(--card); border:1px solid var(--border2);
+    border-radius:12px; overflow:hidden;">
+    <div style="display:flex; align-items:center;
+      justify-content:space-between;
+      padding:12px 18px; border-bottom:1px solid var(--border);">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span id="banner-signal-icon">📊</span>
+        <span style="font-size:12px; font-weight:700;
+          color:var(--muted); text-transform:uppercase;
+          letter-spacing:0.5px;" id="banner-type-label">시황</span>
+        <span id="new-brief-badge" style="display:none;
+          font-size:10px; font-weight:700;
+          background:var(--blue); color:#fff;
+          padding:2px 7px; border-radius:20px;
+          font-family:'JetBrains Mono',monospace;
+          animation:pulse 1.5s infinite;">NEW</span>
+        <span style="font-size:11px; color:var(--dim);"
+          id="banner-date"></span>
+      </div>
+      <span id="banner-signal-badge"
+        style="font-size:11px; padding:3px 10px;
+        border-radius:20px; font-weight:700;"></span>
+    </div>
+    <div style="padding:14px 18px;">
+      <div id="banner-summary"
+        style="font-size:13px; color:var(--muted);
+        line-height:1.6;"></div>
+    </div>
+    <div style="padding:0 18px 14px; display:flex;
+      justify-content:flex-end;">
+      <button onclick="showMarketBriefModal()"
+        style="font-size:11px; color:var(--blue);
+        background:none; border:none; cursor:pointer;
+        font-family:'JetBrains Mono',monospace;">
+        전체 보기 →
+      </button>
+    </div>
+  </div>
+
+  <!-- 시황 전체 모달 -->
+  <div id="market-brief-modal"
+    style="display:none; position:fixed; inset:0;
+    background:rgba(0,0,0,0.8); z-index:500;
+    align-items:center; justify-content:center;">
+    <div style="background:var(--card);
+      border:1px solid var(--border2); border-radius:16px;
+      max-width:600px; width:90%; max-height:80vh;
+      overflow-y:auto; padding:28px;">
+      <div style="display:flex; justify-content:space-between;
+        align-items:center; margin-bottom:20px;">
+        <h3 style="font-size:16px; font-weight:700;"
+          id="modal-brief-title">시황 분석</h3>
+        <button onclick="closeMarketBriefModal()"
+          style="background:none; border:none;
+          color:var(--muted); font-size:20px; cursor:pointer;">
+          ×
+        </button>
+      </div>
+      <div class="analysis-md" id="modal-brief-content"></div>
+    </div>
+  </div>
+
   <h1>주식 <span>차트 분석</span>, 자동화</h1>
   <p>티커 입력 → AI가 차트 + 지표 + 실시간 뉴스를 종합 분석</p>
   <div class="search-wrap">
@@ -1568,6 +1635,95 @@ async function downloadCards() {
 }
 
 initAuth();
+
+// ── 시황 배너 ──────────────────────────────────────────
+let marketBriefData = null;
+let marketPollInterval = null;
+
+const SIGNAL_MAP = {
+  BULL:    { icon: "🟢", text: "강세", color: "var(--green)", bg: "rgba(52,211,153,0.1)" },
+  BEAR:    { icon: "🔴", text: "약세", color: "var(--red)",   bg: "rgba(248,113,113,0.1)" },
+  NEUTRAL: { icon: "⚪", text: "중립", color: "var(--muted)", bg: "var(--border)" },
+};
+
+function _applyBriefToBanner(brief) {
+  const s = SIGNAL_MAP[brief.signal] || SIGNAL_MAP.NEUTRAL;
+  const typeLabel = brief.type === "premarket" ? "📊 장전 시황" : "📈 마감 시황";
+
+  document.getElementById("banner-type-label").textContent = typeLabel;
+  document.getElementById("banner-date").textContent       = brief.date;
+  document.getElementById("banner-signal-icon").textContent = s.icon;
+
+  const badge = document.getElementById("banner-signal-badge");
+  badge.textContent        = s.text;
+  badge.style.color        = s.color;
+  badge.style.background   = s.bg;
+
+  const lines   = brief.analysis.split("\n").filter(l => l.trim());
+  const summary = lines[lines.length - 1].replace(/^[#*\-\s]+/, "").trim();
+  document.getElementById("banner-summary").textContent = summary;
+
+  document.getElementById("market-banner").style.display = "block";
+}
+
+async function loadMarketBanner() {
+  try {
+    const res = await fetch(`${API}/market/brief/latest`);
+    const data = await res.json();
+    if (!data.brief) return;
+    marketBriefData = data.brief;
+    _applyBriefToBanner(data.brief);
+  } catch(e) {
+    console.log("[market] 시황 로드 실패", e);
+  }
+}
+
+function showMarketBriefModal() {
+  // NEW 뱃지 제거
+  const newBadge = document.getElementById("new-brief-badge");
+  if (newBadge) newBadge.style.display = "none";
+
+  if (!marketBriefData) return;
+  document.getElementById("modal-brief-title").textContent =
+    marketBriefData.type === "premarket"
+      ? `📊 장전 시황 ${marketBriefData.date}`
+      : `📈 마감 시황 ${marketBriefData.date}`;
+  document.getElementById("modal-brief-content").innerHTML =
+    typeof marked !== "undefined"
+      ? marked.parse(marketBriefData.analysis)
+      : marketBriefData.analysis.replace(/\n/g, "<br>");
+  document.getElementById("market-brief-modal").style.display = "flex";
+}
+
+function closeMarketBriefModal() {
+  document.getElementById("market-brief-modal").style.display = "none";
+}
+
+function startMarketPolling() {
+  if (marketPollInterval) clearInterval(marketPollInterval);
+  marketPollInterval = setInterval(async () => {
+    try {
+      const res  = await fetch(`${API}/market/brief/latest`);
+      const data = await res.json();
+      if (!data.brief) return;
+
+      const currentId = marketBriefData?._id;
+      const newId     = data.brief._id;
+      if (currentId !== newId) {
+        marketBriefData = data.brief;
+        _applyBriefToBanner(data.brief);
+        // NEW 뱃지 표시
+        const badge = document.getElementById("new-brief-badge");
+        if (badge) badge.style.display = "inline";
+      }
+    } catch(e) {
+      console.log("[market] 폴링 실패", e);
+    }
+  }, 30 * 60 * 1000); // 30분
+}
+
+loadMarketBanner();
+startMarketPolling();
 
 </script>
 
