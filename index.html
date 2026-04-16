@@ -974,8 +974,11 @@ function renderResults(data) {
   if (data.cached) {
     const notice = document.createElement("div");
     notice.id = "cached-notice";
-    notice.style.cssText = "background:rgba(77,159,255,0.06);border:1px solid rgba(77,159,255,0.2);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;";
-    notice.innerHTML = `ℹ️ 오늘 이미 분석한 데이터입니다. <span style="color:var(--blue);cursor:pointer;text-decoration:underline;" onclick="forceAnalyze()">새로 분석하기 →</span>`;
+    notice.style.cssText = "background:rgba(77,159,255,0.06);border:1px solid rgba(77,159,255,0.2);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--muted);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;";
+    const newsInfo = data.has_new_news
+      ? `<span style="color:var(--green)">🆕 새 뉴스 ${data.new_news_count}건 추가됨</span>`
+      : `<span>뉴스 최신 상태</span>`;
+    notice.innerHTML = `<span>ℹ️ 오늘 분석한 데이터 · ${newsInfo}</span><span style="color:var(--blue);cursor:pointer;text-decoration:underline;" onclick="forceAnalyze()">새로 분석하기 →</span>`;
     const signalArea = document.getElementById("signal-area");
     if (signalArea) signalArea.before(notice);
   }

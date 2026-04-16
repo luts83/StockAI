@@ -26,7 +26,7 @@ from database import (
     get_all_history, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
-    get_today_analysis,
+    get_today_analysis, update_analysis_news,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -170,23 +170,35 @@ async def analyze(
     user = get_current_user(token=stockai_token, authorization=authorization)
     user_id = user.get("sub", "") if user else ""
 
-    # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환
+    # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환 (뉴스만 실시간 갱신)
     if user_id and not req.force:
         existing = get_today_analysis(ticker, req.period, user_id)
         if existing:
+            # 뉴스만 새로 fetch (비동기)
+            fresh_news = fetch_news(ticker)
+            existing_urls = {n.get("url", "") for n in existing.get("news", [])}
+            new_news = [n for n in fresh_news if n.get("url", "") not in existing_urls]
+
+            if new_news:
+                updated_news = (new_news + existing.get("news", []))[:15]
+                update_analysis_news(existing["_id"], updated_news)
+                existing["news"] = updated_news
+
             return {
-                "doc_id":        existing["_id"],
-                "ticker":        existing["ticker"],
-                "current_price": existing.get("current_price"),
-                "change_pct":    existing.get("change_pct", 0),
-                "indicators":    existing.get("indicators", {}),
-                "valuation":     existing.get("valuation", {}),
-                "chart_image":   existing.get("chart_b64", ""),
-                "news":          existing.get("news", []),
-                "analysis":      existing["analysis"],
-                "signal":        existing.get("signal", "WATCH"),
-                "is_saved":      True,
-                "cached":        True,
+                "doc_id":          existing["_id"],
+                "ticker":          existing["ticker"],
+                "current_price":   existing.get("current_price"),
+                "change_pct":      existing.get("change_pct", 0),
+                "indicators":      existing.get("indicators", {}),
+                "valuation":       existing.get("valuation", {}),
+                "chart_image":     existing.get("chart_b64", ""),
+                "news":            existing["news"],
+                "analysis":        existing["analysis"],
+                "signal":          existing.get("signal", "WATCH"),
+                "is_saved":        True,
+                "cached":          True,
+                "has_new_news":    bool(new_news),
+                "new_news_count":  len(new_news),
             }
 
     df = get_stock_data(ticker, req.period, req.interval)

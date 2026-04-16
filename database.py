@@ -50,6 +50,13 @@ def save_analysis(ticker: str, period: str, indicators: dict,
 def get_analysis(doc_id: str) -> dict | None:
     return get_db()["analyses"].find_one({"_id": doc_id})
 
+def update_analysis_news(doc_id: str, news: list):
+    """분석의 뉴스만 업데이트"""
+    get_db()["analyses"].update_one(
+        {"_id": doc_id},
+        {"$set": {"news": news, "news_updated_at": datetime.now().isoformat()}},
+    )
+
 def get_today_analysis(ticker: str, period: str, user_id: str) -> dict | None:
     """당일 동일 종목+기간 분석 조회 (캐시 재사용)"""
     today = date.today().isoformat()  # "2026-04-16"
