@@ -914,6 +914,10 @@ document.querySelectorAll(".period-btn").forEach(btn => {
 });
 document.getElementById("ticker-input").addEventListener("keydown", e => { if(e.key==="Enter") runAnalysis(); });
 function setTicker(t) { document.getElementById("ticker-input").value = t; runAnalysis(); }
+function forceAnalyze() {
+  document.getElementById("results").style.display = "none";
+  runAnalysis(true);
+}
 
 const stepLabels = ["데이터 수집","지표 계산","차트 생성","뉴스 수집","AI 분석"];
 let stepIdx=0, stepTimer=null;
@@ -925,7 +929,7 @@ function advanceStep() {
   stepIdx++;
 }
 
-async function runAnalysis() {
+async function runAnalysis(force = false) {
   const ticker = document.getElementById("ticker-input").value.trim().toUpperCase();
   if(!ticker) return;
   document.getElementById("results").style.display = "none";
@@ -942,7 +946,7 @@ async function runAnalysis() {
   try {
     const res = await fetch(`${API}/analyze`, {
       method:"POST", headers:{"Content-Type":"application/json", ...authHeaders()},
-      body: JSON.stringify({ ticker, period, interval:"1d" })
+      body: JSON.stringify({ ticker, period, interval:"1d", force })
     });
     if(!res.ok) { const e=await res.json(); throw new Error(e.detail||"분석 실패"); }
     const data = await res.json();
@@ -963,6 +967,18 @@ async function runAnalysis() {
 function renderResults(data) {
   document.getElementById("loading").style.display = "none";
   const inds = data.indicators;
+
+  // 캐시된 분석이면 안내 배너 표시
+  const existingNotice = document.getElementById("cached-notice");
+  if (existingNotice) existingNotice.remove();
+  if (data.cached) {
+    const notice = document.createElement("div");
+    notice.id = "cached-notice";
+    notice.style.cssText = "background:rgba(77,159,255,0.06);border:1px solid rgba(77,159,255,0.2);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;";
+    notice.innerHTML = `ℹ️ 오늘 이미 분석한 데이터입니다. <span style="color:var(--blue);cursor:pointer;text-decoration:underline;" onclick="forceAnalyze()">새로 분석하기 →</span>`;
+    const signalArea = document.getElementById("signal-area");
+    if (signalArea) signalArea.before(notice);
+  }
 
   document.getElementById("res-ticker").textContent = data.ticker + "  ·  1D  ·  " + new Date().toLocaleDateString("ko-KR");
   document.getElementById("res-price").textContent = fmtDollar(data.current_price);
@@ -1425,6 +1441,7 @@ function renderHistory(items) {
     return `<div class="history-item" id="hist-${item._id}" onclick="loadSavedAnalysis('${item._id}')">
       <span class="history-ticker">${item.ticker}</span>
       <span class="history-date">${date}</span>
+      <span style="font-size:10px;padding:2px 7px;background:var(--border2);color:var(--muted);border-radius:4px;font-family:'JetBrains Mono',monospace;">${item.period || '6mo'}</span>
       <span class="history-signal ${sigClass}">${sigText}</span>
       ${chatCount ? `<span class="history-chats">💬${chatCount}</span>` : ""}
       <div class="history-actions" onclick="event.stopPropagation()">

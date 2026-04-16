@@ -1,5 +1,5 @@
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 import certifi
 import os
@@ -49,6 +49,19 @@ def save_analysis(ticker: str, period: str, indicators: dict,
 # ── 분석 조회 ──────────────────────────────────────────
 def get_analysis(doc_id: str) -> dict | None:
     return get_db()["analyses"].find_one({"_id": doc_id})
+
+def get_today_analysis(ticker: str, period: str, user_id: str) -> dict | None:
+    """당일 동일 종목+기간 분석 조회 (캐시 재사용)"""
+    today = date.today().isoformat()  # "2026-04-16"
+    return get_db()["analyses"].find_one(
+        {
+            "ticker":     ticker,
+            "period":     period,
+            "user_id":    user_id,
+            "created_at": {"$regex": f"^{today}"},
+        },
+        sort=[("created_at", -1)],
+    )
 
 def get_history(ticker: str, limit: int = 10, user_id: str = "") -> list:
     """특정 종목의 분석 히스토리 (최신순, 차트 제외)"""
