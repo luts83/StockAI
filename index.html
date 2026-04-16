@@ -520,10 +520,34 @@ header {
 </header>
 
 <div class="hero">
+  <h1>주식 <span>차트 분석</span>, 자동화</h1>
+  <p>티커 입력 → AI가 차트 + 지표 + 실시간 뉴스를 종합 분석</p>
+  <div class="search-wrap">
+    <div class="search-row">
+      <input id="ticker-input" type="text" placeholder="AAPL, TSLA, MDB, 005930.KS ..." maxlength="20" autocomplete="off" autocorrect="off" spellcheck="false">
+      <div class="period-group">
+        <button class="period-btn" data-p="1mo">1M</button>
+        <button class="period-btn" data-p="3mo">3M</button>
+        <button class="period-btn active" data-p="6mo">6M</button>
+        <button class="period-btn" data-p="1y">1Y</button>
+      </div>
+      <button class="search-btn" id="analyze-btn" onclick="runAnalysis()">분석 →</button>
+    </div>
+    <div class="quick-row">
+      <span class="q-chip" onclick="setTicker('AAPL')">AAPL</span>
+      <span class="q-chip" onclick="setTicker('TSLA')">TSLA</span>
+      <span class="q-chip" onclick="setTicker('NVDA')">NVDA</span>
+      <span class="q-chip" onclick="setTicker('MDB')">MDB</span>
+      <span class="q-chip" onclick="setTicker('AMZN')">AMZN</span>
+      <span class="q-chip" onclick="setTicker('META')">META</span>
+      <span class="q-chip" onclick="setTicker('005930.KS')">삼성전자</span>
+      <span class="q-chip" onclick="setTicker('035420.KS')">NAVER</span>
+    </div>
+  </div>
 
-  <!-- 시황 배너 -->
+  <!-- 시황 배너 (검색창 아래) -->
   <div id="market-banner" style="display:none;
-    max-width:640px; margin:0 auto 20px;
+    max-width:640px; margin:16px auto 0;
     background:var(--card); border:1px solid var(--border2);
     border-radius:12px; overflow:hidden;">
     <div style="display:flex; align-items:center;
@@ -560,54 +584,6 @@ header {
         font-family:'JetBrains Mono',monospace;">
         전체 보기 →
       </button>
-    </div>
-  </div>
-
-  <!-- 시황 전체 모달 -->
-  <div id="market-brief-modal"
-    style="display:none; position:fixed; inset:0;
-    background:rgba(0,0,0,0.8); z-index:500;
-    align-items:center; justify-content:center;">
-    <div style="background:var(--card);
-      border:1px solid var(--border2); border-radius:16px;
-      max-width:600px; width:90%; max-height:80vh;
-      overflow-y:auto; padding:28px;">
-      <div style="display:flex; justify-content:space-between;
-        align-items:center; margin-bottom:20px;">
-        <h3 style="font-size:16px; font-weight:700;"
-          id="modal-brief-title">시황 분석</h3>
-        <button onclick="closeMarketBriefModal()"
-          style="background:none; border:none;
-          color:var(--muted); font-size:20px; cursor:pointer;">
-          ×
-        </button>
-      </div>
-      <div class="analysis-md" id="modal-brief-content"></div>
-    </div>
-  </div>
-
-  <h1>주식 <span>차트 분석</span>, 자동화</h1>
-  <p>티커 입력 → AI가 차트 + 지표 + 실시간 뉴스를 종합 분석</p>
-  <div class="search-wrap">
-    <div class="search-row">
-      <input id="ticker-input" type="text" placeholder="AAPL, TSLA, MDB, 005930.KS ..." maxlength="20" autocomplete="off" autocorrect="off" spellcheck="false">
-      <div class="period-group">
-        <button class="period-btn" data-p="1mo">1M</button>
-        <button class="period-btn" data-p="3mo">3M</button>
-        <button class="period-btn active" data-p="6mo">6M</button>
-        <button class="period-btn" data-p="1y">1Y</button>
-      </div>
-      <button class="search-btn" id="analyze-btn" onclick="runAnalysis()">분석 →</button>
-    </div>
-    <div class="quick-row">
-      <span class="q-chip" onclick="setTicker('AAPL')">AAPL</span>
-      <span class="q-chip" onclick="setTicker('TSLA')">TSLA</span>
-      <span class="q-chip" onclick="setTicker('NVDA')">NVDA</span>
-      <span class="q-chip" onclick="setTicker('MDB')">MDB</span>
-      <span class="q-chip" onclick="setTicker('AMZN')">AMZN</span>
-      <span class="q-chip" onclick="setTicker('META')">META</span>
-      <span class="q-chip" onclick="setTicker('005930.KS')">삼성전자</span>
-      <span class="q-chip" onclick="setTicker('035420.KS')">NAVER</span>
     </div>
   </div>
 </div>
@@ -1667,8 +1643,15 @@ function _applyBriefToBanner(brief) {
   badge.style.color        = s.color;
   badge.style.background   = s.bg;
 
-  const lines   = brief.analysis.split("\n").filter(l => l.trim());
-  const summary = lines[lines.length - 1].replace(/^[#*\-\s]+/, "").trim();
+  // 한 줄 요약 섹션 우선 추출, 없으면 마지막 줄 fallback
+  const _briefText = brief.analysis;
+  const summaryMatch = _briefText.match(
+    /###\s*\d+\.\s*오늘의 한 줄 요약[\s\S]*?\n([^\n#]+)/
+  );
+  const summary = summaryMatch
+    ? summaryMatch[1].replace(/^[-*\s]+/, "").trim()
+    : _briefText.split("\n").filter(l => l.trim()).pop()
+                .replace(/^[#*\-\s]+/, "").trim();
   document.getElementById("banner-summary").textContent = summary;
 
   document.getElementById("market-banner").style.display = "block";
@@ -1734,6 +1717,30 @@ loadMarketBanner();
 startMarketPolling();
 
 </script>
+
+<!-- 시황 전체 모달 -->
+<div id="market-brief-modal"
+  style="display:none; position:fixed; inset:0;
+  background:rgba(0,0,0,0.8); z-index:500;
+  align-items:center; justify-content:center;"
+  onclick="if(event.target===this)closeMarketBriefModal()">
+  <div style="background:var(--card);
+    border:1px solid var(--border2); border-radius:16px;
+    max-width:600px; width:90%; max-height:80vh;
+    overflow-y:auto; padding:28px;">
+    <div style="display:flex; justify-content:space-between;
+      align-items:center; margin-bottom:20px;">
+      <h3 style="font-size:16px; font-weight:700;"
+        id="modal-brief-title">시황 분석</h3>
+      <button onclick="closeMarketBriefModal()"
+        style="background:none; border:none;
+        color:var(--muted); font-size:20px; cursor:pointer;">
+        ×
+      </button>
+    </div>
+    <div class="analysis-md" id="modal-brief-content"></div>
+  </div>
+</div>
 
 <!-- LOGIN MODAL -->
 <div class="modal-backdrop" id="login-modal" onclick="if(event.target===this)closeLoginModal()">
