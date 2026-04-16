@@ -957,7 +957,7 @@ async function runAnalysis(force = false) {
     clearInterval(stepTimer);
     document.getElementById("loading").style.display = "none";
     document.getElementById("error-msg").innerHTML =
-      `<strong>오류 발생</strong><br>${err.message}<br><small style="color:var(--dim);margin-top:8px;display:block">API 서버(localhost:8000)가 실행 중인지 확인하세요</small>`;
+      `<strong>오류 발생</strong><br>${err.message}<br><small style="color:var(--dim);margin-top:8px;display:block">${IS_LOCAL ? "로컬 API 서버(localhost:8000)가 실행 중인지 확인하세요" : "서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해주세요."}</small>`;
     document.getElementById("error-msg").style.display = "block";
   } finally {
     document.getElementById("analyze-btn").disabled = false;
