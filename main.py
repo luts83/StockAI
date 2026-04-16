@@ -498,6 +498,38 @@ def debug_admin():
         "has_trailing_space": raw != raw.rstrip(),
     }
 
+@app.get("/debug/scheduler")
+async def debug_scheduler():
+    """스케줄러 상태 + 최신 시황 생성 시각 확인"""
+    import pytz
+    from datetime import datetime
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.now(kst)
+
+    close_brief   = get_latest_market_brief("close")
+    pre_brief     = get_latest_market_brief("premarket")
+
+    def _brief_info(b):
+        if not b:
+            return {"exists": False}
+        return {
+            "exists":     True,
+            "id":         str(b.get("_id", "")),
+            "date":       b.get("date"),
+            "created_at": b.get("created_at"),
+            "signal":     b.get("signal"),
+        }
+
+    return {
+        "server_time_kst":    now_kst.strftime("%Y-%m-%d %H:%M:%S KST"),
+        "scheduler_jobs": [
+            {"name": "마감 시황", "cron": "평일 KST 05:30 (BST 21:30)"},
+            {"name": "장전 시황", "cron": "평일 KST 21:30 (BST 13:30)"},
+        ],
+        "latest_close":     _brief_info(close_brief),
+        "latest_premarket": _brief_info(pre_brief),
+    }
+
 # ── 시황 엔드포인트 ────────────────────────────────────
 
 @app.get("/market/brief/latest")
