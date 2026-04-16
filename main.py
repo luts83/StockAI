@@ -173,9 +173,10 @@ async def analyze(
     # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환 (뉴스만 실시간 갱신)
     if user_id and not req.force:
         existing = get_today_analysis(ticker, req.period, user_id)
+        print(f"[CACHE] ticker={ticker} period={req.period} user={user_id[:8]}... hit={existing is not None}")
         if existing:
-            # 뉴스만 새로 fetch (비동기)
-            fresh_news = fetch_news(ticker)
+            # 뉴스만 새로 fetch (동기 함수를 스레드로 실행해 이벤트 루프 블로킹 방지)
+            fresh_news = await asyncio.to_thread(fetch_news, ticker)
             existing_urls = {n.get("url", "") for n in existing.get("news", [])}
             new_news = [n for n in fresh_news if n.get("url", "") not in existing_urls]
 

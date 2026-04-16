@@ -60,15 +60,17 @@ def update_analysis_news(doc_id: str, news: list):
 def get_today_analysis(ticker: str, period: str, user_id: str) -> dict | None:
     """당일 동일 종목+기간 분석 조회 (캐시 재사용)"""
     today = date.today().isoformat()  # "2026-04-16"
-    return get_db()["analyses"].find_one(
+    # find_one(sort=...) 구문이 pymongo 버전에 따라 무시될 수 있으므로 cursor 방식 사용
+    cursor = get_db()["analyses"].find(
         {
             "ticker":     ticker,
             "period":     period,
             "user_id":    user_id,
             "created_at": {"$regex": f"^{today}"},
-        },
-        sort=[("created_at", -1)],
-    )
+        }
+    ).sort("created_at", -1).limit(1)
+    items = list(cursor)
+    return items[0] if items else None
 
 def get_history(ticker: str, limit: int = 10, user_id: str = "") -> list:
     """특정 종목의 분석 히스토리 (최신순, 차트 제외)"""
