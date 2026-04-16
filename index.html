@@ -1329,14 +1329,19 @@ function appendChatBubble(role, content, section, streaming=false) {
 function toggleHistory() {
   if (!currentUser) { showLoginModal(); return; }
   const sec = document.getElementById("history-section");
+  const wasOpen = sec.classList.contains("open");
   sec.classList.toggle("open");
-  // 열릴 때 타이틀/데이터를 현재 종목 기준으로 새로고침
-  if (sec.classList.contains("open")) loadHistory();
+  // 열릴 때만 현재 종목 기준으로 데이터 새로고침 (닫을 땐 fetch 생략)
+  if (!wasOpen) loadHistory();
 }
 
 // 히스토리 불러오기
 async function loadHistory() {
   try {
+    // 이전 데이터 즉시 클리어 (flash 방지)
+    const listEl = document.getElementById("history-list");
+    if (listEl) listEl.innerHTML = "";
+
     const url = currentTicker
       ? `${API}/history/${encodeURIComponent(currentTicker)}`
       : `${API}/history`;
@@ -1624,6 +1629,9 @@ async function loadSavedAnalysis(docId) {
       resultsEl.style.display = "block";
       resultsEl.scrollIntoView({ behavior: "smooth", block: "start" });
     }
+
+    // 종목 전환 시 히스토리를 현재 종목 기준으로 즉시 갱신
+    if (currentUser) loadHistory();
 
   } catch(e) {
     console.error("[loadSavedAnalysis] 예외 발생:", e);
