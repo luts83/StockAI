@@ -261,6 +261,7 @@ header {
 /* NEWS */
 .news-item { border-bottom:1px solid var(--border); }
 .news-item:last-child { border-bottom:none; }
+.news-item-new { border-left:2px solid var(--green); padding-left:8px; margin-left:-10px; }
 .news-item-header { display:flex; gap:12px; padding:14px 0; cursor:pointer; user-select:none; -webkit-user-select:none; }
 .news-item-header:hover .news-title-ko { color:var(--blue); }
 .news-num { font-size:11px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--dim); flex-shrink:0; margin-top:2px; min-width:18px; }
@@ -1116,7 +1117,8 @@ function renderResults(data) {
   currentTicker = data.ticker;
   currentDocId = data.doc_id || "";
   newsData = data.news || [];
-  renderNews(newsData);
+  // 캐시된 분석에서 새 뉴스가 있으면 상위 N개에 NEW 배지 표시
+  renderNews(newsData, data.cached ? (data.new_news_count || 0) : 0);
 
   // 인스타 카드 버튼: 관리자 + 저장된 분석이 있을 때만 노출
   const cardBtn = document.getElementById("insta-card-btn");
@@ -1170,7 +1172,7 @@ let homeHistoryTotal = 0;
 const HOME_HISTORY_LIMIT = 5;
 const summaryCache = {};
 
-function renderNews(items) {
+function renderNews(items, newCount = 0) {
   const el = document.getElementById("res-news");
   if(!items.length) { el.innerHTML="<p style='color:var(--dim);font-size:13px;padding:8px 0'>뉴스를 불러올 수 없습니다.</p>"; return; }
   el.innerHTML = items.slice(0,8).map((n,i) => {
@@ -1178,13 +1180,18 @@ function renderNews(items) {
     try { if(n.published) dateStr=new Date(n.published).toLocaleDateString("ko-KR",{month:"short",day:"numeric"}); } catch(e){}
     const titleKo = n.title_ko || n.title;
     const titleEn = n.title_ko ? n.title : "";
-    return `<div class="news-item" id="news-${i}">
+    const isNew = newCount > 0 && i < newCount;
+    const newBadge = isNew
+      ? `<span style="font-size:9px;font-weight:700;background:var(--green);color:#0a1628;padding:2px 6px;border-radius:4px;letter-spacing:0.5px;flex-shrink:0;">NEW</span>`
+      : "";
+    return `<div class="news-item${isNew ? ' news-item-new' : ''}" id="news-${i}">
       <div class="news-item-header" onclick="toggleNews(${i})">
         <div class="news-num">${String(i+1).padStart(2,"0")}</div>
         <div class="news-body">
           <div class="news-meta">
             <span class="news-src">${n.source||"News"}</span>
             ${dateStr?`<span class="news-date">${dateStr}</span>`:""}
+            ${newBadge}
           </div>
           <div class="news-title-ko">${titleKo}</div>
           ${titleEn?`<div class="news-title-en">${titleEn}</div>`:""}
