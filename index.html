@@ -1661,8 +1661,18 @@ async function loadSavedAnalysis(docId) {
 
 async function deleteHistory(docId) {
   if (!confirm("이 분석을 삭제할까요?")) return;
-  await fetch(`${API}/analysis/${docId}`, { method: "DELETE", headers: { ...authHeaders() } });
+  const res = await fetch(`${API}/analysis/${docId}`, { method: "DELETE", headers: { ...authHeaders() } });
+  if (!res.ok) { alert("삭제에 실패했습니다."); return; }
+
+  // 플래그 리셋 후 히스토리 목록 갱신
+  historyLoading = false;
   loadHistory();
+
+  // 최근 분석 미리보기는 항상 전체 기준으로 갱신 (삭제 후 다른 종목이 올라와야 함)
+  fetch(`${API}/history`, { headers: { ...authHeaders() } })
+    .then(r => r.ok ? r.json() : [])
+    .then(items => renderRecentPreview(items))
+    .catch(() => {});
 }
 
 // 비교 분석
