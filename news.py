@@ -4,6 +4,7 @@ import anthropic
 import json
 import os
 import re
+import time
 from dotenv import load_dotenv
 from typing import List, Dict
 
@@ -12,6 +13,23 @@ load_dotenv(override=True)
 
 def _get_client():
     return anthropic.Anthropic()
+
+
+def _claude_with_retry(client, max_retries=3, **kwargs):
+    """Claude API 호출 + 과부하(529) 시 지수 백오프 재시도"""
+    for attempt in range(max_retries):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as e:
+            err = str(e)
+            if "529" in err or "overloaded" in err.lower():
+                wait = 2 ** attempt  # 1s → 2s → 4s
+                print(f"Claude 과부하(529), {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise e
+    print("Claude 최종 실패 — 원문 반환")
+    return None
 
 
 def fetch_news(ticker: str) -> List[Dict]:
@@ -95,11 +113,14 @@ def translate_titles(items: List[Dict]) -> List[Dict]:
 
     try:
         client = _get_client()
-        msg = client.messages.create(
+        msg = _claude_with_retry(
+            client,
             model="claude-haiku-4-5-20251001",
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}]
         )
+        if msg is None:
+            return items  # 재시도 모두 실패 → 원문 그대로
         raw = msg.content[0].text.strip()
         # "숫자. 번역" 형태로 한 줄씩 파싱 (특수문자에도 안전)
         translated = []

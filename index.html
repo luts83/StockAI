@@ -1146,6 +1146,7 @@ function renderValuation(val) {
 
 // ── News ──
 let currentTicker = "", newsData = [];
+let historyLoading = false;
 const summaryCache = {};
 
 function renderNews(items) {
@@ -1337,6 +1338,8 @@ function toggleHistory() {
 
 // 히스토리 불러오기
 async function loadHistory() {
+  if (historyLoading) return;  // 중복 호출 방지
+  historyLoading = true;
   try {
     // 이전 데이터 즉시 클리어 (flash 방지)
     const listEl = document.getElementById("history-list");
@@ -1363,6 +1366,7 @@ async function loadHistory() {
       footerBtn.onclick = loadAllHistory;
     }
   } catch(e) { console.error("히스토리 로드 실패", e); }
+  finally { historyLoading = false; }
 }
 
 async function loadAllHistory() {
