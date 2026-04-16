@@ -1384,7 +1384,28 @@ function renderHistory(items) {
 async function loadSavedAnalysis(docId) {
   try {
     const res = await fetch(`${API}/analysis/${docId}`, { headers: { ...authHeaders() } });
+
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { const e = await res.json(); detail = e.detail || detail; } catch {}
+      console.error("[loadSavedAnalysis] API 오류:", detail);
+      alert(`분석을 불러올 수 없습니다. (${detail})`);
+      return;
+    }
+
     const doc = await res.json();
+    console.log("[loadSavedAnalysis] 응답 데이터:", {
+      id: doc._id, ticker: doc.ticker,
+      has_analysis: !!doc.analysis, has_chart: !!doc.chart_b64,
+      has_indicators: !!doc.indicators, has_valuation: !!doc.valuation,
+    });
+
+    if (!doc || !doc.analysis) {
+      console.error("[loadSavedAnalysis] 분석 데이터 없음:", doc);
+      alert("분석 데이터가 없습니다.");
+      return;
+    }
+
     const inds = doc.indicators || {};
 
     currentDocId = docId;
@@ -1392,28 +1413,32 @@ async function loadSavedAnalysis(docId) {
     newsData = doc.news || [];
 
     // 티커 헤더
-    document.getElementById("res-ticker").textContent =
+    const tickerEl = document.getElementById("res-ticker");
+    if (tickerEl) tickerEl.textContent =
       doc.ticker + "  ·  " + (doc.period || "") + "  ·  " + (doc.created_at || "").slice(0, 10);
 
-    // 현재가 표시 (신규 저장분은 current_price, 구 저장분은 ma20 fallback)
+    // 현재가 표시
     const savedPrice = doc.current_price || inds.ma20 || null;
-    document.getElementById("res-price").textContent = savedPrice ? fmtDollar(savedPrice) : "—";
+    const priceEl = document.getElementById("res-price");
+    if (priceEl) priceEl.textContent = savedPrice ? fmtDollar(savedPrice) : "—";
 
     // 배지
-    document.getElementById("res-change").textContent = "저장된 분석";
-    document.getElementById("res-change").className = "badge badge-gray";
-    document.getElementById("res-ma-status").textContent =
-      inds.ma200 ? (inds.ma20 > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래") : "—";
-    document.getElementById("res-vol-status").textContent = "MA20  " + fmtDollar(inds.ma20);
+    const chEl = document.getElementById("res-change");
+    if (chEl) { chEl.textContent = "저장된 분석"; chEl.className = "badge badge-gray"; }
+    const maEl = document.getElementById("res-ma-status");
+    if (maEl) maEl.textContent = inds.ma200
+      ? (inds.ma20 > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래") : "—";
+    const volEl = document.getElementById("res-vol-status");
+    if (volEl) volEl.textContent = "MA20  " + fmtDollar(inds.ma20);
 
-    // 지표 스트립 (RSI / MACD / MA60 / MA200)
+    // 지표 스트립
     const rsi = inds.rsi ?? null;
     const rsiC = rsi == null ? "c-muted" : rsi > 70 ? "c-red" : rsi < 30 ? "c-green" : "c-muted";
     const rsiLbl = rsi == null ? "—" : rsi > 70 ? "과매수" : rsi < 30 ? "과매도" : "중립";
     const macdBull = (inds.macd ?? 0) > (inds.macd_signal ?? 0);
     const ma60val = inds.ma60 ?? inds.ma200 ?? 0;
-
-    document.getElementById("res-indicators").innerHTML = `
+    const indEl = document.getElementById("res-indicators");
+    if (indEl) indEl.innerHTML = `
       <div class="ind-cell">
         <div class="ind-lbl">RSI (14)</div>
         <div class="ind-val ${rsiC}">${rsi ?? "—"}</div>
@@ -1436,7 +1461,10 @@ async function loadSavedAnalysis(docId) {
       </div>`;
 
     // 차트
-    if (doc.chart_b64) document.getElementById("res-chart").src = "data:image/png;base64," + doc.chart_b64;
+    if (doc.chart_b64) {
+      const chartEl = document.getElementById("res-chart");
+      if (chartEl) chartEl.src = "data:image/png;base64," + doc.chart_b64;
+    }
 
     // 밸류에이션
     renderValuation(doc.valuation);
@@ -1458,7 +1486,8 @@ async function loadSavedAnalysis(docId) {
         ${buyTrigger2  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY 전환: ${buyTrigger2}</div>` : ""}
         ${sellTrigger2 ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 SELL 전환: ${sellTrigger2}</div>` : ""}
       </div>` : "";
-    document.getElementById("signal-area").innerHTML = `
+    const sigAreaEl = document.getElementById("signal-area");
+    if (sigAreaEl) sigAreaEl.innerHTML = `
       <div class="signal-box ${signal}">
         <div class="signal-icon">${sigIcon}</div>
         <div style="flex:1">
@@ -1474,7 +1503,8 @@ async function loadSavedAnalysis(docId) {
       .replace(/\nWATCH_BUY_TRIGGER:.*$/gm, "")
       .replace(/\nWATCH_SELL_TRIGGER:.*$/gm, "")
       .trim();
-    document.getElementById("res-analysis").innerHTML = typeof marked !== "undefined"
+    const anaEl = document.getElementById("res-analysis");
+    if (anaEl) anaEl.innerHTML = typeof marked !== "undefined"
       ? marked.parse(cleanAnalysis) : cleanAnalysis.replace(/\n/g, "<br>");
 
     // 뉴스 렌더링
@@ -1482,27 +1512,36 @@ async function loadSavedAnalysis(docId) {
 
     // 채팅 히스토리 복원
     const chatContainer = document.getElementById("chat-messages");
-    chatContainer.innerHTML = "";
-    (doc.chat_history || []).forEach(m => appendChatBubble(m.role, m.content, m.section));
+    if (chatContainer) {
+      chatContainer.innerHTML = "";
+      (doc.chat_history || []).forEach(m => appendChatBubble(m.role, m.content, m.section));
+    }
 
     // 섹션 표시
-    document.getElementById("chat-section").style.display = "block";
-    document.getElementById("history-section").style.display = "block";
+    const chatSec = document.getElementById("chat-section");
+    const histSec = document.getElementById("history-section");
+    if (chatSec) chatSec.style.display = "block";
+    if (histSec) histSec.style.display = "block";
     updateLockUI();
     const rpEl = document.getElementById("recent-preview");
     if (rpEl) rpEl.style.display = "none";
 
     // 인스타 카드 버튼 표시 (관리자 전용)
     const showCardBtn = currentUser?.is_admin ? "inline-block" : "none";
-    const cardBtn2 = document.getElementById("insta-card-btn");
+    const cardBtn2  = document.getElementById("insta-card-btn");
     const cardBtn2M = document.getElementById("insta-card-btn-mobile");
     if (cardBtn2)  cardBtn2.style.display  = showCardBtn;
     if (cardBtn2M) cardBtn2M.style.display = showCardBtn;
 
-    document.getElementById("results").style.display = "block";
-    document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
+    const resultsEl = document.getElementById("results");
+    if (resultsEl) {
+      resultsEl.style.display = "block";
+      resultsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
   } catch(e) {
-    alert("분석을 불러올 수 없습니다.");
+    console.error("[loadSavedAnalysis] 예외 발생:", e);
+    alert(`분석을 불러올 수 없습니다.\n원인: ${e.message}`);
   }
 }
 
