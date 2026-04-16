@@ -759,6 +759,8 @@ const API = IS_LOCAL
 const fmtNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—");
 const fmtDollar = (v) => (typeof v === "number" && Number.isFinite(v) ? "$" + v.toLocaleString() : "—");
 const fmtVal = (v, suffix = "") => (v && v !== 0 ? `${v}${suffix}` : "—");
+// WATCH 트리거 텍스트 정제 — ** 또는 빈값이면 null 반환 (전역 공유)
+const _clean = (raw) => { const t = (raw || "").trim().replace(/^\*+$/, ""); return t || null; };
 
 // ── 토큰 관리 (localStorage 기반, 쿠키 크로스도메인 문제 해결) ──
 function getToken() { return localStorage.getItem("stockai_token") || null; }
@@ -1011,10 +1013,6 @@ function renderResults(data) {
   // WATCH 전환 조건 파싱 (** 또는 빈값 방어)
   const buyTriggerMatch  = analysis.match(/WATCH_BUY_TRIGGER:\s*(.+)/);
   const sellTriggerMatch = analysis.match(/WATCH_SELL_TRIGGER:\s*(.+)/);
-  const _clean = (raw) => {
-    const t = (raw || "").trim().replace(/^\*+$/, "");
-    return t || null;
-  };
   const buyTrigger  = _clean(buyTriggerMatch?.[1]);
   const sellTrigger = _clean(sellTriggerMatch?.[1]);
   const watchTriggerHtml = (signal === "watch" && (buyTrigger || sellTrigger)) ? `
