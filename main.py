@@ -616,6 +616,9 @@ async def _run_brief(brief_type: str):
 
 @app.on_event("startup")
 async def start_scheduler():
+    import pytz
+    from datetime import datetime
+
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
     # 마감 시황: KST 05:30 (= BST 21:30, 미국장 마감 30분 후)
     scheduler.add_job(
@@ -629,6 +632,30 @@ async def start_scheduler():
     )
     scheduler.start()
     print("[scheduler] 시황 스케줄러 시작 (마감 KST 05:30 / 장전 KST 21:30)")
+
+    # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.now(kst)
+    is_weekday = now_kst.weekday() < 5  # 0=월 ~ 4=금
+
+    if is_weekday:
+        today_close    = get_latest_market_brief("close")
+        today_pre      = get_latest_market_brief("premarket")
+        today_str      = now_kst.strftime("%Y-%m-%d")
+        h, m           = now_kst.hour, now_kst.minute
+        current_minutes = h * 60 + m
+
+        # 마감 시황: KST 05:30 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 5 * 60 + 30:
+            if not today_close or today_close.get("date") != today_str:
+                print("[scheduler] 오늘 마감 시황 누락 감지 → 즉시 생성")
+                asyncio.create_task(_run_brief("close"))
+
+        # 장전 시황: KST 21:30 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 21 * 60 + 30:
+            if not today_pre or today_pre.get("date") != today_str:
+                print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
+                asyncio.create_task(_run_brief("premarket"))
 
 
 if __name__ == "__main__":
