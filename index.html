@@ -1437,14 +1437,26 @@ function goHome() {
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("chat-section").style.display = "none";
   document.getElementById("history-section").style.display = "none";
-  // 최근 분석 미리보기 복원 (로그인 상태일 때만)
+
+  // 검색창 및 상태 초기화
+  const input = document.getElementById("ticker-input");
+  if (input) input.value = "";
+  currentTicker = "";
+  currentDocId = "";
+
+  // 최근 분석 미리보기 갱신 (전체 히스토리 기준)
   if (currentUser) {
-    const rp = document.getElementById("recent-preview");
-    if (rp && document.getElementById("recent-preview-list").children.length > 0) {
-      rp.style.display = "block";
-    }
+    fetch(`${API}/history`, { headers: { ...authHeaders() } })
+      .then(r => r.ok ? r.json() : [])
+      .then(items => {
+        renderRecentPreview(items);
+        const rp = document.getElementById("recent-preview");
+        if (rp && items.length > 0) rp.style.display = "block";
+      })
+      .catch(() => {});
   }
-  // 검색창으로 스크롤
+
+  // 상단으로 스크롤
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
