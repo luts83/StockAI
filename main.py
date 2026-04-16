@@ -23,7 +23,7 @@ from news import fetch_news
 from ai import analyze_with_claude
 from database import (
     save_analysis, get_analysis, get_history,
-    get_all_history, append_chat, delete_analysis,
+    get_all_history, get_history_count, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
     get_today_analysis, update_analysis_news,
@@ -307,16 +307,20 @@ async def chat_stream(
 
 @app.get("/history")
 async def all_history(
+    limit: int = 5,
+    skip: int = 0,
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
     user = get_current_user(token=stockai_token, authorization=authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
-    items = get_all_history(limit=20, user_id=user.get("sub", ""))
+    uid = user.get("sub", "")
+    items = get_all_history(limit=limit, skip=skip, user_id=uid)
+    total = get_history_count(uid)
     for item in items:
         item["_id"] = str(item["_id"])
-    return items
+    return {"items": items, "total": total, "skip": skip, "limit": limit}
 
 @app.get("/history/{ticker}")
 async def ticker_history(

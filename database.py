@@ -83,15 +83,21 @@ def get_history(ticker: str, limit: int = 10, user_id: str = "") -> list:
     ).sort("created_at", -1).limit(limit)
     return list(cursor)
 
-def get_all_history(limit: int = 20, user_id: str = "") -> list:
-    """전체 분석 히스토리 (최신순, 차트 제외)"""
+def get_all_history(limit: int = 5, skip: int = 0, user_id: str = "") -> list:
+    """전체 분석 히스토리 (최신순, 차트 제외, 페이지네이션 지원)"""
     db = get_db()
     query = {"user_id": user_id} if user_id else {}
     cursor = db["analyses"].find(
         query,
-        {"chart_b64": 0, "analysis": 0}  # 무거운 필드 제외
-    ).sort("created_at", -1).limit(limit)
+        {"chart_b64": 0, "analysis": 0}
+    ).sort("created_at", -1).skip(skip).limit(limit)
     return list(cursor)
+
+def get_history_count(user_id: str = "") -> int:
+    """전체 분석 개수"""
+    db = get_db()
+    query = {"user_id": user_id} if user_id else {}
+    return db["analyses"].count_documents(query)
 
 # ── 대화 저장 ──────────────────────────────────────────
 def append_chat(doc_id: str, role: str, content: str, section: str = ""):
