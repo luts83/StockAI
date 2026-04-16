@@ -27,6 +27,7 @@ from database import (
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
     get_today_analysis, update_analysis_news,
+    get_today_public_analysis, save_public_analysis,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -172,6 +173,28 @@ async def analyze(
     user = get_current_user(token=stockai_token, authorization=authorization)
     user_id = user.get("sub", "") if user else ""
 
+    # 비로그인 유저 — 당일 공용 캐시 조회 (force=False일 때)
+    if not user_id and not req.force:
+        pub = get_today_public_analysis(ticker, req.period)
+        if pub:
+            print(f"[PUBLIC CACHE] hit: {ticker} {req.period}")
+            return {
+                "doc_id":         "",
+                "ticker":         pub["ticker"],
+                "current_price":  pub.get("current_price"),
+                "change_pct":     pub.get("change_pct", 0),
+                "indicators":     pub.get("indicators", {}),
+                "valuation":      pub.get("valuation", {}),
+                "chart_image":    pub.get("chart_b64", ""),
+                "news":           pub.get("news", []),
+                "analysis":       pub["analysis"],
+                "signal":         pub.get("signal", "WATCH"),
+                "is_saved":       False,
+                "cached":         True,
+                "has_new_news":   False,
+                "new_news_count": 0,
+            }
+
     # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환 (뉴스만 실시간 갱신)
     if user_id and not req.force:
         existing = get_today_analysis(ticker, req.period, user_id)
@@ -224,24 +247,38 @@ async def analyze(
         "ma200":       safe(df["MA200"].iloc[-1]),
     }
 
-    # 로그인 유저만 DB 저장
+    # 로그인 유저 → 개인 히스토리 저장 / 비로그인 유저 → 공용 캐시 저장
     doc_id = ""
+    current_price_val = safe(df["Close"].iloc[-1])
+    change_pct_val    = safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100)
+
     if user_id:
         doc_id = save_analysis(
             ticker=ticker, period=req.period,
             indicators=indicators, analysis=analysis,
             signal=signal, news=news_items,
             chart_b64=chart_b64, user_id=user_id,
-            current_price=safe(df["Close"].iloc[-1]),
-            change_pct=safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
+            current_price=current_price_val,
+            change_pct=change_pct_val,
+            valuation=valuation,
+        )
+    else:
+        # 비로그인 유저의 분석 결과를 공용 캐시로 저장 (당일 첫 분석만 저장)
+        save_public_analysis(
+            ticker=ticker, period=req.period,
+            indicators=indicators, analysis=analysis,
+            signal=signal, news=news_items,
+            chart_b64=chart_b64,
+            current_price=current_price_val,
+            change_pct=change_pct_val,
             valuation=valuation,
         )
 
     return {
         "doc_id":        doc_id,
         "ticker":        ticker,
-        "current_price": safe(df["Close"].iloc[-1]),
-        "change_pct":    safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100),
+        "current_price": current_price_val,
+        "change_pct":    change_pct_val,
         "indicators":    indicators,
         "valuation":     valuation,
         "chart_image":   chart_b64,

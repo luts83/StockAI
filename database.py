@@ -57,6 +57,42 @@ def update_analysis_news(doc_id: str, news: list):
         {"$set": {"news": news, "news_updated_at": datetime.now().isoformat()}},
     )
 
+def get_today_public_analysis(ticker: str, period: str) -> dict | None:
+    """비로그인용 공용 캐시 — user_id 없이 ticker+period+UTC 날짜 기준"""
+    from datetime import timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return get_db()["public_cache"].find_one(
+        {"ticker": ticker, "period": period, "date": today}
+    )
+
+def save_public_analysis(ticker: str, period: str, indicators: dict,
+                          analysis: str, signal: str, news: list, chart_b64: str,
+                          current_price: float, change_pct: float, valuation: dict) -> None:
+    """비로그인용 공용 캐시 저장 (별도 컬렉션, 당일 1회)"""
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    doc = {
+        "ticker":        ticker,
+        "period":        period,
+        "date":          today,
+        "created_at":    now.isoformat(),
+        "indicators":    indicators,
+        "analysis":      analysis,
+        "signal":        signal,
+        "news":          news,
+        "chart_b64":     chart_b64,
+        "current_price": current_price,
+        "change_pct":    change_pct,
+        "valuation":     valuation or {},
+    }
+    # upsert: 같은 날 같은 ticker+period면 덮어쓰지 않고 존재하는 게 있으면 유지
+    get_db()["public_cache"].update_one(
+        {"ticker": ticker, "period": period, "date": today},
+        {"$setOnInsert": doc},
+        upsert=True,
+    )
+
 def get_today_analysis(ticker: str, period: str, user_id: str) -> dict | None:
     """당일 동일 종목+기간 분석 조회 (캐시 재사용)"""
     today = date.today().isoformat()  # "2026-04-16"
