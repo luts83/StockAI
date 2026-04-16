@@ -1072,31 +1072,23 @@ function renderResults(data) {
 // ── 밸류에이션 렌더링 ──
 function renderValuation(val) {
   const strip = document.getElementById("val-strip");
-  if (!val || Object.keys(val).length === 0) {
-    strip.style.display = "none";
-    return;
-  }
   strip.style.display = "grid";
+  const v = val || {};
 
-  const colorFor = (v, goodLow = true) => {
-    if (!v || v === 0) return "";
-    return "";
-  };
-
-  document.getElementById("val-per").textContent   = fmtVal(val.per, "x");
-  document.getElementById("val-fper").textContent  = val.forward_per ? `Fwd ${val.forward_per}x` : "Fwd —";
-  document.getElementById("val-pbr").textContent   = fmtVal(val.pbr, "x");
-  document.getElementById("val-sector").textContent = val.sector || "";
-  document.getElementById("val-psr").textContent   = fmtVal(val.psr, "x");
-  document.getElementById("val-eps").textContent   = val.eps ? `$${val.eps}` : "—";
+  document.getElementById("val-per").textContent    = fmtVal(v.per, "x");
+  document.getElementById("val-fper").textContent   = v.forward_per ? `Fwd ${v.forward_per}x` : "Fwd —";
+  document.getElementById("val-pbr").textContent    = fmtVal(v.pbr, "x");
+  document.getElementById("val-sector").textContent = v.sector || "";
+  document.getElementById("val-psr").textContent    = fmtVal(v.psr, "x");
+  document.getElementById("val-eps").textContent    = v.eps ? `$${v.eps}` : "—";
 
   const revEl = document.getElementById("val-rev");
-  const rev = val.revenue_growth;
+  const rev = v.revenue_growth;
   revEl.textContent = rev ? `${rev > 0 ? "+" : ""}${rev}%` : "—";
   revEl.style.color = rev > 0 ? "var(--green)" : rev < 0 ? "var(--red)" : "";
 
-  document.getElementById("val-div").textContent   = fmtVal(val.dividend_yield, "%");
-  document.getElementById("val-margin").textContent = val.profit_margin ? `이익률 ${val.profit_margin}%` : "";
+  document.getElementById("val-div").textContent    = fmtVal(v.dividend_yield, "%");
+  document.getElementById("val-margin").textContent = v.profit_margin ? `이익률 ${v.profit_margin}%` : "";
 }
 
 // ── News ──
