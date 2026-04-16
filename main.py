@@ -551,18 +551,18 @@ async def _run_brief(brief_type: str):
 @app.on_event("startup")
 async def start_scheduler():
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
-    # 장전 시황: 평일 오전 8:30 KST
-    scheduler.add_job(
-        lambda: asyncio.create_task(_run_brief("premarket")),
-        "cron", day_of_week="mon-fri", hour=8, minute=30,
-    )
-    # 마감 시황: 평일 오전 6:30 KST (미국 마감 후)
+    # 마감 시황: KST 05:30 (= BST 21:30, 미국장 마감 30분 후)
     scheduler.add_job(
         lambda: asyncio.create_task(_run_brief("close")),
-        "cron", day_of_week="mon-fri", hour=6, minute=30,
+        "cron", day_of_week="mon-fri", hour=5, minute=30,
+    )
+    # 장전 시황: KST 21:30 (= BST 13:30, 미국장 시작 1시간 전)
+    scheduler.add_job(
+        lambda: asyncio.create_task(_run_brief("premarket")),
+        "cron", day_of_week="mon-fri", hour=21, minute=30,
     )
     scheduler.start()
-    print("[scheduler] 시황 스케줄러 시작 (장전 08:30 / 마감 06:30 KST)")
+    print("[scheduler] 시황 스케줄러 시작 (마감 KST 05:30 / 장전 KST 21:30)")
 
 
 if __name__ == "__main__":
