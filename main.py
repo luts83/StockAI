@@ -30,6 +30,7 @@ from database import (
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from auth import (
     get_redirect_uri, get_google_auth_url,
     exchange_code_for_token, get_google_userinfo,
@@ -37,6 +38,7 @@ from auth import (
 )
 
 app = FastAPI(title="Stock Analyzer API")
+scheduler = AsyncIOScheduler()  # 모듈 레벨 전역 — health 엔드포인트에서도 접근 가능
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -521,7 +523,7 @@ async def create_card(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "scheduler_running": scheduler.running}
 
 @app.get("/debug/admin")
 def debug_admin():
@@ -623,40 +625,45 @@ async def start_scheduler():
     import pytz
     from datetime import datetime
 
-    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
-    # 마감 시황: KST 05:30 (= BST 21:30, 미국장 마감 30분 후)
+    # UTC 기준으로 등록 (Railway 서버는 UTC, BST 여름시간 자동 적용 안 됨)
+    # 마감 시황: BST 21:30 = UTC 20:30
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_brief("close")),
-        "cron", day_of_week="mon-fri", hour=5, minute=30,
+        _run_brief,
+        CronTrigger(hour=20, minute=30, day_of_week="mon-fri", timezone="UTC"),
+        args=["close"],
+        id="close_brief",
+        replace_existing=True,
     )
-    # 장전 시황: KST 21:30 (= BST 13:30, 미국장 시작 1시간 전)
+    # 장전 시황: BST 13:30 = UTC 12:30
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_brief("premarket")),
-        "cron", day_of_week="mon-fri", hour=21, minute=30,
+        _run_brief,
+        CronTrigger(hour=12, minute=30, day_of_week="mon-fri", timezone="UTC"),
+        args=["premarket"],
+        id="premarket_brief",
+        replace_existing=True,
     )
     scheduler.start()
-    print("[scheduler] 시황 스케줄러 시작 (마감 KST 05:30 / 장전 KST 21:30)")
+    print("[scheduler] 스케줄러 시작 — 마감 UTC 20:30 / 장전 UTC 12:30 (BST 21:30 / 13:30)")
 
     # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
-    kst = pytz.timezone("Asia/Seoul")
-    now_kst = datetime.now(kst)
-    is_weekday = now_kst.weekday() < 5  # 0=월 ~ 4=금
+    utc = pytz.utc
+    now_utc = datetime.now(utc)
+    is_weekday = now_utc.weekday() < 5
+    today_str = now_utc.strftime("%Y-%m-%d")
 
     if is_weekday:
-        today_close    = get_latest_market_brief("close")
-        today_pre      = get_latest_market_brief("premarket")
-        today_str      = now_kst.strftime("%Y-%m-%d")
-        h, m           = now_kst.hour, now_kst.minute
-        current_minutes = h * 60 + m
+        current_minutes = now_utc.hour * 60 + now_utc.minute
 
-        # 마감 시황: KST 05:30 지났고 오늘 데이터 없으면 즉시 생성
-        if current_minutes >= 5 * 60 + 30:
+        # 마감 시황: UTC 20:30 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 20 * 60 + 30:
+            today_close = get_latest_market_brief("close")
             if not today_close or today_close.get("date") != today_str:
                 print("[scheduler] 오늘 마감 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("close"))
 
-        # 장전 시황: KST 21:30 지났고 오늘 데이터 없으면 즉시 생성
-        if current_minutes >= 21 * 60 + 30:
+        # 장전 시황: UTC 12:30 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 12 * 60 + 30:
+            today_pre = get_latest_market_brief("premarket")
             if not today_pre or today_pre.get("date") != today_str:
                 print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("premarket"))
