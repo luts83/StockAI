@@ -1393,6 +1393,7 @@ function renderRecentPreview(items) {
     return `<div class="history-item" onclick="loadSavedAnalysis('${item._id}')">
       <span class="history-ticker">${item.ticker}</span>
       <span class="history-date">${date}</span>
+      <span style="font-size:10px;padding:2px 7px;background:var(--border2);color:var(--muted);border-radius:4px;font-family:'JetBrains Mono',monospace;">${item.period || '6mo'}</span>
       <span class="history-signal ${sigClass}">${sigText}</span>
       ${chatCount ? `<span class="history-chats">💬${chatCount}</span>` : ""}
       <div class="history-actions" onclick="event.stopPropagation()">
