@@ -1073,12 +1073,14 @@ function renderResults(data) {
 
   // ── 3. 분석 텍스트 렌더링 (시그널 파싱과 완전 독립)
   const cleanAnalysis = analysis
-    .replace(/\nSIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/gm, "")   // "SIGNAL: WATCH" 포함
-    .replace(/SIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/g, "")        // 줄 앞 \n 없는 경우도 처리
-    .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "") // 값이 다음 줄에 있는 경우 포함
+    .replace(/\nSIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/gm, "")
+    .replace(/SIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/g, "")
+    .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
     .replace(/\nWATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
-    .replace(/WATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")   // 줄 앞 \n 없는 경우도
+    .replace(/WATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
     .replace(/WATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
+    .replace(/\*{1,2}\s*$/gm, "")   // 줄 끝 ** 잔여 제거
+    .replace(/^\*{1,2}\s*/gm, "")   // 줄 앞 ** 잔여 제거
     .trim();
   const analysisEl = document.getElementById("res-analysis");
   if (analysisEl) {
@@ -1609,6 +1611,8 @@ async function loadSavedAnalysis(docId) {
       .replace(/\nWATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
       .replace(/WATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
       .replace(/WATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
+      .replace(/\*{1,2}\s*$/gm, "")   // 줄 끝 ** 잔여 제거
+      .replace(/^\*{1,2}\s*/gm, "")   // 줄 앞 ** 잔여 제거
       .trim();
     const anaEl = document.getElementById("res-analysis");
     if (anaEl) anaEl.innerHTML = typeof marked !== "undefined"

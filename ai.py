@@ -97,9 +97,9 @@ WATCH (진짜 혼재할 때만):
 분석 마지막에 반드시:
 SIGNAL:BUY 또는 SIGNAL:WATCH 또는 SIGNAL:SELL
 
-WATCH 출력 시 반드시 추가 (절대 비워두거나 ** 만 출력 금지):
-WATCH_BUY_TRIGGER: 반드시 구체적인 가격/지표 조건을 한 문장으로 작성. 예시) RSI 50 돌파 + 거래량 평균 이상 + $XXX 저항 돌파 시
-WATCH_SELL_TRIGGER: 반드시 구체적인 가격/지표 조건을 한 문장으로 작성. 예시) RSI 30 이탈 + $XXX 지지선 붕괴 시"""
+WATCH 출력 시 반드시 추가 (절대 비워두거나 ** 만 출력 금지, ** 기호 사용 금지):
+WATCH_BUY_TRIGGER: 반드시 ** 기호 없이 plain text로만 작성. 예) RSI 60 돌파 + $XX 저항 돌파 시
+WATCH_SELL_TRIGGER: 반드시 ** 기호 없이 plain text로만 작성. 예) $XX 지지 붕괴 + RSI 40 이탈 시"""
 
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None) -> str:
