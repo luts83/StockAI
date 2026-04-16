@@ -738,7 +738,7 @@ header {
       </div>
       <div class="history-list" id="history-list"></div>
       <div style="padding:10px 16px;border-top:1px solid var(--border);text-align:center;">
-        <button onclick="loadAllHistory()"
+        <button id="history-footer-btn" onclick="loadAllHistory()"
           style="font-size:11px;color:var(--muted);background:none;
           border:none;cursor:pointer;font-family:'JetBrains Mono',monospace;">
           전체 히스토리 보기 →
@@ -1067,13 +1067,14 @@ function renderResults(data) {
   document.getElementById("chat-section").style.display = "block";
   document.getElementById("history-section").style.display = "block";
   updateLockUI();
-  if (currentUser) loadHistory();
-
   const rp = document.getElementById("recent-preview");
   if (rp) rp.style.display = "none";
 
   document.getElementById("results").style.display = "block";
   document.getElementById("results").scrollIntoView({ behavior:"smooth", block:"start" });
+
+  // 분석 저장 완료 후 히스토리 동기화 (1초 딜레이로 DB 저장 대기)
+  if (currentUser) setTimeout(() => loadHistory(), 1000);
 }
 
 // ── 밸류에이션 렌더링 ──
@@ -1297,11 +1298,17 @@ async function loadHistory() {
     renderHistory(items);
     renderRecentPreview(items);
     document.getElementById("history-section").style.display = "block";
-    // 섹션 타이틀 업데이트
+    // 타이틀 업데이트
     const titleEl = document.querySelector(".history-title");
     if (titleEl) titleEl.innerHTML = currentTicker
       ? `🕐 ${currentTicker} 분석 히스토리`
       : "🕐 분석 히스토리";
+    // 하단 버튼 → 전체보기 모드
+    const footerBtn = document.getElementById("history-footer-btn");
+    if (footerBtn) {
+      footerBtn.textContent = "전체 히스토리 보기 →";
+      footerBtn.onclick = loadAllHistory;
+    }
   } catch(e) { console.error("히스토리 로드 실패", e); }
 }
 
@@ -1311,9 +1318,16 @@ async function loadAllHistory() {
     if (!res.ok) return;
     const items = await res.json();
     renderHistory(items);
+    // 타이틀 업데이트
     const titleEl = document.querySelector(".history-title");
     if (titleEl) titleEl.innerHTML = "🕐 전체 분석 히스토리";
-    // 히스토리 섹션이 닫혀 있으면 열기
+    // 하단 버튼 → 종목별 보기 모드
+    const footerBtn = document.getElementById("history-footer-btn");
+    if (footerBtn && currentTicker) {
+      footerBtn.textContent = `${currentTicker} 히스토리만 보기 ←`;
+      footerBtn.onclick = loadHistory;
+    }
+    // 닫혀 있으면 열기
     const sec = document.getElementById("history-section");
     if (sec && !sec.classList.contains("open")) sec.classList.add("open");
   } catch(e) { console.error("전체 히스토리 로드 실패", e); }
