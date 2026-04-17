@@ -1971,7 +1971,7 @@ function _applyBriefToBanner(brief) {
   // 한 줄 요약 섹션 우선 추출, 없으면 마지막 줄 fallback
   const _briefText = brief.analysis;
   const summaryMatch = _briefText.match(
-    /###\s*\d+\.\s*오늘의 한 줄 요약[\s\S]*?\n([^\n#]+)/
+    /###\s*\d+\.\s*(?:💡\s*)?(?:오늘의\s*)?한 줄 요약[\s\S]*?\n([^\n#]+)/
   );
   const summary = summaryMatch
     ? summaryMatch[1].replace(/^[-*\s]+/, "").trim()
