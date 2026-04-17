@@ -95,6 +95,21 @@ def get_valuation_data(ticker: str) -> dict:
                 return round(v, decimals) if v else 0
             except:
                 return 0
+        def _div_yield(info):
+            # yfinance는 dividendYield를 소수(0.0105 = 1.05%)로 반환
+            # trailingAnnualDividendYield도 동일 형식으로 fallback 사용
+            # 단, 값이 1.0 초과면 이미 % 단위로 잘못 들어온 것 → ×100 생략
+            val = info.get("dividendYield") or info.get("trailingAnnualDividendYield") or 0
+            try:
+                v = float(val)
+                if v == 0:
+                    return 0
+                if v > 1.0:
+                    return round(v, 2)   # 이미 % 단위 (예: 1.14%)
+                return round(v * 100, 2)  # 소수 → % 변환 (예: 0.0114 → 1.14%)
+            except:
+                return 0
+
         return {
             "per":            _r(info.get("trailingPE"), 1),
             "forward_per":    _r(info.get("forwardPE"), 1),
@@ -103,7 +118,7 @@ def get_valuation_data(ticker: str) -> dict:
             "eps":            _r(info.get("trailingEps"), 2),
             "revenue_growth": _r((info.get("revenueGrowth") or 0) * 100, 1),
             "profit_margin":  _r((info.get("profitMargins") or 0) * 100, 1),
-            "dividend_yield": _r((info.get("dividendYield") or 0) * 100, 2),
+            "dividend_yield": _div_yield(info),
             "market_cap":     info.get("marketCap"),
             "sector":         info.get("sector", ""),
         }

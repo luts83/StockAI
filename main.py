@@ -28,6 +28,7 @@ from database import (
     save_market_brief, get_latest_market_brief, get_market_briefs,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
+    ensure_indexes,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -656,6 +657,11 @@ async def _run_brief(brief_type: str):
     except Exception as e:
         print(f"[scheduler] 시황 생성 오류: {e}")
 
+
+@app.on_event("startup")
+async def startup():
+    ensure_indexes()
+    print("[db] 인덱스 확인 완료")
 
 @app.on_event("startup")
 async def start_scheduler():

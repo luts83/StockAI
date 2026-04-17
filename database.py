@@ -20,6 +20,16 @@ def get_db():
         )
     return _client["stockai"]
 
+def ensure_indexes():
+    """TTL 인덱스 등 필수 인덱스 보장 (서버 시작 시 1회 호출)"""
+    db = get_db()
+    # public_cache: created_at 기준 7일 후 자동 삭제
+    db["public_cache"].create_index(
+        "created_at",
+        expireAfterSeconds=604800,  # 7일
+        background=True,
+    )
+
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
                   analysis: str, signal: str, news: list, chart_b64: str,
