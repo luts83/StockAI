@@ -26,6 +26,7 @@ from database import (
     get_all_history, get_history_count, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
+    get_recent_market_briefs,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
@@ -612,12 +613,14 @@ async def debug_scheduler():
 
 @app.get("/market/brief/latest")
 async def latest_brief():
-    """최신 시황 조회 (비회원 접근 가능)"""
-    brief = get_latest_market_brief()
-    if not brief:
-        return {"brief": None}
-    brief["_id"] = str(brief["_id"])
-    return {"brief": brief}
+    """최신 시황 + 직전 시황 조회 (비회원 접근 가능)"""
+    briefs = get_recent_market_briefs(limit=2)
+    if not briefs:
+        return {"brief": None, "prev_brief": None}
+    return {
+        "brief":      briefs[0],
+        "prev_brief": briefs[1] if len(briefs) > 1 else None,
+    }
 
 
 @app.get("/market/brief/list")

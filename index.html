@@ -567,11 +567,18 @@ header {
           animation:pulse 1.5s infinite;">NEW</span>
         <span style="font-size:11px; color:var(--dim);"
           id="banner-date"></span>
+        <span id="banner-age"
+          style="font-size:10px; color:var(--dim); margin-left:4px;
+          font-family:'JetBrains Mono',monospace;"></span>
       </div>
       <span id="banner-signal-badge"
         style="font-size:11px; padding:3px 10px;
         border-radius:20px; font-weight:700;"></span>
     </div>
+    <div id="banner-verify"
+      style="display:none; padding:6px 18px;
+      border-bottom:1px solid var(--border);
+      align-items:center; gap:6px;"></div>
     <div style="padding:14px 18px;">
       <div id="banner-summary"
         style="font-size:13px; color:var(--muted);
@@ -1893,14 +1900,39 @@ function _applyBriefToBanner(brief) {
   const s = SIGNAL_MAP[brief.signal] || SIGNAL_MAP.NEUTRAL;
   const typeLabel = brief.type === "premarket" ? "📊 장전 시황" : "📈 마감 시황";
 
-  document.getElementById("banner-type-label").textContent = typeLabel;
-  document.getElementById("banner-date").textContent       = brief.date;
+  document.getElementById("banner-type-label").textContent  = typeLabel;
+  document.getElementById("banner-date").textContent        = brief.date;
   document.getElementById("banner-signal-icon").textContent = s.icon;
 
   const badge = document.getElementById("banner-signal-badge");
-  badge.textContent        = s.text;
-  badge.style.color        = s.color;
-  badge.style.background   = s.bg;
+  badge.textContent      = s.text;
+  badge.style.color      = s.color;
+  badge.style.background = s.bg;
+
+  // 생성 시간 표시 (X분 전 / X시간 전)
+  const ageEl = document.getElementById("banner-age");
+  if (ageEl && brief.created_at) {
+    const diff = Math.floor((Date.now() - new Date(brief.created_at)) / 60000);
+    ageEl.textContent = diff < 60
+      ? `(${diff}분 전)`
+      : `(${Math.floor(diff / 60)}시간 전)`;
+  }
+
+  // 직전 전망 검증 한 줄 추출 (### 0. 섹션 첫 번째 내용 줄)
+  const verifyEl = document.getElementById("banner-verify");
+  if (verifyEl) {
+    const verifyMatch = brief.analysis.match(
+      /###\s*0\.\s*직전 전망 검증[\s\S]*?\n([^\n#]+)/
+    );
+    if (verifyMatch) {
+      const text = verifyMatch[1].replace(/^[-*\s]+/, "").trim();
+      const isCorrect = text.includes("✅");
+      verifyEl.style.display = "flex";
+      verifyEl.innerHTML = `<span style="font-size:11px; color:${isCorrect ? "var(--green)" : "var(--yellow, #f59e0b)"};">${text}</span>`;
+    } else {
+      verifyEl.style.display = "none";
+    }
+  }
 
   // 한 줄 요약 섹션 우선 추출, 없으면 마지막 줄 fallback
   const _briefText = brief.analysis;

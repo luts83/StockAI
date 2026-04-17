@@ -186,6 +186,18 @@ def get_latest_market_brief(brief_type: str = None) -> dict | None:
         sort=[("created_at", -1)],
     )
 
+def get_recent_market_briefs(limit: int = 2) -> list:
+    """최근 시황 N개 반환 (최신순) — 직전 전망 검증에 사용"""
+    db = get_db()
+    cursor = db["market_briefs"].find(
+        {},
+        {"market_data": 0},
+    ).sort("created_at", -1).limit(limit)
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
 def get_market_briefs(limit: int = 10) -> list:
     db = get_db()
     cursor = db["market_briefs"].find(
