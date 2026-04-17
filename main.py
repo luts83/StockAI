@@ -696,25 +696,34 @@ async def start_scheduler():
     import pytz
     from datetime import datetime
 
-    # UTC 기준으로 등록 (Railway 서버는 UTC, BST 여름시간 자동 적용 안 됨)
-    # 마감 시황: BST 21:30 = UTC 20:30
+    # 장전 시황 — 2026-04-17 테스트: UTC 13:15 (BST 14:15) 1회성
     scheduler.add_job(
         _run_brief,
-        CronTrigger(hour=20, minute=30, day_of_week="mon-fri", timezone="UTC"),
-        args=["close"],
-        id="close_brief",
+        "date",
+        run_date=datetime(2026, 4, 17, 13, 15, 0),
+        args=["premarket"],
+        id="premarket_brief_test",
         replace_existing=True,
     )
-    # 장전 시황: BST 13:30 = UTC 12:30
+    # 장전 시황 — 2026-04-18부터 정식: UTC 12:30 (BST 13:30)
     scheduler.add_job(
         _run_brief,
-        CronTrigger(hour=12, minute=30, day_of_week="mon-fri", timezone="UTC"),
+        CronTrigger(hour=12, minute=30, day_of_week="mon-fri", timezone="UTC",
+                    start_date="2026-04-18"),
         args=["premarket"],
         id="premarket_brief",
         replace_existing=True,
     )
+    # 마감 시황: UTC 21:30 (BST 22:30)
+    scheduler.add_job(
+        _run_brief,
+        CronTrigger(hour=21, minute=30, day_of_week="mon-fri", timezone="UTC"),
+        args=["close"],
+        id="closing_brief",
+        replace_existing=True,
+    )
     scheduler.start()
-    print("[scheduler] 스케줄러 시작 — 마감 UTC 20:30 / 장전 UTC 12:30 (BST 21:30 / 13:30)")
+    print("[scheduler] 스케줄러 시작 — 테스트 UTC 13:15 / 장전 UTC 12:30(~04-18) / 마감 UTC 21:30")
 
     # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
     utc = pytz.utc
@@ -725,8 +734,8 @@ async def start_scheduler():
     if is_weekday:
         current_minutes = now_utc.hour * 60 + now_utc.minute
 
-        # 마감 시황: UTC 20:30 지났고 오늘 데이터 없으면 즉시 생성
-        if current_minutes >= 20 * 60 + 30:
+        # 마감 시황: UTC 21:30 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 21 * 60 + 30:
             today_close = get_latest_market_brief("close")
             if not today_close or today_close.get("date") != today_str:
                 print("[scheduler] 오늘 마감 시황 누락 감지 → 즉시 생성")
