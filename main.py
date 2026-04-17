@@ -700,7 +700,7 @@ async def start_scheduler():
     scheduler.add_job(
         _run_brief,
         "date",
-        run_date=datetime(2026, 4, 17, 13, 15, 0),
+        run_date=datetime(2026, 4, 17, 13, 30, 0),  # UTC 13:30 = BST 14:30
         args=["premarket"],
         id="premarket_brief_test",
         replace_existing=True,
