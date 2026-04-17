@@ -170,9 +170,13 @@ def delete_analysis(doc_id: str):
 
 # ── 시황 저장/조회 ──────────────────────────────────────
 def save_market_brief(brief: dict) -> str:
+    from bson import ObjectId
     db = get_db()
+    if "_id" not in brief:
+        brief["_id"] = str(ObjectId())
+    # date + type 기준으로 upsert (같은 날 같은 유형은 덮어쓰기)
     db["market_briefs"].replace_one(
-        {"_id": brief["_id"]},
+        {"type": brief["type"], "date": brief["date"]},
         brief,
         upsert=True,
     )
