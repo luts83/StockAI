@@ -670,18 +670,18 @@ async def generate_brief(
     if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
         raise HTTPException(status_code=403, detail="관리자 전용")
 
-    brief = await generate_market_brief(brief_type)
-    save_market_brief(brief)
-    return {"ok": True, "id": brief["_id"], "signal": brief["signal"]}
+    brief  = await generate_market_brief(brief_type)
+    doc_id = save_market_brief(brief)
+    return {"ok": True, "id": doc_id, "signal": brief["signal"]}
 
 
 # ── 스케줄러 ───────────────────────────────────────────
 
 async def _run_brief(brief_type: str):
     try:
-        brief = await generate_market_brief(brief_type)
-        save_market_brief(brief)
-        print(f"[scheduler] 시황 생성 완료: {brief['_id']}")
+        brief  = await generate_market_brief(brief_type)
+        doc_id = save_market_brief(brief)
+        print(f"[scheduler] 시황 생성 완료: {doc_id}")
     except Exception as e:
         print(f"[scheduler] 시황 생성 오류: {e}")
 

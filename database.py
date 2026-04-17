@@ -173,15 +173,12 @@ def delete_analysis(doc_id: str):
 # ── 시황 저장/조회 ──────────────────────────────────────
 def save_market_brief(brief: dict) -> str:
     db = get_db()
+    # type+date 기반 결정적 _id (중복 방지 + upsert 안전)
+    doc_id = f"{brief['type']}_{brief['date']}"
     doc = {k: v for k, v in brief.items() if k != "_id"}
-    filter_key = {"type": brief["type"], "date": brief["date"]}
-    db["market_briefs"].update_one(
-        filter_key,
-        {"$set": doc},
-        upsert=True,
-    )
-    saved = db["market_briefs"].find_one(filter_key)
-    return str(saved["_id"]) if saved else ""
+    doc["_id"] = doc_id
+    db["market_briefs"].replace_one({"_id": doc_id}, doc, upsert=True)
+    return doc_id
 
 def get_latest_market_brief(brief_type: str = None) -> dict | None:
     db = get_db()
