@@ -1188,7 +1188,28 @@ function renderValuation(val) {
   const strip = document.getElementById("val-strip");
   strip.style.display = "grid";
   const v = val || {};
-  const isEtf = !!v.is_etf;
+  const isEtf     = !!v.is_etf;
+  const isForeign = !!v.is_foreign;
+
+  // 기존 경고 제거
+  const existingWarn = document.getElementById("val-warning");
+  if (existingWarn) existingWarn.remove();
+
+  // 외국주/ADR 경고 배너
+  if (isForeign) {
+    const warn = document.createElement("div");
+    warn.id = "val-warning";
+    warn.style.cssText = `
+      grid-column:1 / -1; padding:7px 14px; font-size:11px;
+      color:var(--yellow, #f59e0b);
+      background:rgba(251,191,36,0.06);
+      border-bottom:1px solid var(--border);
+      display:flex; align-items:center; gap:6px;
+    `;
+    warn.innerHTML = `⚠️ 해외 상장 종목 — 밸류에이션 수치가 실제와 다를 수 있습니다.
+      <span style="color:var(--dim)">증권사 앱에서 교차 확인 권장</span>`;
+    strip.prepend(warn);
+  }
 
   // ETF인 경우 의미없는 지표는 "ETF" 배지로 표시, 개별주식은 "—"
   const etfBadge = `<span style="font-size:9px;color:var(--dim);background:var(--border2);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace;">ETF</span>`;

@@ -90,7 +90,15 @@ def get_valuation_data(ticker: str) -> dict:
     try:
         info = yf.Ticker(ticker).info
 
-        is_etf = info.get("quoteType", "").upper() == "ETF"
+        is_etf   = info.get("quoteType", "").upper() == "ETF"
+        country  = info.get("country", "")
+        exchange = info.get("exchange", "")
+        is_foreign = (
+            country not in ("", "United States") or
+            ticker.endswith(".KS") or
+            ticker.endswith(".KQ") or
+            exchange in ("ASX", "TSX", "LSE")
+        )
 
         def _r(val, decimals=1):
             try:
@@ -115,6 +123,7 @@ def get_valuation_data(ticker: str) -> dict:
 
         base = {
             "is_etf":         is_etf,
+            "is_foreign":     is_foreign,
             "per":            _r(info.get("trailingPE"), 1),
             "dividend_yield": _div_yield(info),
             "market_cap":     info.get("marketCap"),
