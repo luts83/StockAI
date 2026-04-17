@@ -86,42 +86,64 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def get_valuation_data(ticker: str) -> dict:
-    """yfinance에서 밸류에이션 지표 수집 (없으면 0 반환)"""
+    """yfinance에서 밸류에이션 지표 수집 (ETF/개별주식 분리)"""
     try:
         info = yf.Ticker(ticker).info
+
+        is_etf = info.get("quoteType", "").upper() == "ETF"
+
         def _r(val, decimals=1):
             try:
                 v = float(val or 0)
                 return round(v, decimals) if v else 0
             except:
                 return 0
+
         def _div_yield(info):
-            # yfinance는 dividendYield를 소수(0.0105 = 1.05%)로 반환
-            # trailingAnnualDividendYield도 동일 형식으로 fallback 사용
-            # 단, 값이 1.0 초과면 이미 % 단위로 잘못 들어온 것 → ×100 생략
+            # yfinance dividendYield는 소수(0.0105 = 1.05%) 형식
+            # 값이 1.0 초과면 이미 % 단위로 잘못 들어온 것 → ×100 생략
             val = info.get("dividendYield") or info.get("trailingAnnualDividendYield") or 0
             try:
                 v = float(val)
                 if v == 0:
                     return 0
                 if v > 1.0:
-                    return round(v, 2)   # 이미 % 단위 (예: 1.14%)
-                return round(v * 100, 2)  # 소수 → % 변환 (예: 0.0114 → 1.14%)
+                    return round(v, 4)   # 이미 % 단위 그대로
+                return round(v * 100, 2)  # 소수 → % 변환
             except:
                 return 0
 
-        return {
+        base = {
+            "is_etf":         is_etf,
             "per":            _r(info.get("trailingPE"), 1),
-            "forward_per":    _r(info.get("forwardPE"), 1),
-            "pbr":            _r(info.get("priceToBook"), 2),
-            "psr":            _r(info.get("priceToSalesTrailing12Months"), 2),
-            "eps":            _r(info.get("trailingEps"), 2),
-            "revenue_growth": _r((info.get("revenueGrowth") or 0) * 100, 1),
-            "profit_margin":  _r((info.get("profitMargins") or 0) * 100, 1),
             "dividend_yield": _div_yield(info),
             "market_cap":     info.get("marketCap"),
-            "sector":         info.get("sector", ""),
         }
+
+        if is_etf:
+            # ETF: PBR/PSR/EPS/매출성장/이익률은 의미 없음 → 0으로 명시
+            return {
+                **base,
+                "forward_per":    0,
+                "pbr":            0,
+                "psr":            0,
+                "eps":            0,
+                "revenue_growth": 0,
+                "profit_margin":  0,
+                "sector":         info.get("category", ""),  # ETF는 category 필드
+            }
+        else:
+            # 개별 주식: 전체 지표 수집
+            return {
+                **base,
+                "forward_per":    _r(info.get("forwardPE"), 1),
+                "pbr":            _r(info.get("priceToBook"), 2),
+                "psr":            _r(info.get("priceToSalesTrailing12Months"), 2),
+                "eps":            _r(info.get("trailingEps"), 2),
+                "revenue_growth": _r((info.get("revenueGrowth") or 0) * 100, 1),
+                "profit_margin":  _r((info.get("profitMargins") or 0) * 100, 1),
+                "sector":         info.get("sector", ""),
+            }
     except Exception as e:
         print(f"[valuation] {ticker} 데이터 수집 실패: {e}")
         return {}

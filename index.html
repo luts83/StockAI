@@ -1147,21 +1147,38 @@ function renderValuation(val) {
   const strip = document.getElementById("val-strip");
   strip.style.display = "grid";
   const v = val || {};
+  const isEtf = !!v.is_etf;
+
+  // ETF인 경우 의미없는 지표는 "ETF" 배지로 표시, 개별주식은 "—"
+  const etfBadge = `<span style="font-size:9px;color:var(--dim);background:var(--border2);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace;">ETF</span>`;
+  const na = (isEmpty) => isEmpty ? (isEtf ? etfBadge : "—") : null;
 
   document.getElementById("val-per").textContent    = fmtVal(v.per, "x");
-  document.getElementById("val-fper").textContent   = v.forward_per ? `Fwd ${v.forward_per}x` : "Fwd —";
-  document.getElementById("val-pbr").textContent    = fmtVal(v.pbr, "x");
+  document.getElementById("val-fper").textContent   = (!isEtf && v.forward_per) ? `Fwd ${v.forward_per}x` : "Fwd —";
+
+  const pbrEl = document.getElementById("val-pbr");
+  pbrEl[isEtf ? "innerHTML" : "textContent"] = isEtf ? etfBadge : fmtVal(v.pbr, "x");
+
+  const psrEl = document.getElementById("val-psr");
+  psrEl[isEtf ? "innerHTML" : "textContent"] = isEtf ? etfBadge : fmtVal(v.psr, "x");
+
+  const epsEl = document.getElementById("val-eps");
+  epsEl[isEtf ? "innerHTML" : "textContent"] = isEtf ? etfBadge : (v.eps ? `$${v.eps}` : "—");
+
   document.getElementById("val-sector").textContent = v.sector || "";
-  document.getElementById("val-psr").textContent    = fmtVal(v.psr, "x");
-  document.getElementById("val-eps").textContent    = v.eps ? `$${v.eps}` : "—";
 
   const revEl = document.getElementById("val-rev");
-  const rev = v.revenue_growth;
-  revEl.textContent = rev ? `${rev > 0 ? "+" : ""}${rev}%` : "—";
-  revEl.style.color = rev > 0 ? "var(--green)" : rev < 0 ? "var(--red)" : "";
+  if (isEtf) {
+    revEl.innerHTML = etfBadge;
+    revEl.style.color = "";
+  } else {
+    const rev = v.revenue_growth;
+    revEl.textContent = rev ? `${rev > 0 ? "+" : ""}${rev}%` : "—";
+    revEl.style.color = rev > 0 ? "var(--green)" : rev < 0 ? "var(--red)" : "";
+  }
 
   document.getElementById("val-div").textContent    = fmtVal(v.dividend_yield, "%");
-  document.getElementById("val-margin").textContent = v.profit_margin ? `이익률 ${v.profit_margin}%` : "";
+  document.getElementById("val-margin").textContent = (!isEtf && v.profit_margin) ? `이익률 ${v.profit_margin}%` : "";
 }
 
 // ── News ──
