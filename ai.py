@@ -102,7 +102,8 @@ WATCH_BUY_TRIGGER: 반드시 ** 기호 없이 plain text로만 작성. 예) RSI 
 WATCH_SELL_TRIGGER: 반드시 ** 기호 없이 plain text로만 작성. 예) $XX 지지 붕괴 + RSI 40 이탈 시"""
 
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
-                          valuation: dict = None) -> str:
+                          valuation: dict = None,
+                          analysis_date: str = "") -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:8] if item.get("title")
@@ -123,12 +124,24 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 - 섹터: {val.get('sector') or '—'}
 """ if val else ""
 
-    return f"""다음 주식을 분석해줘:
+    ma200_text = (
+        f"${stats['ma200']}"
+        if stats.get('ma200')
+        else "데이터 없음 (기간 부족)"
+    )
+
+    return f"""다음 주식을 분석해줘.
+
+[분석 기준일: {analysis_date or "오늘"} — 반드시 이 날짜 기준으로만 분석할 것]
 
 ## 종목: {ticker}
 
 ### 현재 지표
 - 현재가: ${stats['price']}
+- MA20: ${stats.get('ma20') or '데이터 없음'}
+- MA60: ${stats.get('ma60') or '데이터 없음'}
+- MA200: {ma200_text}
+  ※ MA200이 "데이터 없음"이면 분석에서 언급 금지. 절대 추측하지 말 것
 - RSI(14): {stats['rsi']} {'(과매수)' if stats['rsi'] > 70 else '(과매도)' if stats['rsi'] < 30 else '(중립)'}
 - MACD: {stats['macd']} / Signal: {stats['macd_signal']} → {'골든크로스' if stats['macd'] > stats['macd_signal'] else '데드크로스'}
 - MA20 대비: {'위' if stats['above_ma20'] else '아래'}
@@ -172,10 +185,12 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 ⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다."""
 
 async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
-                              news_items: List[Dict], valuation: dict = None) -> str:
+                              news_items: List[Dict], valuation: dict = None,
+                              analysis_date: str = "") -> str:
     """Claude Vision API로 차트 + 뉴스 + 밸류에이션 종합 분석"""
     stats  = get_summary_stats(df)
-    prompt = build_analysis_prompt(ticker, stats, news_items, valuation)
+    prompt = build_analysis_prompt(ticker, stats, news_items, valuation,
+                                   analysis_date=analysis_date)
 
     try:
         message = _get_client().messages.create(

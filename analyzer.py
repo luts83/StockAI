@@ -165,6 +165,9 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
     stoch_k = _last_valid(df["Stoch_K"], 50.0)
     stoch_d = _last_valid(df["Stoch_D"], 50.0)
 
+    ma60_val  = _last_valid(df["MA60"],  0.0) if "MA60"  in df.columns else 0.0
+    ma200_val = _last_valid(df["MA200"], 0.0) if "MA200" in df.columns else 0.0
+
     return {
         "price":        round(float(latest["Close"]), 2),
         "volume":       int(latest["Volume"]),
@@ -179,4 +182,42 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
         "bb_position":  round(float((float(latest["Close"]) - bb_lower) / bb_width * 100), 1),
         "stoch_k":      round(stoch_k, 2),
         "stoch_d":      round(stoch_d, 2),
+        "ma20":         round(float(ma20), 2) if ma20 else None,
+        "ma60":         round(float(ma60_val), 2) if ma60_val else None,
+        "ma200":        round(float(ma200_val), 2) if ma200_val else None,
     }
+
+
+def get_extended_price(ticker: str) -> dict:
+    """프리/애프터마켓 포함 현재가 수집"""
+    try:
+        info           = yf.Ticker(ticker).fast_info
+        regular_price  = round(float(info.last_price), 2)
+        previous_close = round(float(info.previous_close), 2)
+
+        extended_price = None
+        try:
+            df_1m = yf.Ticker(ticker).history(
+                period="1d", interval="1m", prepost=True
+            )
+            if df_1m is not None and not df_1m.empty:
+                extended_price = round(float(df_1m["Close"].iloc[-1]), 2)
+        except Exception:
+            pass
+
+        gap_pct = None
+        if extended_price and regular_price:
+            gap_pct = round(
+                (extended_price - regular_price) / regular_price * 100, 2
+            )
+
+        return {
+            "regular_price":  regular_price,
+            "extended_price": extended_price,
+            "previous_close": previous_close,
+            "has_gap":        bool(gap_pct and abs(gap_pct) >= 1.0),
+            "gap_pct":        gap_pct,
+        }
+    except Exception as e:
+        print(f"[extended_price] {ticker} 오류: {e}")
+        return {}

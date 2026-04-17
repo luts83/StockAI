@@ -1007,7 +1007,41 @@ function renderResults(data) {
     if (signalArea) signalArea.before(notice);
   }
 
-  document.getElementById("res-ticker").textContent = data.ticker + "  ·  1D  ·  " + new Date().toLocaleDateString("ko-KR");
+  // 갭 경고 배너 (확장시간 1% 이상 변동 시)
+  const existingGap = document.getElementById("gap-notice");
+  if (existingGap) existingGap.remove();
+  if (data.has_gap && data.gap_pct) {
+    const isDown = data.gap_pct < 0;
+    const gapNotice = document.createElement("div");
+    gapNotice.id = "gap-notice";
+    gapNotice.style.cssText = `
+      background:${isDown ? "rgba(248,113,113,0.08)" : "rgba(52,211,153,0.08)"};
+      border:1px solid ${isDown ? "rgba(248,113,113,0.3)" : "rgba(52,211,153,0.3)"};
+      border-radius:8px; padding:10px 14px; margin-bottom:14px;
+      font-size:12px; color:var(--muted);
+      display:flex; align-items:center; gap:8px;
+    `;
+    gapNotice.innerHTML = `
+      <span style="font-size:15px">${isDown ? "⚠️" : "🚀"}</span>
+      <span>
+        <strong style="color:${isDown ? "var(--red)" : "var(--green)"}">
+          확장시간 ${data.gap_pct > 0 ? "+" : ""}${data.gap_pct}% 갭 감지
+        </strong>
+        — 정규장 종가 ${fmtDollar(data.regular_price)} → 현재 ${fmtDollar(data.extended_price)}
+        <span style="color:var(--dim); margin-left:4px; font-size:11px">
+          (실적발표 등 장외 변동)
+        </span>
+      </span>
+    `;
+    const signalArea = document.getElementById("signal-area");
+    if (signalArea) signalArea.before(gapNotice);
+  }
+
+  const dataDate = data.data_date
+    ? new Date(data.data_date + "T00:00:00").toLocaleDateString("ko-KR")
+    : new Date().toLocaleDateString("ko-KR");
+  document.getElementById("res-ticker").textContent =
+    data.ticker + "  ·  " + (data.period || "1D") + "  ·  " + dataDate;
   document.getElementById("res-price").textContent = fmtDollar(data.current_price);
 
   const chEl = document.getElementById("res-change");

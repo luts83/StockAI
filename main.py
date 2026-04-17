@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()  # .env 먼저 로드 후 환경변수 읽기
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
-from analyzer import get_stock_data, calculate_indicators, get_valuation_data
+from analyzer import get_stock_data, calculate_indicators, get_valuation_data, get_extended_price
 from chart import generate_chart
 from news import fetch_news
 from ai import analyze_with_claude
@@ -195,6 +195,7 @@ async def analyze(
                 "cached":         True,
                 "has_new_news":   False,
                 "new_news_count": 0,
+                "data_date":      pub.get("data_date", pub.get("created_at", "")[:10]),
             }
 
     # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환 (뉴스만 실시간 갱신)
@@ -227,6 +228,7 @@ async def analyze(
                 "cached":          True,
                 "has_new_news":    bool(new_news),
                 "new_news_count":  len(new_news),
+                "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
             }
 
     df = get_stock_data(ticker, req.period, req.interval)
@@ -237,8 +239,15 @@ async def analyze(
     chart_b64 = generate_chart(df, ticker)
     news_items = fetch_news(ticker)
     valuation = await asyncio.to_thread(get_valuation_data, ticker)
-    analysis = await analyze_with_claude(chart_b64, df, ticker, news_items, valuation)
+
+    analysis_date = df.index[-1].strftime("%Y-%m-%d")
+    analysis = await analyze_with_claude(
+        chart_b64, df, ticker, news_items, valuation,
+        analysis_date=analysis_date,
+    )
     signal = extract_signal(analysis)
+
+    extended = await asyncio.to_thread(get_extended_price, ticker)
 
     indicators = {
         "rsi":         safe(df["RSI"].iloc[-1]),
@@ -251,8 +260,10 @@ async def analyze(
 
     # 로그인 유저 → 개인 히스토리 저장 / 비로그인 유저 → 공용 캐시 저장
     doc_id = ""
-    current_price_val = safe(df["Close"].iloc[-1])
-    change_pct_val    = safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100)
+    regular_price_val = safe(df["Close"].iloc[-1])
+    extended_price_val = extended.get("extended_price")
+    current_price_val  = extended_price_val or regular_price_val
+    change_pct_val     = safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100)
 
     if user_id:
         doc_id = save_analysis(
@@ -263,6 +274,7 @@ async def analyze(
             current_price=current_price_val,
             change_pct=change_pct_val,
             valuation=valuation,
+            data_date=analysis_date,
         )
     else:
         # 비로그인 유저의 분석 결과를 공용 캐시로 저장 (당일 첫 분석만 저장)
@@ -277,17 +289,22 @@ async def analyze(
         )
 
     return {
-        "doc_id":        doc_id,
-        "ticker":        ticker,
-        "current_price": current_price_val,
-        "change_pct":    change_pct_val,
-        "indicators":    indicators,
-        "valuation":     valuation,
-        "chart_image":   chart_b64,
-        "news":          news_items,
-        "analysis":      analysis,
-        "signal":        signal,
-        "is_saved":      bool(user_id),
+        "doc_id":          doc_id,
+        "ticker":          ticker,
+        "current_price":   current_price_val,
+        "regular_price":   regular_price_val,
+        "extended_price":  extended_price_val,
+        "has_gap":         extended.get("has_gap", False),
+        "gap_pct":         extended.get("gap_pct"),
+        "change_pct":      change_pct_val,
+        "indicators":      indicators,
+        "valuation":       valuation,
+        "chart_image":     chart_b64,
+        "news":            news_items,
+        "analysis":        analysis,
+        "signal":          signal,
+        "is_saved":        bool(user_id),
+        "data_date":       analysis_date,
     }
 
 @app.post("/chat")
@@ -310,18 +327,26 @@ async def chat_stream(
 
     history = doc.get("chat_history", [])[-8:]
     messages = []
+    from datetime import datetime as _dt
+    _data_date = doc.get("data_date") or doc.get("created_at", "")[:10]
     system = f"""당신은 주식 기술적 분석 전문가입니다.
-아래는 {doc['ticker']} 종목에 대해 이미 수행된 분석입니다. 이 분석을 바탕으로 사용자의 후속 질문에 답변하세요.
-질문이 특정 섹션({req.section})에 관한 것이라면 해당 부분에 집중해서 답변하세요.
-한국어로 답변하고, 구체적인 수치와 근거를 포함하세요.
 
-답변 규칙:
-- 서론 없이 바로 본론으로 시작
-- 핵심 내용만 간결하게 (3~5문장 이내)
-- 숫자와 구체적 근거 반드시 포함
-- 추가 궁금한 점은 사용자가 직접 질문하도록 유도
+[분석 메타데이터 — 절대 무시 금지]
+- 분석 대상: {doc['ticker']}
+- 분석 기준일: {_data_date}
+- 분석 기준가: ${doc.get('current_price', '—')}
+- 오늘 날짜: {_dt.utcnow().strftime('%Y-%m-%d')} (UTC 기준)
 
-=== 기존 분석 ===
+[답변 원칙]
+- 사용자가 현재가를 언급하면 반드시 이렇게 안내:
+  "이 분석은 {_data_date} 기준입니다. 현재가 변동분은 재분석이 필요합니다."
+- 분석에 없는 날짜·수치 추측 절대 금지
+- MA200이 분석에 없으면 "기간 부족으로 데이터 없음"으로 답할 것
+- 사용자 압박에 의한 입장 변경 금지
+
+질문 섹션: {req.section}
+
+=== 기존 분석 ({_data_date} 기준) ===
 {doc['analysis']}
 === 분석 종료 ==="""
 
