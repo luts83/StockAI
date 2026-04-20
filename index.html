@@ -955,7 +955,8 @@ function advanceStep() {
 
 async function runAnalysis(force = false) {
   const ticker = document.getElementById("ticker-input").value.trim().toUpperCase();
-  if(!ticker) return;
+  if (!ticker) return;
+
   document.getElementById("results").style.display = "none";
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("loading").style.display = "block";
@@ -963,21 +964,34 @@ async function runAnalysis(force = false) {
   if (preview) preview.style.display = "none";
   document.getElementById("loading-ticker").textContent = ticker;
   document.getElementById("analyze-btn").disabled = true;
-  document.querySelectorAll(".step-pill").forEach(p => p.className="step-pill");
-  stepIdx=0; advanceStep();
+  document.querySelectorAll(".step-pill").forEach(p => p.className = "step-pill");
+  stepIdx = 0; advanceStep();
   stepTimer = setInterval(advanceStep, 1600);
 
   try {
+    // 1단계: 분석 요청 (캐시 히트 시 즉시 반환, 신규 분석 시 job_id 반환)
     const res = await fetch(`${API}/analyze`, {
-      method:"POST", headers:{"Content-Type":"application/json", ...authHeaders()},
-      body: JSON.stringify({ ticker, period, interval:"1d", force })
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ ticker, period, interval: "1d", force })
     });
-    if(!res.ok) { const e=await res.json(); throw new Error(e.detail||"분석 실패"); }
-    const data = await res.json();
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "분석 실패"); }
+    const initData = await res.json();
+
+    let data;
+    if (initData.job_id) {
+      // 신규 분석 — 서버 백그라운드에서 실행 중, 폴링으로 결과 수신
+      data = await pollAnalysis(initData.job_id);
+    } else {
+      // 캐시 히트 — 즉시 결과 반환
+      data = initData;
+    }
+
     clearInterval(stepTimer);
-    document.querySelectorAll(".step-pill").forEach(p => p.className="step-pill done");
+    document.querySelectorAll(".step-pill").forEach(p => p.className = "step-pill done");
     setTimeout(() => renderResults(data), 200);
-  } catch(err) {
+
+  } catch (err) {
     clearInterval(stepTimer);
     document.getElementById("loading").style.display = "none";
     document.getElementById("error-msg").innerHTML =
@@ -986,6 +1000,22 @@ async function runAnalysis(force = false) {
   } finally {
     document.getElementById("analyze-btn").disabled = false;
   }
+}
+
+async function pollAnalysis(jobId, maxWait = 120000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    await new Promise(r => setTimeout(r, 2000));
+    const res = await fetch(`${API}/analyze/status/${jobId}`, {
+      headers: { ...authHeaders() }
+    });
+    if (!res.ok) throw new Error("분석 상태 확인 실패");
+    const data = await res.json();
+    if (data.status === "done")  return data.result;
+    if (data.status === "error") throw new Error(data.error || "분석 오류");
+    // pending / running → 계속 대기
+  }
+  throw new Error("분석 시간 초과 (2분). 잠시 후 다시 시도해주세요.");
 }
 
 function renderResults(data) {

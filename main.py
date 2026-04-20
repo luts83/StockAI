@@ -89,9 +89,27 @@ def safe(val, decimals=2):
         return None
 
 def extract_signal(analysis: str) -> str:
-    import re
-    m = re.search(r"SIGNAL:(BUY|WATCH|SELL)", analysis)
+    m = _re.search(r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|WATCH|SELL)", analysis)
     return m.group(1) if m else "WATCH"
+
+
+def clean_analysis(analysis: str) -> str:
+    """SIGNAL / WATCH_TRIGGER 관련 라인 모두 제거"""
+    text = _re.sub(r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|WATCH|SELL)[^\n]*\n?", "", analysis)
+    text = _re.sub(r"\*{0,2}WATCH_(BUY|SELL)_TRIGGER:\*{0,2}[^\n]*\n?", "", text)
+    return text.strip()
+
+
+# ── 분석 백그라운드 작업 저장소 ──────────────────────────
+import uuid as _uuid
+
+_jobs: dict = {}
+
+class AnalyzeJob:
+    def __init__(self):
+        self.status = "pending"   # pending / running / done / error
+        self.result = None
+        self.error  = None
 
 def get_current_user(
     token: Optional[str] = None,
@@ -171,8 +189,8 @@ async def analyze(
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
-    ticker = req.ticker.upper().strip()
-    user = get_current_user(token=stockai_token, authorization=authorization)
+    ticker  = req.ticker.upper().strip()
+    user    = get_current_user(token=stockai_token, authorization=authorization)
     user_id = user.get("sub", "") if user else ""
 
     # 비로그인 유저 — 당일 공용 캐시 조회 (force=False일 때)
@@ -203,16 +221,13 @@ async def analyze(
         existing = get_today_analysis(ticker, req.period, user_id)
         print(f"[CACHE] ticker={ticker} period={req.period} user={user_id[:8]}... hit={existing is not None}")
         if existing:
-            # 뉴스만 새로 fetch (동기 함수를 스레드로 실행해 이벤트 루프 블로킹 방지)
             fresh_news = await asyncio.to_thread(fetch_news, ticker)
             existing_urls = {n.get("url", "") for n in existing.get("news", [])}
             new_news = [n for n in fresh_news if n.get("url", "") not in existing_urls]
-
             if new_news:
                 updated_news = (new_news + existing.get("news", []))[:15]
                 update_analysis_news(existing["_id"], updated_news)
                 existing["news"] = updated_news
-
             return {
                 "doc_id":          existing["_id"],
                 "ticker":          existing["ticker"],
@@ -231,81 +246,119 @@ async def analyze(
                 "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
             }
 
-    df = get_stock_data(ticker, req.period, req.interval)
-    if df is None or df.empty:
-        raise HTTPException(status_code=404, detail=f"티커 '{ticker}' 데이터를 찾을 수 없습니다.")
+    # 신규 분석 — 백그라운드 job 생성 후 job_id 즉시 반환
+    job_id = str(_uuid.uuid4())
+    _jobs[job_id] = AnalyzeJob()
+    asyncio.create_task(_run_analysis_job(job_id, ticker, req, user_id))
+    return {"job_id": job_id, "status": "pending"}
 
-    df = calculate_indicators(df)
-    chart_b64 = generate_chart(df, ticker)
-    news_items = fetch_news(ticker)
-    valuation = await asyncio.to_thread(get_valuation_data, ticker)
 
-    analysis_date = df.index[-1].strftime("%Y-%m-%d")
-    analysis = await analyze_with_claude(
-        chart_b64, df, ticker, news_items, valuation,
-        analysis_date=analysis_date,
-    )
-    signal = extract_signal(analysis)
+async def _run_analysis_job(job_id: str, ticker: str,
+                             req: AnalyzeRequest, user_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        return
+    job.status = "running"
+    try:
+        df = get_stock_data(ticker, req.period, req.interval)
+        if df is None or df.empty:
+            raise Exception(f"티커 '{ticker}' 데이터를 찾을 수 없습니다.")
 
-    extended = await asyncio.to_thread(get_extended_price, ticker)
-
-    indicators = {
-        "rsi":         safe(df["RSI"].iloc[-1]),
-        "macd":        safe(df["MACD"].iloc[-1], 4),
-        "macd_signal": safe(df["MACD_Signal"].iloc[-1], 4),
-        "ma20":        safe(df["MA20"].iloc[-1]),
-        "ma60":        safe(df["MA60"].iloc[-1]),
-        "ma200":       safe(df["MA200"].iloc[-1]),
-    }
-
-    # 로그인 유저 → 개인 히스토리 저장 / 비로그인 유저 → 공용 캐시 저장
-    doc_id = ""
-    regular_price_val = safe(df["Close"].iloc[-1])
-    extended_price_val = extended.get("extended_price")
-    current_price_val  = extended_price_val or regular_price_val
-    change_pct_val     = safe((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100)
-
-    if user_id:
-        doc_id = save_analysis(
-            ticker=ticker, period=req.period,
-            indicators=indicators, analysis=analysis,
-            signal=signal, news=news_items,
-            chart_b64=chart_b64, user_id=user_id,
-            current_price=current_price_val,
-            change_pct=change_pct_val,
-            valuation=valuation,
-            data_date=analysis_date,
+        df            = calculate_indicators(df)
+        chart_b64     = generate_chart(df, ticker)
+        news_items    = fetch_news(ticker)
+        valuation     = await asyncio.to_thread(get_valuation_data, ticker)
+        analysis_date = df.index[-1].strftime("%Y-%m-%d")
+        analysis_raw  = await analyze_with_claude(
+            chart_b64, df, ticker, news_items, valuation,
+            analysis_date=analysis_date,
         )
-    else:
-        # 비로그인 유저의 분석 결과를 공용 캐시로 저장 (당일 첫 분석만 저장)
-        save_public_analysis(
-            ticker=ticker, period=req.period,
-            indicators=indicators, analysis=analysis,
-            signal=signal, news=news_items,
-            chart_b64=chart_b64,
-            current_price=current_price_val,
-            change_pct=change_pct_val,
-            valuation=valuation,
+        signal   = extract_signal(analysis_raw)
+        analysis = clean_analysis(analysis_raw)
+        extended = await asyncio.to_thread(get_extended_price, ticker)
+
+        indicators = {
+            "rsi":         safe(df["RSI"].iloc[-1]),
+            "macd":        safe(df["MACD"].iloc[-1], 4),
+            "macd_signal": safe(df["MACD_Signal"].iloc[-1], 4),
+            "ma20":        safe(df["MA20"].iloc[-1]),
+            "ma60":        safe(df["MA60"].iloc[-1]),
+            "ma200":       safe(df["MA200"].iloc[-1]),
+        }
+
+        regular_price_val  = safe(df["Close"].iloc[-1])
+        extended_price_val = extended.get("extended_price")
+        current_price_val  = extended_price_val or regular_price_val
+        change_pct_val     = safe(
+            (df["Close"].iloc[-1] - df["Close"].iloc[-2])
+            / df["Close"].iloc[-2] * 100
         )
 
-    return {
-        "doc_id":          doc_id,
-        "ticker":          ticker,
-        "current_price":   current_price_val,
-        "regular_price":   regular_price_val,
-        "extended_price":  extended_price_val,
-        "has_gap":         extended.get("has_gap", False),
-        "gap_pct":         extended.get("gap_pct"),
-        "change_pct":      change_pct_val,
-        "indicators":      indicators,
-        "valuation":       valuation,
-        "chart_image":     chart_b64,
-        "news":            news_items,
-        "analysis":        analysis,
-        "signal":          signal,
-        "is_saved":        bool(user_id),
-        "data_date":       analysis_date,
-    }
+        doc_id = ""
+        if user_id:
+            doc_id = save_analysis(
+                ticker=ticker, period=req.period,
+                indicators=indicators, analysis=analysis,
+                signal=signal, news=news_items,
+                chart_b64=chart_b64, user_id=user_id,
+                current_price=current_price_val,
+                change_pct=change_pct_val,
+                valuation=valuation,
+                data_date=analysis_date,
+            )
+        else:
+            save_public_analysis(
+                ticker=ticker, period=req.period,
+                indicators=indicators, analysis=analysis,
+                signal=signal, news=news_items,
+                chart_b64=chart_b64,
+                current_price=current_price_val,
+                change_pct=change_pct_val,
+                valuation=valuation,
+            )
+
+        job.result = {
+            "doc_id":          doc_id,
+            "ticker":          ticker,
+            "current_price":   current_price_val,
+            "regular_price":   regular_price_val,
+            "extended_price":  extended_price_val,
+            "has_gap":         extended.get("has_gap", False),
+            "gap_pct":         extended.get("gap_pct"),
+            "change_pct":      change_pct_val,
+            "indicators":      indicators,
+            "valuation":       valuation,
+            "chart_image":     chart_b64,
+            "news":            news_items,
+            "analysis":        analysis,
+            "signal":          signal,
+            "is_saved":        bool(user_id),
+            "data_date":       analysis_date,
+        }
+        job.status = "done"
+        print(f"[job] {job_id[:8]} 완료: {ticker} {req.period}")
+
+    except Exception as e:
+        job.status = "error"
+        job.error  = str(e)
+        print(f"[job] {job_id[:8]} 오류: {e}")
+    finally:
+        # 1시간 후 메모리에서 자동 제거
+        await asyncio.sleep(3600)
+        _jobs.pop(job_id, None)
+
+
+@app.get("/analyze/status/{job_id}")
+async def analyze_status(job_id: str):
+    """분석 진행 상태 폴링"""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status == "done":
+        return {"status": "done", "result": job.result}
+    if job.status == "error":
+        return {"status": "error", "error": job.error}
+    return {"status": job.status}
 
 @app.post("/chat")
 async def chat_stream(
