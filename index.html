@@ -585,7 +585,23 @@ header {
         line-height:1.6;"></div>
     </div>
     <div style="padding:0 18px 14px; display:flex;
-      justify-content:flex-end;">
+      justify-content:space-between; align-items:center;">
+      <div id="brief-admin-controls" style="display:none; gap:6px;">
+        <button id="brief-gen-premarket" onclick="generateBrief('premarket')"
+          style="font-size:11px; color:var(--yellow); background:none;
+          border:1px solid var(--yellow); border-radius:5px;
+          padding:4px 10px; cursor:pointer;
+          font-family:'JetBrains Mono',monospace;">
+          🔄 장전 생성
+        </button>
+        <button id="brief-gen-close" onclick="generateBrief('close')"
+          style="font-size:11px; color:var(--muted); background:none;
+          border:1px solid var(--border2); border-radius:5px;
+          padding:4px 10px; cursor:pointer;
+          font-family:'JetBrains Mono',monospace; margin-left:6px;">
+          🔄 마감 생성
+        </button>
+      </div>
       <button onclick="showMarketBriefModal()"
         style="font-size:11px; color:var(--blue);
         background:none; border:none; cursor:pointer;
@@ -873,6 +889,11 @@ function renderAuthArea() {
 
 function updateLockUI() {
   const locked = !currentUser;
+
+  // 관리자 전용 시황 생성 버튼
+  const briefAdmin = document.getElementById("brief-admin-controls");
+  if (briefAdmin) briefAdmin.style.display = currentUser?.is_admin ? "flex" : "none";
+
   const chatSection = document.getElementById("chat-section");
   const historySection = document.getElementById("history-section");
 
@@ -2042,6 +2063,30 @@ async function loadMarketBanner() {
     _applyBriefToBanner(data.brief);
   } catch(e) {
     console.log("[market] 시황 로드 실패", e);
+  }
+}
+
+async function generateBrief(type) {
+  const btn = document.getElementById(`brief-gen-${type}`);
+  const originalText = btn?.textContent || "";
+  if (btn) { btn.textContent = "생성 중..."; btn.disabled = true; }
+  try {
+    const res = await fetch(`${API}/market/brief/generate?brief_type=${type}`, {
+      method: "POST",
+      headers: { ...authHeaders() }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    alert(`✅ 시황 생성 완료 (SIGNAL: ${data.signal})`);
+    await loadMarketBanner();
+  } catch(e) {
+    console.error("[generateBrief]", e);
+    alert(`❌ 오류: ${e.message}`);
+  } finally {
+    if (btn) { btn.textContent = originalText; btn.disabled = false; }
   }
 }
 

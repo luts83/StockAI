@@ -749,16 +749,7 @@ async def start_scheduler():
     import pytz
     from datetime import datetime
 
-    # 장전 시황 — 2026-04-17 테스트: UTC 13:15 (BST 14:15) 1회성
-    scheduler.add_job(
-        _run_brief,
-        "date",
-        run_date=datetime(2026, 4, 17, 13, 30, 0),  # UTC 13:30 = BST 14:30
-        args=["premarket"],
-        id="premarket_brief_test",
-        replace_existing=True,
-    )
-    # 장전 시황 — 2026-04-18부터 정식: UTC 12:30 (BST 13:30)
+    # 장전 시황 — 정식: UTC 12:30 (BST 13:30)
     scheduler.add_job(
         _run_brief,
         CronTrigger(hour=12, minute=30, day_of_week="mon-fri", timezone="UTC",
