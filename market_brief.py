@@ -33,33 +33,55 @@ STRICT_RULE = """
 """
 
 
+def _fetch_ticker(ticker: str, name: str, retries: int = 3) -> dict | None:
+    """단일 티커 데이터 수집 (재시도 포함)"""
+    import time
+    for attempt in range(1, retries + 1):
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if hist is None or len(hist) < 2:
+                print(f"[market_brief] {ticker} 데이터 부족 (rows={len(hist) if hist is not None else 0})")
+                return None
+            prev_close = float(hist["Close"].iloc[-2])
+            current    = float(hist["Close"].iloc[-1])
+            change_pct = (current - prev_close) / prev_close * 100
+            volume     = int(hist["Volume"].iloc[-1])
+            avg_volume = int(hist["Volume"].mean())
+            vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
+            return {
+                "name":         name,
+                "price":        round(current, 2),
+                "change_pct":   round(change_pct, 2),
+                "volume":       volume,
+                "avg_volume":   avg_volume,
+                "volume_ratio": vol_ratio,
+            }
+        except Exception as e:
+            wait = 2 ** attempt
+            print(f"[market_brief] {ticker} 시도 {attempt}/{retries} 실패: {e} → {wait}s 후 재시도")
+            if attempt < retries:
+                time.sleep(wait)
+    print(f"[market_brief] {ticker} 최종 실패 — 데이터 없음으로 처리")
+    return None
+
+
 def get_market_data() -> dict:
     """주요 지수 + 시장심리 데이터 수집"""
     result = {}
     for region, tickers in TICKERS.items():
         result[region] = {}
         for ticker, name in tickers.items():
-            try:
-                hist = yf.Ticker(ticker).history(period="5d")
-                if hist is None or len(hist) < 2:
-                    continue
-                prev_close = float(hist["Close"].iloc[-2])
-                current    = float(hist["Close"].iloc[-1])
-                change_pct = (current - prev_close) / prev_close * 100
-                volume     = int(hist["Volume"].iloc[-1])
-                avg_volume = int(hist["Volume"].mean())
-                vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
-                result[region][ticker] = {
-                    "name":         name,
-                    "price":        round(current, 2),
-                    "change_pct":   round(change_pct, 2),
-                    "volume":       volume,
-                    "avg_volume":   avg_volume,
-                    "volume_ratio": vol_ratio,
-                }
-            except Exception as e:
-                print(f"[market_brief] {ticker} 오류: {e}")
+            data = _fetch_ticker(ticker, name)
+            if data:
+                result[region][ticker] = data
     return result
+
+
+def _has_minimum_data(market_data: dict) -> bool:
+    """핵심 지수(S&P500 또는 KOSPI) 중 하나 이상 있어야 생성 가능"""
+    us  = market_data.get("미국", {})
+    kr  = market_data.get("한국", {})
+    return bool(us) or bool(kr)
 
 
 def _build_data_text(market_data: dict) -> str:
@@ -111,12 +133,20 @@ def _build_prev_context(recent_briefs: list) -> str:
 async def generate_market_brief(brief_type: str) -> dict:
     from database import get_recent_market_briefs
 
-    market_data  = get_market_data()
-    kst          = pytz.timezone("Asia/Seoul")
-    now          = datetime.now(kst)
-    today        = now.strftime("%Y-%m-%d")
-    data_text    = _build_data_text(market_data)
+    market_data = get_market_data()
+    kst         = pytz.timezone("Asia/Seoul")
+    now         = datetime.now(kst)
+    today       = now.strftime("%Y-%m-%d")
 
+    # 핵심 데이터 없으면 생성 불가 — 명확한 에러
+    if not _has_minimum_data(market_data):
+        raise RuntimeError(
+            f"[market_brief] {today} {brief_type} — "
+            "yfinance에서 핵심 지수 데이터를 가져오지 못했습니다. "
+            "Yahoo Finance 서버 상태를 확인하세요."
+        )
+
+    data_text    = _build_data_text(market_data)
     recent       = get_recent_market_briefs(limit=2)
     prev_context = _build_prev_context(recent)
 
