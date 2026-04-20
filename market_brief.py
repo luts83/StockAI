@@ -103,6 +103,83 @@ def _build_data_text(market_data: dict) -> str:
     return "\n".join(lines)
 
 
+def get_market_timing_context(now: datetime) -> dict:
+    """현재 시각 기준 미국 시장 상태 판단"""
+    et          = now.astimezone(pytz.timezone("America/New_York"))
+    et_hour     = et.hour
+    et_weekday  = et.weekday()  # 0=월 ~ 6=일
+
+    if et_weekday >= 5:
+        us_status = "WEEKEND"
+        us_desc   = "주말 (금요일 종가 유지 중)"
+    elif et_hour < 4:
+        us_status = "PRE_EARLY"
+        us_desc   = "이른 프리마켓 (선물 반영 중)"
+    elif et_hour < 9 or (et_hour == 9 and et.minute < 30):
+        us_status = "PRE"
+        us_desc   = "프리마켓 (장 시작 전)"
+    elif et_hour < 16:
+        mins_open = (et_hour - 9) * 60 + et.minute - 30
+        us_status = "OPEN"
+        us_desc   = f"장중 (개장 후 {mins_open}분)"
+    elif et_hour < 20:
+        us_status = "AFTER"
+        us_desc   = "애프터마켓 (장 마감 후)"
+    else:
+        us_status = "CLOSED"
+        us_desc   = "당일 장 종료"
+
+    return {
+        "now_kst":    now.strftime("%Y-%m-%d %H:%M KST"),
+        "now_et":     et.strftime("%Y-%m-%d %H:%M ET"),
+        "us_status":  us_status,
+        "us_desc":    us_desc,
+        "weekday_kr": ["월","화","수","목","금","토","일"][now.weekday()],
+    }
+
+
+def _build_interpretation_guide(timing: dict) -> str:
+    """시점 맥락 + 해석 기준 가이드 (프롬프트에 주입)"""
+    status = timing["us_status"]
+
+    vol_note = ""
+    if status == "OPEN":
+        vol_note = (
+            "\n   ※ 현재 장중 → 거래량이 평균 대비 낮은 것은 정상:"
+            "\n     - 개장 30분 이내: 20% 이하도 정상"
+            "\n     - 개장 2시간 이내: 40% 이하도 정상"
+            "\n     - '극저조' 표현 사용 금지 (마감 후 데이터에서만 사용)"
+        )
+    elif status == "WEEKEND":
+        vol_note = "\n   ※ 주말 → yfinance 데이터는 금요일 종가 기준. '금요일 종가 유지' 명시"
+    elif status in ("PRE", "PRE_EARLY"):
+        vol_note = "\n   ※ 프리마켓 시간대 → 거래량은 선물/호가 기반. '프리마켓 기준' 명시"
+
+    return f"""
+[현재 시각 정보]
+- 한국 시각: {timing['now_kst']} ({timing['weekday_kr']}요일)
+- 미국 시각: {timing['now_et']}
+- 미국 시장 상태: {timing['us_desc']}{vol_note}
+
+[해석 주의사항 — 반드시 준수]
+1. 소폭 등락 기준
+   - ±0.3% 이내: "소폭 조정" 또는 "보합권"
+   - ±0.5%~1%: "완만한 변동"
+   - ±1% 이상: "의미있는 변동"
+   - "방향성 부재"는 ±0.1% 이내일 때만
+
+2. 직전 전망 검증 기준
+   - NEUTRAL 전망 후 실제 ±1% 이내 → "적중"
+   - BULL 전망 후 +0.5% 이상 → "적중"
+   - BEAR 전망 후 -0.5% 이상 하락 → "적중"
+   - 장중 데이터라면 "장중 미확정" 명시
+
+3. 주말/프리마켓 데이터 주의
+   - 주말: "금요일 종가 유지" 명시
+   - 프리마켓: "선물/호가 기반 예상" 명시
+"""
+
+
 def _build_prev_context(recent_briefs: list) -> str:
     """직전 시황에서 전망 섹션만 추출해서 컨텍스트 구성"""
     if not recent_briefs:
@@ -149,11 +226,15 @@ async def generate_market_brief(brief_type: str) -> dict:
     data_text    = _build_data_text(market_data)
     recent       = get_recent_market_briefs(limit=2)
     prev_context = _build_prev_context(recent)
+    timing       = get_market_timing_context(now)
+    interp_guide = _build_interpretation_guide(timing)
 
     if brief_type == "premarket":
         prompt = f"""오늘 {today} 장전 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+
+{interp_guide}
 
 [제공 데이터 — 이것만 사용할 것]
 {data_text}
@@ -204,6 +285,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today} 마감 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+
+{interp_guide}
 
 [제공 데이터 — 이것만 사용할 것]
 {data_text}
