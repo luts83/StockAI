@@ -23,31 +23,59 @@ TICKERS = {
 
 STRICT_RULE = """
 [절대 원칙 — 반드시 준수]
-1. 아래 제공된 데이터에 없는 내용은 절대 쓰지 말 것
-2. 뉴스, 실적발표, 경제지표 일정은 데이터로 주어지지 않으면 언급 금지
-3. "외국인 매수세", "AI 관련주 재조명" 같은 근거 없는 표현 금지
-4. 데이터로 설명 불가한 내용은 "데이터상 원인 불명확"으로 명시
-5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
-6. 전망은 현재 데이터 패턴에서만 도출. 외부 변수 추측 금지
+1. 데이터의 [종가일] 표시를 반드시 확인
+   - 금요일 종가이면 "간밤" = "지난 금요일 마감" 으로 표현
+   - 주말 이후 월요일이면 "금요일 이후 주말 동안 변동" 명시
+2. 거래량 해석 기준 (일간 종가 데이터 기준)
+   - 80~120%: 정상
+   - 50% 이하: "저조" (휴장 전후·단축거래일 예외)
+   - 150% 이상: "폭증"
+   - "극저조" 표현은 30% 미만일 때만 사용
+3. 없는 정보 지어내기 금지 — 뉴스·실적·이벤트 언급 금지
+4. "외국인 매수세", "AI 관련주 재조명" 같은 근거 없는 표현 금지
+5. 데이터로 설명 불가한 내용은 "데이터상 원인 불명확"으로 표기
+6. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
 7. 직전 전망이 틀렸을 때 절대 묻어가지 말 것. 명확히 인정하고 원인 분석
 """
 
 
 def _fetch_ticker(ticker: str, name: str, retries: int = 3) -> dict | None:
-    """단일 티커 데이터 수집 (재시도 포함)"""
+    """티커 일간 종가 수집 — 장중 불완전 데이터 자동 제외"""
     import time
+    from datetime import datetime as _dt, timedelta
+
     for attempt in range(1, retries + 1):
         try:
-            hist = yf.Ticker(ticker).history(period="5d")
-            if hist is None or len(hist) < 2:
+            hist = yf.Ticker(ticker).history(period="10d", interval="1d")
+            if hist is None or hist.empty or len(hist) < 2:
                 print(f"[market_brief] {ticker} 데이터 부족 (rows={len(hist) if hist is not None else 0})")
-                return None
-            prev_close = float(hist["Close"].iloc[-2])
-            current    = float(hist["Close"].iloc[-1])
-            change_pct = (current - prev_close) / prev_close * 100
-            volume     = int(hist["Volume"].iloc[-1])
-            avg_volume = int(hist["Volume"].mean())
-            vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
+                time.sleep(2 ** attempt)
+                continue
+
+            # 마지막 행이 오늘 날짜이고 미국 장이 아직 마감 전이면 제외
+            # ET 근사: UTC - 4h (EDT 기준)
+            now_et      = _dt.utcnow() - timedelta(hours=4)
+            today_utc   = _dt.utcnow().date()
+            last_date   = hist.index[-1].date()
+            us_closed   = now_et.hour >= 16  # 16:00 ET 이후면 마감
+
+            if last_date == today_utc and not us_closed:
+                hist = hist.iloc[:-1]
+                print(f"[market_brief] ⚠️  {ticker} 오늘({last_date}) 장중 행 제외 → 전일 종가 사용")
+
+            if len(hist) < 2:
+                print(f"[market_brief] {ticker} 제외 후 데이터 부족")
+                continue
+
+            prev_close    = float(hist["Close"].iloc[-2])
+            current       = float(hist["Close"].iloc[-1])
+            data_date_str = hist.index[-1].strftime("%Y-%m-%d")
+            change_pct    = (current - prev_close) / prev_close * 100
+            volume        = int(hist["Volume"].iloc[-1])
+            avg_volume    = int(hist["Volume"].mean())
+            vol_ratio     = round(volume / avg_volume * 100, 1) if avg_volume else 0
+
+            print(f"[market_brief] ✅ {ticker} [{data_date_str}] ${current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%")
             return {
                 "name":         name,
                 "price":        round(current, 2),
@@ -55,12 +83,14 @@ def _fetch_ticker(ticker: str, name: str, retries: int = 3) -> dict | None:
                 "volume":       volume,
                 "avg_volume":   avg_volume,
                 "volume_ratio": vol_ratio,
+                "last_date":    data_date_str,
             }
         except Exception as e:
             wait = 2 ** attempt
-            print(f"[market_brief] {ticker} 시도 {attempt}/{retries} 실패: {e} → {wait}s 후 재시도")
+            print(f"[market_brief] ❌ {ticker} 시도 {attempt}/{retries} 실패: {e} → {wait}s 후 재시도")
             if attempt < retries:
                 time.sleep(wait)
+
     print(f"[market_brief] {ticker} 최종 실패 — 데이터 없음으로 처리")
     return None
 
@@ -89,16 +119,13 @@ def _build_data_text(market_data: dict) -> str:
     for region, tickers in market_data.items():
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
-            arrow = "▲" if d["change_pct"] > 0 else "▼"
-            vol_line = (
-                f"(거래량 평균 대비 {d['volume_ratio']}%)"
-                if d.get("volume_ratio") else ""
-            )
+            arrow    = "▲" if d["change_pct"] > 0 else "▼"
+            date_tag = f"[종가일: {d['last_date']}] " if d.get("last_date") else ""
             lines.append(
-                f"- {d['name']}({ticker}): "
-                f"{d['price']} "
+                f"- {d['name']}({ticker}) {date_tag}"
+                f"${d['price']} "
                 f"{arrow}{abs(d['change_pct'])}% "
-                f"{vol_line}"
+                f"(거래량 {d['volume']:,} vs 평균 {d['avg_volume']:,} = {d['volume_ratio']}%)"
             )
     return "\n".join(lines)
 
