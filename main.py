@@ -641,8 +641,24 @@ async def create_card(
         _extract_card_data_sync, claude, doc.get("analysis", "")
     )
 
+    # 카드 전용 가로형 차트 생성 (16:10 비율 — 실패 시 기존 차트 사용)
+    card_chart_b64 = None
+    try:
+        from chart import generate_chart_for_card
+        _ticker = doc.get("ticker", "")
+        _period = doc.get("period", "6mo")
+        _df = await asyncio.to_thread(get_stock_data, _ticker, _period)
+        if _df is not None and not _df.empty:
+            _df = calculate_indicators(_df)
+            card_chart_b64 = await asyncio.to_thread(
+                generate_chart_for_card, _df, _ticker
+            )
+            print(f"[card] 가로형 차트 생성 완료: {_ticker}")
+    except Exception as _e:
+        print(f"[card] 가로형 차트 생성 실패 — 기존 차트 사용: {_e}")
+
     from card import generate_cards
-    cards = await generate_cards(doc, card_data)
+    cards = await generate_cards(doc, card_data, card_chart_b64=card_chart_b64)
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:

@@ -143,6 +143,21 @@ body {{ width:{W}px; height:{H}px; background:{BG};
 </body></html>"""
 
 
+def _wrap_html_dynamic(content: str) -> str:
+    """카드 4 전용 — 콘텐츠 높이에 맞게 세로 자동 확장 (overflow:hidden 해제)"""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+{FONTS}
+{RESET}
+body {{ width:{W}px; min-height:{H}px; background:{BG};
+        color:{WHITE}; display:flex; flex-direction:column;
+        overflow:visible; height:auto; }}
+</style></head><body>
+{content}
+</body></html>"""
+
+
 # ── Playwright 스크린샷 ───────────────────────────────────
 
 _CHROMIUM_PATHS = [
@@ -571,7 +586,7 @@ def _html_scenarios(ticker: str, analysis: str, signal: str,
 
     {_footer("시나리오 분석")}"""
 
-    return _wrap_html(content)
+    return _wrap_html_dynamic(content)
 
 
 # ── 카드 5: 종합 (1080×1350) ─────────────────────────────
@@ -688,9 +703,11 @@ def _html_summary(ticker: str, analysis: str, signal: str,
 
 # ── 공개 API ─────────────────────────────────────────────
 
-async def generate_cards(doc: dict, card_data: dict = None) -> list:
+async def generate_cards(doc: dict, card_data: dict = None,
+                         card_chart_b64: str = None) -> list:
     """
     MongoDB 분석 doc + Claude 추출 card_data → 5장 카드 PNG 생성
+    card_chart_b64: 카드용 가로형 차트(선택). 없으면 기존 분석 차트 사용.
     Returns: [(filename, bytes), ...]
     """
     ticker        = doc.get("ticker", "TICKER")
@@ -698,31 +715,45 @@ async def generate_cards(doc: dict, card_data: dict = None) -> list:
     indicators    = doc.get("indicators", {})
     valuation     = doc.get("valuation", {})
     analysis      = doc.get("analysis", "")
-    chart_b64     = doc.get("chart_b64", "")
+    chart_b64     = card_chart_b64 or doc.get("chart_b64", "")  # 가로형 차트 우선
     created_at    = doc.get("created_at", datetime.now().isoformat())
     current_price = doc.get("current_price")
     change_pct    = doc.get("change_pct")
     cd            = card_data or {}
 
+    # (filename, html, dynamic_height)
+    # dynamic_height=True 인 카드는 스크린샷 전에 scrollHeight 측정 후 뷰포트 조정
     cards_html = [
-        (f"{ticker}_1_cover.png",     _html_cover(ticker, signal, indicators, created_at, current_price, change_pct)),
-        (f"{ticker}_2_chart.png",     _html_chart(ticker, chart_b64, indicators, created_at, valuation)),
-        (f"{ticker}_3_analysis.png",  _html_analysis(ticker, analysis, signal, created_at, cd, indicators)),
-        (f"{ticker}_4_scenarios.png", _html_scenarios(ticker, analysis, signal, created_at, cd)),
-        (f"{ticker}_5_summary.png",   _html_summary(ticker, analysis, signal, indicators, created_at, cd)),
+        (f"{ticker}_1_cover.png",     _html_cover(ticker, signal, indicators, created_at, current_price, change_pct), False),
+        (f"{ticker}_2_chart.png",     _html_chart(ticker, chart_b64, indicators, created_at, valuation),              False),
+        (f"{ticker}_3_analysis.png",  _html_analysis(ticker, analysis, signal, created_at, cd, indicators),           False),
+        (f"{ticker}_4_scenarios.png", _html_scenarios(ticker, analysis, signal, created_at, cd),                      True),
+        (f"{ticker}_5_summary.png",   _html_summary(ticker, analysis, signal, indicators, created_at, cd),            False),
     ]
 
     from playwright.async_api import async_playwright
     results = []
     async with async_playwright() as p:
         browser = await _launch_browser(p)
-        for filename, html in cards_html:
-            page = await browser.new_page(viewport={"width": W, "height": H})
-            await page.set_content(html, wait_until="networkidle")
-            await page.evaluate("document.fonts.ready")
-            screenshot = await page.screenshot(
-                clip={"x": 0, "y": 0, "width": W, "height": H}
-            )
+        for filename, html, dynamic in cards_html:
+            if dynamic:
+                # 카드 4: 콘텐츠 높이를 측정한 뒤 뷰포트·클립 동적 조정
+                page = await browser.new_page(viewport={"width": W, "height": 1920})
+                await page.set_content(html, wait_until="networkidle")
+                await page.evaluate("document.fonts.ready")
+                content_height = await page.evaluate("document.body.scrollHeight")
+                actual_height = max(H, content_height + 60)
+                await page.set_viewport_size({"width": W, "height": actual_height})
+                screenshot = await page.screenshot(
+                    clip={"x": 0, "y": 0, "width": W, "height": actual_height}
+                )
+            else:
+                page = await browser.new_page(viewport={"width": W, "height": H})
+                await page.set_content(html, wait_until="networkidle")
+                await page.evaluate("document.fonts.ready")
+                screenshot = await page.screenshot(
+                    clip={"x": 0, "y": 0, "width": W, "height": H}
+                )
             await page.close()
             results.append((filename, screenshot))
         await browser.close()
