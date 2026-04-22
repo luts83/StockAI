@@ -158,7 +158,7 @@ def get_valuation_data(ticker: str) -> dict:
         return {}
 
 
-def get_summary_stats(df: pd.DataFrame) -> dict:
+def get_summary_stats(df: pd.DataFrame, ticker: str = "") -> dict:
     """분석용 핵심 통계 추출"""
     latest = df.iloc[-1]
 
@@ -173,9 +173,36 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
     macd_signal = _last_valid(df["MACD_Signal"], 0.0)
     stoch_k = _last_valid(df["Stoch_K"], 50.0)
     stoch_d = _last_valid(df["Stoch_D"], 50.0)
+    current_price = float(latest["Close"])
 
     ma60_val  = _last_valid(df["MA60"],  0.0) if "MA60"  in df.columns else 0.0
     ma200_val = _last_valid(df["MA200"], 0.0) if "MA200" in df.columns else 0.0
+
+    # 최근 N일 등락률 계산 (데이터 부족/0 나눗셈 방지)
+    def _pct_change(days: int):
+        if len(df) < days + 1:
+            return None
+        past_price = float(df["Close"].iloc[-(days + 1)])
+        if past_price == 0:
+            return None
+        return round((current_price - past_price) / past_price * 100, 2)
+
+    change_5d = _pct_change(5)
+    change_20d = _pct_change(20)
+
+    # S&P500 대비 초과 수익 (최근 20일)
+    vs_spy = None
+    if ticker.upper() != "SPY" and change_20d is not None:
+        try:
+            spy_df = yf.Ticker("SPY").history(period="1mo")
+            if spy_df is not None and not spy_df.empty and len(spy_df) >= 21:
+                spy_now = float(spy_df["Close"].iloc[-1])
+                spy_past = float(spy_df["Close"].iloc[-21])
+                if spy_past != 0:
+                    spy_change = (spy_now - spy_past) / spy_past * 100
+                    vs_spy = round(change_20d - spy_change, 2)
+        except Exception as e:
+            print(f"[summary_stats] SPY 비교 실패: {e}")
 
     return {
         "price":        round(float(latest["Close"]), 2),
@@ -194,6 +221,9 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
         "ma20":         round(float(ma20), 2) if ma20 else None,
         "ma60":         round(float(ma60_val), 2) if ma60_val else None,
         "ma200":        round(float(ma200_val), 2) if ma200_val else None,
+        "change_5d":    change_5d,
+        "change_20d":   change_20d,
+        "vs_spy":       vs_spy,
     }
 
 
