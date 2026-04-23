@@ -98,9 +98,17 @@ def extract_signal(analysis: str) -> str:
 
 
 def clean_analysis(analysis: str) -> str:
-    """SIGNAL / WATCH_TRIGGER 관련 라인 모두 제거"""
+    """SIGNAL / WATCH_TRIGGER / CONFIDENCE 관련 라인 제거 + 잔여 ** 정리"""
     text = _re.sub(r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|WATCH|SELL)[^\n]*\n?", "", analysis)
+    text = _re.sub(r"\*{0,2}CONFIDENCE:\*{0,2}\s*(상|중|하)[^\n]*\n?", "", text)
     text = _re.sub(r"\*{0,2}WATCH_(BUY|SELL)_TRIGGER:\*{0,2}[^\n]*\n?", "", text)
+    text = _re.sub(r"\*{0,2}WATCH_BIAS:\*{0,2}[^\n]*\n?", "", text)
+    text = _re.sub(r"\*{0,2}WATCH_DURATION:\*{0,2}[^\n]*\n?", "", text)
+    # 짝이 맞지 않는 홀로 남은 ** 제거 (단어 경계 밖에 있는 것만)
+    text = _re.sub(r"\*{2,}(?!\w)", "", text)   # 뒤에 단어 없는 **
+    text = _re.sub(r"(?<!\w)\*{2,}", "", text)   # 앞에 단어 없는 **
+    text = _re.sub(r"\*(?!\w)(?<!\w\*)", "", text)  # 홀로 남은 *
+    text = _re.sub(r"\n{3,}", "\n\n", text)      # 빈 줄 3개 이상 → 2개로
     return text.strip()
 
 
