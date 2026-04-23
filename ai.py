@@ -144,7 +144,8 @@ WATCH_DURATION: 예상 대기 기간 (예: 2~3일 내 방향 확정)
 
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
-                          analysis_date: str = "") -> str:
+                          analysis_date: str = "",
+                          earnings_context: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:8] if item.get("title")
@@ -155,6 +156,54 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
         return f"{v}{suffix}" if v else "—"
     def _pct(v):
         return f"{v}%" if v is not None else "데이터 없음"
+
+    # ── 어닝 컨텍스트 텍스트 구성 ──
+    ec = earnings_context or {}
+    earnings_lines = []
+
+    days = ec.get("days_to_earnings")
+    if days is not None:
+        if -3 <= days <= 0:
+            earnings_lines.append(
+                f"⚠️ 실적 발표 {abs(days)}일 전 발표 완료 ({ec['next_earnings_date']}) "
+                f"— 발표 직후 변동성 구간, 시장 반응 주시 필요"
+            )
+        elif 1 <= days <= 3:
+            earnings_lines.append(
+                f"⚠️ 실적 발표 D-{days} ({ec['next_earnings_date']}) "
+                f"— 이벤트 리스크 존재, WATCH 조건 해당"
+            )
+        elif 4 <= days <= 14:
+            earnings_lines.append(f"📅 실적 발표 예정: {ec['next_earnings_date']} (D-{days})")
+
+    re_earn = ec.get("recent_earnings")
+    if re_earn and re_earn.get("actual_eps") is not None:
+        surprise = re_earn.get("surprise_pct")
+        if surprise is not None:
+            emoji = "🟢" if surprise > 0 else "🔴"
+            label = "어닝 서프라이즈 (예상 상회)" if surprise > 0 else "어닝 쇼크 (예상 하회)"
+            earnings_lines.append(
+                f"{emoji} 최근 실적 ({re_earn['date']}): "
+                f"EPS 실제 ${re_earn['actual_eps']} / 예상 ${re_earn['estimate_eps']} "
+                f"({'+' if surprise > 0 else ''}{surprise}% — {label})"
+            )
+
+    rf = ec.get("recent_financials")
+    if rf:
+        parts = []
+        if rf.get("revenue_b"):    parts.append(f"매출 ${rf['revenue_b']}B")
+        if rf.get("net_income_b"): parts.append(f"순이익 ${rf['net_income_b']}B")
+        if rf.get("op_income_b"):  parts.append(f"영업이익 ${rf['op_income_b']}B")
+        if parts:
+            earnings_lines.append(
+                f"📊 최근 분기 ({rf.get('quarter', '')}): " + " / ".join(parts)
+            )
+
+    earnings_text = (
+        "\n".join(earnings_lines)
+        if earnings_lines
+        else "실적 데이터 없음 (ETF이거나 yfinance 수집 실패 — 추측 금지)"
+    )
 
     valuation_text = f"""
 ### 밸류에이션
@@ -197,6 +246,9 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 - 52주 고가: ${stats['52w_high']} / 저가: ${stats['52w_low']}
 - 현재 거래량: {stats['volume']:,} / 평균 거래량: {stats['avg_volume']:,}
 {valuation_text}
+### 실적/어닝 컨텍스트 (yfinance 수집 — 이 데이터만 사용, 추측 금지)
+{earnings_text}
+
 ### 최신 뉴스
 {news_text}
 
@@ -232,11 +284,13 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 
 async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               news_items: List[Dict], valuation: dict = None,
-                              analysis_date: str = "") -> str:
-    """Claude Vision API로 차트 + 뉴스 + 밸류에이션 종합 분석"""
+                              analysis_date: str = "",
+                              earnings_context: dict = None) -> str:
+    """Claude Vision API로 차트 + 뉴스 + 밸류에이션 + 어닝 종합 분석"""
     stats  = get_summary_stats(df, ticker=ticker)
     prompt = build_analysis_prompt(ticker, stats, news_items, valuation,
-                                   analysis_date=analysis_date)
+                                   analysis_date=analysis_date,
+                                   earnings_context=earnings_context)
 
     try:
         message = _get_client().messages.create(

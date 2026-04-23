@@ -260,3 +260,79 @@ def get_extended_price(ticker: str) -> dict:
     except Exception as e:
         print(f"[extended_price] {ticker} 오류: {e}")
         return {}
+
+
+def get_earnings_context(ticker: str) -> dict:
+    """yfinance로 실적발표 컨텍스트 수집"""
+    from datetime import datetime
+    result = {}
+    try:
+        stock = yf.Ticker(ticker)
+
+        # 다음 실적발표일
+        try:
+            cal = stock.calendar
+            if cal is not None and not cal.empty and "Earnings Date" in cal.index:
+                next_date = cal.loc["Earnings Date"].iloc[0]
+                if hasattr(next_date, "date"):
+                    next_date = next_date.date()
+                today     = datetime.now().date()
+                days_diff = (next_date - today).days
+                result["next_earnings_date"] = str(next_date)
+                result["days_to_earnings"]   = days_diff
+                result["is_earnings_week"]   = abs(days_diff) <= 3
+        except Exception as e:
+            print(f"[earnings] {ticker} 캘린더 오류: {e}")
+
+        # 최근 EPS 서프라이즈
+        try:
+            ed = stock.earnings_dates
+            if ed is not None and not ed.empty:
+                now_utc = pd.Timestamp.now(tz="UTC")
+                past = ed[ed.index <= now_utc].dropna(
+                    subset=["Reported EPS", "EPS Estimate"], how="all"
+                )
+                if not past.empty:
+                    row      = past.iloc[0]
+                    actual   = row.get("Reported EPS")
+                    estimate = row.get("EPS Estimate")
+                    surprise_pct = None
+                    if actual is not None and estimate is not None and float(estimate) != 0:
+                        surprise_pct = round(
+                            (float(actual) - float(estimate)) / abs(float(estimate)) * 100, 1
+                        )
+                    result["recent_earnings"] = {
+                        "date":         past.index[0].strftime("%Y-%m-%d"),
+                        "actual_eps":   float(actual)   if actual   is not None else None,
+                        "estimate_eps": float(estimate) if estimate is not None else None,
+                        "surprise_pct": surprise_pct,
+                    }
+        except Exception as e:
+            print(f"[earnings] {ticker} EPS 오류: {e}")
+
+        # 최근 분기 재무제표
+        try:
+            qs = stock.quarterly_income_stmt
+            if qs is not None and not qs.empty:
+                col = qs.columns[0]
+
+                def _b(key):
+                    if key in qs.index:
+                        v = qs.loc[key, col]
+                        if v is not None and v == v:
+                            return round(float(v) / 1e9, 2)
+                    return None
+
+                result["recent_financials"] = {
+                    "quarter":      str(col)[:10],
+                    "revenue_b":    _b("Total Revenue"),
+                    "net_income_b": _b("Net Income"),
+                    "op_income_b":  _b("Operating Income"),
+                }
+        except Exception as e:
+            print(f"[earnings] {ticker} 재무제표 오류: {e}")
+
+    except Exception as e:
+        print(f"[earnings] {ticker} 전체 오류: {e}")
+
+    return result

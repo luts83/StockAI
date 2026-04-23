@@ -17,7 +17,11 @@ from dotenv import load_dotenv
 load_dotenv()  # .env 먼저 로드 후 환경변수 읽기
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
-from analyzer import get_stock_data, calculate_indicators, get_valuation_data, get_extended_price
+from analyzer import (
+    get_stock_data, calculate_indicators,
+    get_valuation_data, get_extended_price,
+    get_earnings_context,
+)
 from chart import generate_chart
 from news import fetch_news
 from ai import analyze_with_claude
@@ -267,11 +271,13 @@ async def _run_analysis_job(job_id: str, ticker: str,
         df            = calculate_indicators(df)
         chart_b64     = generate_chart(df, ticker)
         news_items    = fetch_news(ticker)
-        valuation     = await asyncio.to_thread(get_valuation_data, ticker)
-        analysis_date = df.index[-1].strftime("%Y-%m-%d")
-        analysis_raw  = await analyze_with_claude(
+        valuation        = await asyncio.to_thread(get_valuation_data, ticker)
+        earnings_context = await asyncio.to_thread(get_earnings_context, ticker)
+        analysis_date    = df.index[-1].strftime("%Y-%m-%d")
+        analysis_raw     = await analyze_with_claude(
             chart_b64, df, ticker, news_items, valuation,
             analysis_date=analysis_date,
+            earnings_context=earnings_context,
         )
         signal   = extract_signal(analysis_raw)
         analysis = clean_analysis(analysis_raw)
@@ -424,7 +430,23 @@ $42 근처로 내려오면 그때 분할 매수를 고려하세요."
 
 === 기존 분석 ({_data_date} 기준) ===
 {doc['analysis']}
-=== 분석 종료 ==="""
+=== 분석 종료 ===
+
+[절대 금지 — 데이터 없으면 반드시 거절]
+아래 항목은 제공된 분석 데이터에 없으면 절대 추측/생성 금지.
+모르면 반드시 이렇게만 답할 것:
+"해당 정보는 분석 데이터에 포함되지 않습니다. 공식 IR 또는 뉴스를 확인하세요."
+
+금지 항목:
+- 분석 데이터에 없는 실적 수치 (EPS, 매출, 마진 등)
+- 어닝콜 발언, 경영진 코멘트, 가이던스
+- 분석 기준일({_data_date}) 이후 주가/뉴스
+- 재무제표 세부 수치 추측
+
+단, 분석 데이터에 실적 정보가 포함된 경우는 그 데이터를 근거로 답변 가능.
+
+모르는 것을 지어내면 사용자에게 치명적 피해를 준다.
+절대로 추측으로 수치를 만들어내지 말 것.""""
 
     for h in history:
         messages.append({"role": h["role"], "content": h["content"]})
