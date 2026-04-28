@@ -85,6 +85,131 @@ def fetch_news(ticker: str) -> List[Dict]:
     return unique
 
 
+MACRO_RSS_SOURCES = [
+    {
+        "url": "https://feeds.reuters.com/reuters/businessNews",
+        "source": "Reuters",
+        "category": "매크로",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=Federal+Reserve+interest+rate&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "연준/금리",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=oil+price+WTI+crude&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "유가",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=dollar+index+DXY+forex&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "달러/환율",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=S%26P500+stock+market+today&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "증시",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=KOSPI+Korea+stock+market&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "한국증시",
+    },
+]
+
+
+def fetch_macro_news(max_per_source: int = 3) -> List[Dict]:
+    """
+    시황용 매크로 뉴스 수집
+    - 유가/연준/달러/증시/한국 관련 RSS 수집
+    - 최근 24시간 이내 뉴스만 필터링
+    - 제목 한글 번역 포함
+    """
+    from datetime import datetime, timezone, timedelta
+    import email.utils
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    news_items = []
+
+    for source_info in MACRO_RSS_SOURCES:
+        try:
+            feed = feedparser.parse(source_info["url"])
+            count = 0
+            for entry in feed.entries:
+                if count >= max_per_source:
+                    break
+
+                published_str = entry.get("published", "")
+                pub_dt = None
+                if published_str:
+                    try:
+                        parsed = email.utils.parsedate(published_str)
+                        if parsed:
+                            pub_dt = datetime(*parsed[:6], tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                title = entry.get("title", "").strip()
+                summary = entry.get("summary", "")[:200].strip()
+
+                if not title:
+                    continue
+
+                news_items.append({
+                    "title":     title,
+                    "summary":   summary,
+                    "url":       entry.get("link", ""),
+                    "published": published_str,
+                    "source":    source_info["source"],
+                    "category":  source_info["category"],
+                    "title_ko":  "",
+                })
+                count += 1
+
+        except Exception as e:
+            print(f"[macro_news] {source_info['category']} RSS 오류: {e}")
+
+    seen, unique = set(), []
+    for item in news_items:
+        title = item["title"]
+        if title and title not in seen:
+            seen.add(title)
+            unique.append(item)
+
+    unique = translate_titles(unique)
+
+    print(f"[macro_news] {len(unique)}개 매크로 뉴스 수집 완료")
+    return unique
+
+
+def format_macro_news_for_brief(news_items: List[Dict]) -> str:
+    """
+    시황 프롬프트용 뉴스 텍스트 포맷
+    카테고리별로 묶어서 반환
+    """
+    if not news_items:
+        return "매크로 뉴스 없음 (RSS 수집 실패 또는 최근 24시간 내 뉴스 없음)"
+
+    by_category: dict = {}
+    for item in news_items:
+        cat = item.get("category", "기타")
+        if cat not in by_category:
+            by_category[cat] = []
+        title = item.get("title_ko") or item.get("title", "")
+        by_category[cat].append(f"  - {title}")
+
+    lines = []
+    for cat, titles in by_category.items():
+        lines.append(f"[{cat}]")
+        lines.extend(titles[:3])
+
+    return "\n".join(lines)
+
+
 def translate_titles(items: List[Dict]) -> List[Dict]:
     """Claude API로 뉴스 제목들 일괄 한국어 번역 (핵심만, 간결하게)"""
     if not items:

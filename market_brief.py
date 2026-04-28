@@ -3,6 +3,7 @@ import anthropic
 import yfinance as yf
 from datetime import datetime
 import pytz
+from news import fetch_macro_news, format_macro_news_for_brief
 
 TICKERS = {
     "미국": {
@@ -30,6 +31,16 @@ STRICT_RULE = """
 5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
 6. 전망은 현재 데이터 패턴에서만 도출, 외부 변수 추측 금지
 7. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
+"""
+
+NEWS_RULE = """
+[뉴스 활용 원칙]
+- 위 뉴스 제목은 참고용으로만 사용
+- 제목만으로 내용을 추측해서 분석에 활용 금지
+- 뉴스 제목이 시장 데이터(등락률/거래량)와 일치할 때만 연결해서 언급
+- 예시 (허용): "[뉴스] 유가 하락 뉴스 + SPY ▼0.5% → 에너지 섹터 약세 가능성"
+- 예시 (금지): "연준 발언 뉴스 있음 → 금리 인상 우려로 약세" (수치 없는 추측)
+- 뉴스 언급 시 반드시 "[뉴스]" 태그 붙여서 데이터와 구분
 """
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
@@ -167,6 +178,8 @@ async def generate_market_brief(brief_type: str) -> dict:
     from database import get_recent_market_briefs
 
     market_data = get_market_data()
+    macro_news = fetch_macro_news(max_per_source=3)
+    news_text = format_macro_news_for_brief(macro_news)
 
     if not _has_minimum_data(market_data):
         raise RuntimeError("yfinance에서 핵심 지수 데이터를 가져오지 못했습니다")
@@ -194,10 +207,14 @@ async def generate_market_brief(brief_type: str) -> dict:
         prompt = f"""오늘 {today}({weekday_today}) 장전 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+{NEWS_RULE}
 {timing_context}
 
 [제공 데이터 — 이것만 사용할 것]
 {data_text}
+
+[최근 24시간 매크로 뉴스 — 제목만 제공, 내용 추측 금지]
+{news_text}
 
 {prev_context}
 
@@ -252,10 +269,14 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+{NEWS_RULE}
 {timing_context}
 
 [제공 데이터 — 이것만 사용할 것]
 {data_text}
+
+[최근 24시간 매크로 뉴스 — 제목만 제공, 내용 추측 금지]
+{news_text}
 
 {prev_context}
 
