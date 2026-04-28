@@ -15,67 +15,77 @@ TICKERS = {
         "^KQ11": "KOSDAQ",
     },
     "시장심리": {
-        "^VIX":     "VIX 공포지수",
-        "^TNX":     "미국 10년물 금리",
-        "DX-Y.NYB": "달러 인덱스",
+        "^VIX":      "VIX 공포지수",
+        "^TNX":      "미국 10년물 금리",
+        "DX-Y.NYB":  "달러 인덱스",
     },
 }
 
 STRICT_RULE = """
-[절대 원칙 — 반드시 준수]
-1. 데이터의 [종가일] 표시를 반드시 확인
-   - 금요일 종가이면 "간밤" = "지난 금요일 마감" 으로 표현
-   - 주말 이후 월요일이면 "금요일 이후 주말 동안 변동" 명시
-2. 거래량 해석 기준 (일간 종가 데이터 기준)
-   - 80~120%: 정상
-   - 50% 이하: "저조" (휴장 전후·단축거래일 예외)
-   - 150% 이상: "폭증"
-   - "극저조" 표현은 30% 미만일 때만 사용
-3. 없는 정보 지어내기 금지 — 뉴스·실적·이벤트 언급 금지
-4. "외국인 매수세", "AI 관련주 재조명" 같은 근거 없는 표현 금지
-5. 데이터로 설명 불가한 내용은 "데이터상 원인 불명확"으로 표기
-6. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
-7. 직전 전망이 틀렸을 때 절대 묻어가지 말 것. 명확히 인정하고 원인 분석
+[절대 원칙]
+1. 제공된 데이터에 없는 내용 언급 금지
+2. 뉴스/실적/경제지표 일정은 데이터로 주어지지 않으면 언급 금지
+3. 근거 없는 표현 ("외국인 매수세", "AI 관련주 재조명" 등) 금지
+4. 데이터로 설명 불가하면 "데이터상 원인 불명확"으로 표기
+5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
+6. 전망은 현재 데이터 패턴에서만 도출, 외부 변수 추측 금지
+7. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
 """
 
+WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
-def _fetch_ticker(ticker: str, name: str, retries: int = 3) -> dict | None:
-    """티커 일간 종가 수집 — 장중 불완전 데이터 자동 제외"""
+
+def _fetch_ticker(ticker: str, name: str) -> dict | None:
+    """티커별 데이터 수집 — 날짜 포함 + 재시도 3회"""
     import time
-    from datetime import datetime as _dt, timedelta
 
-    for attempt in range(1, retries + 1):
+    for attempt in range(3):
         try:
-            hist = yf.Ticker(ticker).history(period="10d", interval="1d")
+            hist = yf.Ticker(ticker).history(period="10d")
             if hist is None or hist.empty or len(hist) < 2:
-                print(f"[market_brief] {ticker} 데이터 부족 (rows={len(hist) if hist is not None else 0})")
                 time.sleep(2 ** attempt)
                 continue
 
-            # 마지막 행이 오늘 날짜이고 미국 장이 아직 마감 전이면 제외
-            # ET 근사: UTC - 4h (EDT 기준)
-            now_et      = _dt.utcnow() - timedelta(hours=4)
-            today_utc   = _dt.utcnow().date()
-            last_date   = hist.index[-1].date()
-            us_closed   = now_et.hour >= 16  # 16:00 ET 이후면 마감
+            # 오늘 장중 불완전 데이터 제외
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            last_dt  = hist.index[-1]
+            if hasattr(last_dt, "date"):
+                last_date_val = last_dt.date()
+            else:
+                last_date_val = last_dt.to_pydatetime().date()
 
-            if last_date == today_utc and not us_closed:
-                hist = hist.iloc[:-1]
-                print(f"[market_brief] ⚠️  {ticker} 오늘({last_date}) 장중 행 제외 → 전일 종가 사용")
+            today_utc = now_utc.date()
+            et_hour   = now_utc.hour - 4  # ET 근사
+            us_market_open = 9 <= et_hour < 16
 
-            if len(hist) < 2:
-                print(f"[market_brief] {ticker} 제외 후 데이터 부족")
-                continue
+            if last_date_val == today_utc and us_market_open:
+                hist = hist.iloc[:-1]  # 장중 불완전 데이터 제외
+                if len(hist) < 2:
+                    continue
 
-            prev_close    = float(hist["Close"].iloc[-2])
-            current       = float(hist["Close"].iloc[-1])
-            data_date_str = hist.index[-1].strftime("%Y-%m-%d")
-            change_pct    = (current - prev_close) / prev_close * 100
-            volume        = int(hist["Volume"].iloc[-1])
-            avg_volume    = int(hist["Volume"].mean())
-            vol_ratio     = round(volume / avg_volume * 100, 1) if avg_volume else 0
+            prev_close = float(hist["Close"].iloc[-2])
+            current    = float(hist["Close"].iloc[-1])
+            last_date  = hist.index[-1]
 
-            print(f"[market_brief] ✅ {ticker} [{data_date_str}] ${current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%")
+            # 날짜 + 요일 계산
+            if hasattr(last_date, "date"):
+                ld = last_date.date()
+            else:
+                ld = last_date.to_pydatetime().date()
+            weekday_str = WEEKDAY_KR[ld.weekday()]
+            date_label  = f"{ld.strftime('%Y-%m-%d')}({weekday_str})"
+
+            change_pct = (current - prev_close) / prev_close * 100
+            volume     = int(hist["Volume"].iloc[-1])
+            avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
+            vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
+
+            print(
+                f"[market_brief] ✅ {ticker} {date_label} "
+                f"${current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
+            )
+
             return {
                 "name":         name,
                 "price":        round(current, 2),
@@ -83,154 +93,73 @@ def _fetch_ticker(ticker: str, name: str, retries: int = 3) -> dict | None:
                 "volume":       volume,
                 "avg_volume":   avg_volume,
                 "volume_ratio": vol_ratio,
-                "last_date":    data_date_str,
+                "last_date":    date_label,
             }
         except Exception as e:
-            wait = 2 ** attempt
-            print(f"[market_brief] ❌ {ticker} 시도 {attempt}/{retries} 실패: {e} → {wait}s 후 재시도")
-            if attempt < retries:
-                time.sleep(wait)
-
-    print(f"[market_brief] {ticker} 최종 실패 — 데이터 없음으로 처리")
+            print(f"[market_brief] ❌ {ticker} 오류 (시도 {attempt+1}): {e}")
+            time.sleep(2 ** attempt)
     return None
 
 
 def get_market_data() -> dict:
-    """주요 지수 + 시장심리 데이터 수집"""
     result = {}
     for region, tickers in TICKERS.items():
         result[region] = {}
         for ticker, name in tickers.items():
-            data = _fetch_ticker(ticker, name)
-            if data:
-                result[region][ticker] = data
+            d = _fetch_ticker(ticker, name)
+            if d:
+                result[region][ticker] = d
+    total = sum(len(v) for v in result.values())
+    print(f"[market_brief] 총 {total}개 지수 수집 완료")
     return result
 
 
 def _has_minimum_data(market_data: dict) -> bool:
-    """핵심 지수(S&P500 또는 KOSPI) 중 하나 이상 있어야 생성 가능"""
-    us  = market_data.get("미국", {})
-    kr  = market_data.get("한국", {})
-    return bool(us) or bool(kr)
+    us = market_data.get("미국", {})
+    kr = market_data.get("한국", {})
+    return len(us) >= 1 or len(kr) >= 1
 
 
 def _build_data_text(market_data: dict) -> str:
     lines = []
     for region, tickers in market_data.items():
+        if not tickers:
+            lines.append(f"\n### {region} — ⚠️ 데이터 수집 실패")
+            continue
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
-            arrow    = "▲" if d["change_pct"] > 0 else "▼"
-            date_tag = f"[종가일: {d['last_date']}] " if d.get("last_date") else ""
+            arrow = "▲" if d["change_pct"] > 0 else "▼"
             lines.append(
-                f"- {d['name']}({ticker}) {date_tag}"
+                f"- {d['name']}({ticker}) [데이터일: {d['last_date']}]: "
                 f"${d['price']} "
                 f"{arrow}{abs(d['change_pct'])}% "
-                f"(거래량 {d['volume']:,} vs 평균 {d['avg_volume']:,} = {d['volume_ratio']}%)"
+                f"(거래량 평균 대비 {d['volume_ratio']}%)"
             )
     return "\n".join(lines)
 
 
-def get_market_timing_context(now: datetime) -> dict:
-    """현재 시각 기준 미국 시장 상태 판단"""
-    et          = now.astimezone(pytz.timezone("America/New_York"))
-    et_hour     = et.hour
-    et_weekday  = et.weekday()  # 0=월 ~ 6=일
-
-    if et_weekday >= 5:
-        us_status = "WEEKEND"
-        us_desc   = "주말 (금요일 종가 유지 중)"
-    elif et_hour < 4:
-        us_status = "PRE_EARLY"
-        us_desc   = "이른 프리마켓 (선물 반영 중)"
-    elif et_hour < 9 or (et_hour == 9 and et.minute < 30):
-        us_status = "PRE"
-        us_desc   = "프리마켓 (장 시작 전)"
-    elif et_hour < 16:
-        mins_open = (et_hour - 9) * 60 + et.minute - 30
-        us_status = "OPEN"
-        us_desc   = f"장중 (개장 후 {mins_open}분)"
-    elif et_hour < 20:
-        us_status = "AFTER"
-        us_desc   = "애프터마켓 (장 마감 후)"
-    else:
-        us_status = "CLOSED"
-        us_desc   = "당일 장 종료"
-
-    return {
-        "now_kst":    now.strftime("%Y-%m-%d %H:%M KST"),
-        "now_et":     et.strftime("%Y-%m-%d %H:%M ET"),
-        "us_status":  us_status,
-        "us_desc":    us_desc,
-        "weekday_kr": ["월","화","수","목","금","토","일"][now.weekday()],
-    }
-
-
-def _build_interpretation_guide(timing: dict) -> str:
-    """시점 맥락 + 해석 기준 가이드 (프롬프트에 주입)"""
-    status = timing["us_status"]
-
-    vol_note = ""
-    if status == "OPEN":
-        vol_note = (
-            "\n   ※ 현재 장중 → 거래량이 평균 대비 낮은 것은 정상:"
-            "\n     - 개장 30분 이내: 20% 이하도 정상"
-            "\n     - 개장 2시간 이내: 40% 이하도 정상"
-            "\n     - '극저조' 표현 사용 금지 (마감 후 데이터에서만 사용)"
-        )
-    elif status == "WEEKEND":
-        vol_note = "\n   ※ 주말 → yfinance 데이터는 금요일 종가 기준. '금요일 종가 유지' 명시"
-    elif status in ("PRE", "PRE_EARLY"):
-        vol_note = "\n   ※ 프리마켓 시간대 → 거래량은 선물/호가 기반. '프리마켓 기준' 명시"
-
-    return f"""
-[현재 시각 정보]
-- 한국 시각: {timing['now_kst']} ({timing['weekday_kr']}요일)
-- 미국 시각: {timing['now_et']}
-- 미국 시장 상태: {timing['us_desc']}{vol_note}
-
-[해석 주의사항 — 반드시 준수]
-1. 소폭 등락 기준
-   - ±0.3% 이내: "소폭 조정" 또는 "보합권"
-   - ±0.5%~1%: "완만한 변동"
-   - ±1% 이상: "의미있는 변동"
-   - "방향성 부재"는 ±0.1% 이내일 때만
-
-2. 직전 전망 검증 기준
-   - NEUTRAL 전망 후 실제 ±1% 이내 → "적중"
-   - BULL 전망 후 +0.5% 이상 → "적중"
-   - BEAR 전망 후 -0.5% 이상 하락 → "적중"
-   - 장중 데이터라면 "장중 미확정" 명시
-
-3. 주말/프리마켓 데이터 주의
-   - 주말: "금요일 종가 유지" 명시
-   - 프리마켓: "선물/호가 기반 예상" 명시
-"""
-
-
 def _build_prev_context(recent_briefs: list) -> str:
-    """직전 시황에서 전망 섹션만 추출해서 컨텍스트 구성"""
     if not recent_briefs:
         return ""
-
-    prev      = recent_briefs[0]
+    prev = recent_briefs[0]
     prev_type = "장전" if prev.get("type") == "premarket" else "마감"
-    analysis  = prev.get("analysis", "")
+    analysis = prev.get("analysis", "")
 
-    # 전망 섹션만 추출 (토큰 절약)
+    # 전망 섹션만 추출
     forecast_match = re.search(
-        r"(###\s*\d+\.\s*(내일|오늘)\s*장\s*전망[\s\S]*?)(?=###|\Z)",
-        analysis
+        r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘)\s*[^\n]*)[\s\S]*?(?=###|\Z)",
+        analysis,
     )
     forecast_text = (
-        forecast_match.group(1).strip()
+        forecast_match.group(0).strip()
         if forecast_match
         else analysis[:400]
     )
 
     return f"""
-[직전 시황 전망 — {prev.get('date')} {prev_type} / SIGNAL:{prev.get('signal')}]
+[직전 시황 — {prev.get('date')} {prev_type} / SIGNAL:{prev.get('signal')}]
 {forecast_text}
-[직전 시황 끝 — 이 내용을 기반으로 ### 0. 직전 전망 검증을 작성할 것]
+[직전 시황 끝 — 이 전망을 기반으로 ### 0. 직전 전망 검증 작성]
 """
 
 
@@ -238,117 +167,120 @@ async def generate_market_brief(brief_type: str) -> dict:
     from database import get_recent_market_briefs
 
     market_data = get_market_data()
-    kst         = pytz.timezone("Asia/Seoul")
-    now         = datetime.now(kst)
-    today       = now.strftime("%Y-%m-%d")
 
-    # 핵심 데이터 없으면 생성 불가 — 명확한 에러
     if not _has_minimum_data(market_data):
-        raise RuntimeError(
-            f"[market_brief] {today} {brief_type} — "
-            "yfinance에서 핵심 지수 데이터를 가져오지 못했습니다. "
-            "Yahoo Finance 서버 상태를 확인하세요."
-        )
+        raise RuntimeError("yfinance에서 핵심 지수 데이터를 가져오지 못했습니다")
 
-    data_text    = _build_data_text(market_data)
-    recent       = get_recent_market_briefs(limit=2)
+    kst = pytz.timezone("Asia/Seoul")
+    now = datetime.now(kst)
+    today = now.strftime("%Y-%m-%d")
+    weekday_today = WEEKDAY_KR[now.weekday()]
+
+    data_text = _build_data_text(market_data)
+    recent = get_recent_market_briefs(limit=2)
     prev_context = _build_prev_context(recent)
-    timing       = get_market_timing_context(now)
-    interp_guide = _build_interpretation_guide(timing)
+
+    # 현재 시각 컨텍스트
+    timing_context = f"""
+[현재 시각 정보 — 반드시 확인]
+- 한국 시각: {now.strftime('%Y-%m-%d %H:%M')} ({weekday_today}요일)
+- 시황 종류: {'장전 시황' if brief_type == 'premarket' else '마감 시황'}
+- 데이터의 [데이터일] 표시를 반드시 확인하여 날짜/요일 오류 방지
+- 데이터일이 금요일이면 → 주말을 지나 월요일 시황에서 사용되는 데이터
+- 절대 데이터에 없는 날짜나 요일을 추측해서 쓰지 말 것
+"""
 
     if brief_type == "premarket":
-        prompt = f"""오늘 {today} 장전 시황을 아래 데이터만 사용해서 분석해줘.
+        prompt = f"""오늘 {today}({weekday_today}) 장전 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+{timing_context}
 
-[제공 데이터]
+[제공 데이터 — 이것만 사용할 것]
 {data_text}
 
 {prev_context}
 
-## 📊 장전 시황 ({today})
+## 📊 장전 시황 ({today} {weekday_today}요일)
 
 ### 0. 직전 전망 검증
-(마감 시황의 "내일 전망"이 있을 때만 작성. 없으면 생략)
-- ✅ 적중 또는 ❌ 빗나감 — 전망 vs 실제 결과
-- 원인: 데이터에서 읽히는 원인 1~2개 (수치 포함)
+(직전 시황의 전망이 있을 때만 작성, 없으면 생략)
+- ✅ 적중 또는 ❌ 빗나감 — 전망 한 줄 vs 실제 결과 한 줄
+- 원인: 데이터에서 읽히는 원인 수치 포함 1~2개
 - 교훈: 다음 분석에 반영할 점 한 줄
 
 ---
 
-### 1. 🇰🇷 한국 시장 마감 결과 (어제)
-지금 막 마감한 한국 시장이 어떻게 끝났는지 먼저 정리.
-- KOSPI/KOSDAQ 등락률 + 거래량 비율
-- 오늘 한국 시장의 특징적 흐름 한 줄
-(데이터 없으면 "오늘 한국 데이터 없음"으로 표기)
+### 1. 🇰🇷 한국 시장 마감 결과
+[데이터일] 기준 가장 최근 한국 시장 결과
+- KOSPI / KOSDAQ 등락률 + 거래량 비율
+- 한 줄 특징
 
 ---
 
 ### 2. 🇺🇸 미국 장전 현재 상황
-지금 미국 장이 시작되기 직전 상황 분석.
-- 전일(어제) 미국 마감 결과: 각 지수 등락률 + 거래량
-- 현재 프리마켓/선물 흐름 (데이터 있으면)
-- 오늘 미국 장에 영향줄 핵심 변수:
-  * 오늘 발표 예정 경제지표 (데이터 있으면)
-  * 전일 마감 후 주요 뉴스/이벤트 (데이터 있으면)
-  * 없으면 "추가 데이터 없음 — 전일 흐름 연장 예상"
+[데이터일] 기준 가장 최근 미국 마감 결과
+- 각 지수 등락률 + 거래량 비율
+- 오늘 미국 장 시작 전 주목할 변수
+  (데이터로 확인 가능한 것만, 없으면 "추가 데이터 없음")
 
 ---
 
 ### 3. 📊 시장 심리
-- VIX: 수치 + 방향 → 한 줄 해석
-- 달러: 방향 + 한국/신흥시장 영향 한 줄
+- VIX: 수치 → 공포(20↑)/중립/탐욕(15↓) + 한 줄 해석
+- 달러: 방향 + 영향 한 줄
 - 금리: 수치 + 성장주 영향 한 줄
+(수집 안 된 항목은 "데이터 없음"으로 표기)
 
 ---
 
 ### 4. 🔮 오늘 미국 장 전망
-지금부터 시작되는 미국 장이 어떻게 흘러갈지 예측.
 **결론: 강세 우위 / 약세 우위 / 중립** (반드시 방향 제시)
 - 강세 근거: 데이터 기반 1줄
 - 약세 근거: 데이터 기반 1줄
 - 신뢰도: 상/중/하 + 근거 한 줄
-- 핵심 체크포인트: 오늘 장 중 봐야 할 수치/이벤트 1개
+- 핵심 체크포인트: 오늘 봐야 할 것 1개
 
 ---
 
 ### 5. 💡 한 줄 요약
-오늘 가장 중요한 숫자 1개 기반으로 딱 한 문장
+가장 중요한 수치 1개 기반으로 딱 한 문장
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
-    else:  # close / closing
-        prompt = f"""오늘 {today} 마감 시황을 아래 데이터만 사용해서 분석해줘.
+    else:  # closing
+        prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 분석해줘.
 
 {STRICT_RULE}
+{timing_context}
 
-[제공 데이터]
+[제공 데이터 — 이것만 사용할 것]
 {data_text}
 
 {prev_context}
 
-## 📈 마감 시황 ({today})
+## 📈 마감 시황 ({today} {weekday_today}요일)
 
 ### 0. 직전 전망 검증
-(오늘 장전 시황의 "미국 장 전망"이 있을 때만 작성)
+(오늘 장전 시황의 전망이 있을 때만 작성, 없으면 생략)
 - ✅ 적중 또는 ❌ 빗나감 — 장전 전망 vs 실제 마감 결과
-- 원인: 데이터에서 읽히는 원인 (수치 포함)
+- 원인: 데이터에서 읽히는 원인 수치 포함
 - 교훈: 다음 분석에 반영할 점 한 줄
 
 ---
 
-### 1. 🇺🇸 미국 시장 마감 결과 (오늘)
-방금 끝난 미국 장 총평.
-- S&P500 / NASDAQ / DOW 등락률 + 거래량 비율
-- 오늘 미국 장의 핵심 흐름 한 줄
-- 장 중 특이사항 (데이터로 읽히는 것만)
+### 1. 🇺🇸 미국 시장 마감 결과
+[데이터일] 기준 오늘 미국 마감 결과
+- 각 지수 등락률 + 거래량 비율
+- 오늘 장의 핵심 흐름 한 줄
 
 ---
 
 ### 2. 🇰🇷 내일 한국 시장 전망
-오늘 미국 마감 결과를 바탕으로 내일 한국장 예측.
+오늘 미국 마감 → 내일 한국장 예측
 **결론: 강세 우위 / 약세 우위 / 중립** (반드시 방향 제시)
-- 미국 → 한국 영향 경로: 구체적으로 (예: NASDAQ ▲1.9% → KOSDAQ 기술주 동조 예상)
+- 미국→한국 영향 경로: 구체적으로
+  예) NASDAQ ▲1.9% → KOSDAQ 기술주 동조 예상
 - 강세 근거: 데이터 기반 1줄
 - 약세 근거: 데이터 기반 1줄
 - 신뢰도: 상/중/하 + 근거 한 줄
@@ -357,22 +289,23 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 ---
 
 ### 3. 📊 시장 심리
-- VIX: 수치 + 방향 → 내일 한국장 영향 한 줄
-- 달러: 방향 + 원화/한국 수출주 영향 한 줄
+- VIX: 수치 → 내일 한국장 영향 한 줄
+- 달러: 방향 + 원화/수출주 영향 한 줄
 - 금리: 수치 + 내일 성장주 영향 한 줄
+(수집 안 된 항목은 "데이터 없음"으로 표기)
 
 ---
 
 ### 4. 💡 한 줄 요약
-오늘 가장 중요한 숫자 1개 기반 + 내일 핵심 포인트 한 문장
+오늘 수치 1개 + 내일 핵심 포인트 한 문장
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
-    client  = anthropic.Anthropic()
+    client = anthropic.Anthropic()
     message = client.messages.create(
-        model      = "claude-sonnet-4-5-20250929",
-        max_tokens = 1500,
-        messages   = [{"role": "user", "content": prompt}],
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
     )
     analysis = message.content[0].text
 
@@ -382,12 +315,11 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     elif "SIGNAL:BEAR" in analysis:
         signal = "BEAR"
 
-    analysis_clean = (
-        analysis
-        .replace(f"\nSIGNAL:{signal}", "")
-        .replace(f"SIGNAL:{signal}", "")
-        .strip()
-    )
+    analysis_clean = re.sub(
+        r"\*{0,2}SIGNAL:\*{0,2}\s*(BULL|NEUTRAL|BEAR)[^\n]*\n?",
+        "",
+        analysis,
+    ).strip()
 
     return {
         "type":        brief_type,
