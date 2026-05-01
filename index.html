@@ -2050,7 +2050,8 @@ function _applyBriefToBanner(brief) {
   const typeLabel = brief.type === "premarket" ? "📊 장전 시황" : "📈 마감 시황";
 
   document.getElementById("banner-type-label").textContent  = typeLabel;
-  document.getElementById("banner-date").textContent        = brief.date;
+  const bannerDate = document.getElementById("banner-date");
+  if (bannerDate) bannerDate.style.display = "none";
   document.getElementById("banner-signal-icon").textContent = s.icon;
 
   const badge = document.getElementById("banner-signal-badge");
@@ -2139,10 +2140,16 @@ function showMarketBriefModal() {
   if (newBadge) newBadge.style.display = "none";
 
   if (!marketBriefData) return;
+  const weekdayKr = ["일", "월", "화", "수", "목", "금", "토"];
+  const briefDate = marketBriefData.date || "";
+  const d = new Date(`${briefDate}T00:00:00`);
+  const dateLabel = briefDate && !Number.isNaN(d.getTime())
+    ? `${briefDate} ${weekdayKr[d.getDay()]}요일`
+    : briefDate;
   document.getElementById("modal-brief-title").textContent =
     marketBriefData.type === "premarket"
-      ? `📊 장전 시황 ${marketBriefData.date}`
-      : `📈 마감 시황 ${marketBriefData.date}`;
+      ? `📊 장전 시황 (${dateLabel})`
+      : `📈 마감 시황 (${dateLabel})`;
   document.getElementById("modal-brief-content").innerHTML =
     typeof marked !== "undefined"
       ? marked.parse(marketBriefData.analysis)
