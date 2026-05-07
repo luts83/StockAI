@@ -429,7 +429,7 @@ header {
 .modal-close:hover { color:var(--muted); }
 
 /* DISCLAIMER */
-.disclaimer { text-align:center; padding:28px 20px 0; font-size:11px; color:var(--dim); border-top:1px solid var(--border); margin-top:32px; }
+.disclaimer { margin-top:24px; padding:14px; background:var(--card2); border-radius:8px; font-size:11px; color:var(--dim); line-height:1.7; }
 
 /* ── 모바일 조정 (≤600px) ── */
 @media (max-width: 600px) {
@@ -798,7 +798,14 @@ header {
       <div class="compare-result analysis-md" id="compare-result" style="display:none"></div>
     </div>
 
-    <div class="disclaimer">이 분석은 참고용이며, 투자 결정과 손실에 대한 책임은 본인에게 있습니다.</div>
+    <div class="disclaimer">
+      <strong style="color:var(--muted)">📋 분석 한계 안내</strong><br>
+      • 본 분석은 <strong>기술적 지표(차트·RSI·MACD)</strong> 기반이며 펀더멘털 분석을 대체하지 않습니다<br>
+      • 순이익·EPS는 GAAP 기준으로 워런트·파생상품 평가이익 등 일회성 항목이 포함될 수 있습니다<br>
+      • PSR 등 밸류에이션 수치는 TTM/Forward/Run-rate 기준에 따라 크게 다를 수 있습니다<br>
+      • BUY/SELL 트리거는 참고용이며 가격 도달이 자동 매수 신호가 아닙니다<br>
+      • 모든 투자 결정의 책임은 본인에게 있습니다
+    </div>
   </div>
 </div>
 
@@ -1122,6 +1129,25 @@ async function pollAnalysis(jobId, maxWait = 120000) {
 
 function renderResults(data) {
   document.getElementById("loading").style.display = "none";
+  const existingTopDisclaimer = document.getElementById("analysis-top-disclaimer");
+  if (existingTopDisclaimer) existingTopDisclaimer.remove();
+  const topDisclaimer = document.createElement("div");
+  topDisclaimer.id = "analysis-top-disclaimer";
+  topDisclaimer.style.cssText = `
+    background: rgba(251,191,36,0.06);
+    border-left: 3px solid var(--yellow);
+    padding: 8px 14px;
+    margin-bottom: 16px;
+    font-size: 11px;
+    color: var(--muted);
+    border-radius: 0 6px 6px 0;
+  `;
+  topDisclaimer.innerHTML = `
+    ⚠️ <strong>기술적 지표 기반 참고 자료</strong>입니다.
+    재무 수치(순이익·EPS)는 GAAP 기준이며 일회성 항목 포함 가능.
+    투자 결정 전 공식 IR을 확인하세요.
+  `;
+  document.getElementById("results").prepend(topDisclaimer);
   const inds = data.indicators;
 
   // 캐시된 분석이면 안내 배너 표시

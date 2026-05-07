@@ -129,10 +129,61 @@ def get_valuation_data(ticker: str) -> dict:
             "market_cap":     info.get("marketCap"),
         }
 
+        # 적자/GAAP anomaly/PSR 3종 계산. 실패해도 기존 밸류에이션은 유지한다.
+        qs = None
+        is_loss_making = False
+        has_gaap_anomaly = False
+        psr_ttm = psr_forward = psr_runrate = None
+        try:
+            eps = info.get("trailingEps", 0) or 0
+            forward_eps = info.get("forwardEps", 0) or 0
+            is_loss_making = float(eps) < 0 or float(forward_eps) < 0
+
+            qs = yf.Ticker(ticker).quarterly_income_stmt
+            if qs is not None and not qs.empty and "Net Income" in qs.index:
+                vals = qs.loc["Net Income"].dropna().values
+                if len(vals) >= 2:
+                    curr_net_income = float(vals[0])
+                    prev_net_income = float(vals[1])
+                    if prev_net_income < 0 < curr_net_income:
+                        has_gaap_anomaly = True
+                    elif prev_net_income != 0:
+                        chg = (curr_net_income - prev_net_income) / abs(prev_net_income)
+                        if chg > 5.0:
+                            has_gaap_anomaly = True
+        except Exception as e:
+            print(f"[valuation] 적자 판단 오류: {e}")
+
+        try:
+            market_cap = info.get("marketCap", 0) or 0
+            ttm_revenue = info.get("totalRevenue", 0) or 0
+            fwd_revenue = info.get("revenueEstimateAvg", 0) or 0
+
+            psr_ttm = round(market_cap / ttm_revenue, 2) if ttm_revenue else None
+            psr_forward = round(market_cap / fwd_revenue, 2) if fwd_revenue else None
+
+            if qs is not None and not qs.empty and "Total Revenue" in qs.index:
+                latest_q_rev = qs.loc["Total Revenue"].dropna().values
+                if len(latest_q_rev) > 0:
+                    runrate_rev = float(latest_q_rev[0]) * 4
+                    psr_runrate = round(market_cap / runrate_rev, 2) if runrate_rev else None
+        except Exception as e:
+            print(f"[valuation] PSR 계산 오류: {e}")
+            psr_ttm = psr_forward = psr_runrate = None
+
+        valuation_flags = {
+            "psr_ttm":          psr_ttm,
+            "psr_forward":      psr_forward,
+            "psr_runrate":      psr_runrate,
+            "is_loss_making":   is_loss_making,
+            "has_gaap_anomaly": has_gaap_anomaly,
+        }
+
         if is_etf:
             # ETF: PBR/PSR/EPS/매출성장/이익률은 의미 없음 → 0으로 명시
             return {
                 **base,
+                **valuation_flags,
                 "forward_per":    0,
                 "pbr":            0,
                 "psr":            0,
@@ -145,6 +196,7 @@ def get_valuation_data(ticker: str) -> dict:
             # 개별 주식: 전체 지표 수집
             return {
                 **base,
+                **valuation_flags,
                 "forward_per":    _r(info.get("forwardPE"), 1),
                 "pbr":            _r(info.get("priceToBook"), 2),
                 "psr":            _r(info.get("priceToSalesTrailing12Months"), 2),
@@ -189,6 +241,7 @@ def get_summary_stats(df: pd.DataFrame, ticker: str = "") -> dict:
 
     change_5d = _pct_change(5)
     change_20d = _pct_change(20)
+    change_1m = _pct_change(21)
 
     # S&P500 대비 초과 수익 (최근 20일)
     vs_spy = None
@@ -223,6 +276,7 @@ def get_summary_stats(df: pd.DataFrame, ticker: str = "") -> dict:
         "ma200":        round(float(ma200_val), 2) if ma200_val else None,
         "change_5d":    change_5d,
         "change_20d":   change_20d,
+        "change_1m":    change_1m,
         "vs_spy":       vs_spy,
     }
 

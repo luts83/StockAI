@@ -155,6 +155,44 @@ WATCH_DURATION: 예상 대기 기간 (예: 2~3일 내 방향 확정)
 전문 애널리스트의 가치는 뾰족한 의견에 있다.
 확신도 55%여도 방향성을 제시하는 것이 프로페셔널의 의무다."""
 
+FINANCIAL_RULE = """
+[재무 수치 해석 원칙 — 반드시 준수]
+1. 순이익/EPS 언급 시 반드시 "GAAP 기준" 명시
+2. 적자 기업(is_loss_making=True)에서 GAAP 흑자 발생 시:
+   → "워런트·파생상품 평가이익 등 일회성 항목 포함 가능 — 영업 성과와 다를 수 있음" 경고 필수
+   → 긍정 요인으로 단독 사용 금지
+3. 순이익이 전분기 대비 500% 이상 급증(has_gaap_anomaly=True)이면:
+   → "비정상적 급증 — 일회성 항목 확인 필요" 표기
+4. PSR 언급 시 기준 명시:
+   → TTM(최근 12개월) / Forward(예상) / Run-rate(최근 분기×4) 중 어느 기준인지
+5. 거래량 해석 원칙:
+   → 거래량 증가 + 하락 = 매도 압력 강함 (위험)
+   → 거래량 감소 + 하락 = 매도 압력 약함 (덜 위험)
+   → 거래량 감소를 하락 신호로 쓰지 말 것
+6. BUY/SELL 트리거 표현:
+   → "~시 매수" 금지 → "~조건 충족 시 진입 검토"로만 표현
+   → 가격 터치 = 자동 매수 아님을 반드시 구분
+"""
+
+EXPECTATION_RULE_TEMPLATE = """
+[시장 기대치 분석 — 필수 섹션]
+실적 발표 전후 종목 분석 시 반드시 포함:
+
+1. 기대 선반영 평가
+   - 최근 1개월 상승률({change_1m}%) 확인
+   - +20% 이상 상승 후 실적 = "기대치 선반영 가능성 높음"
+   - +50% 이상 상승 후 실적 = "극단적 기대 선반영 — 좋은 실적에도 하락 가능"
+
+2. Expectation vs Reality 판단
+   - 실적이 예상치를 상회했어도 → "시장 기대치"가 더 높았으면 하락 가능
+   - "어닝 서프라이즈" ≠ "주가 상승" 자동 연결 금지
+   - 특히 고성장 모멘텀 종목(IONQ, PLTR 등)은 데이터보다 기대 심리로 움직임
+
+3. 표현 방식
+   - ✅ "실적은 예상 상회했으나, 최근 1개월 +94% 상승으로 기대치가 이미 높게 형성됨"
+   - ❌ "어닝 서프라이즈 → 상승 기대"
+"""
+
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
                           analysis_date: str = "",
@@ -169,6 +207,10 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
         return f"{v}{suffix}" if v else "—"
     def _pct(v):
         return f"{v}%" if v is not None else "데이터 없음"
+    change_1m = stats.get("change_1m")
+    expectation_rule = EXPECTATION_RULE_TEMPLATE.format(
+        change_1m=f"{change_1m:+.1f}" if change_1m is not None else "데이터 없음"
+    )
 
     # ── 어닝 컨텍스트 텍스트 구성 ──
     ec = earnings_context or {}
@@ -218,16 +260,51 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
         else "실적 데이터 없음 (ETF이거나 yfinance 수집 실패 — 추측 금지)"
     )
 
+    psr_ttm = val.get("psr_ttm")
+    psr_forward = val.get("psr_forward")
+    psr_runrate = val.get("psr_runrate")
+    is_loss = val.get("is_loss_making", False)
+    has_anomaly = val.get("has_gaap_anomaly", False)
+
+    psr_parts = []
+    if psr_ttm:
+        psr_parts.append(f"TTM {psr_ttm}x")
+    if psr_forward:
+        psr_parts.append(f"Forward {psr_forward}x")
+    if psr_runrate:
+        psr_parts.append(f"Run-rate {psr_runrate}x")
+    psr_text = "PSR: " + (" / ".join(psr_parts) if psr_parts else "—")
+
+    loss_flag = (
+        "⚠️ 적자 기업 (GAAP 흑자 시 일회성 항목 확인 필요)"
+        if is_loss else ""
+    )
+    anomaly_flag = (
+        "🚨 순이익 비정상 급증 감지 — 일회성 항목 포함 가능성"
+        if has_anomaly else ""
+    )
+    exp_flag = ""
+    if change_1m is not None:
+        if change_1m > 50:
+            exp_label = "극단적 기대 선반영 구간"
+        elif change_1m > 20:
+            exp_label = "기대 선반영 가능성 있음"
+        else:
+            exp_label = "기대 선반영 제한적"
+        exp_flag = f"📈 최근 1개월 {change_1m:+.1f}% — {exp_label}"
+
     valuation_text = f"""
-### 밸류에이션
 - PER: {_fv(val.get('per'), 'x')} (Forward: {_fv(val.get('forward_per'), 'x')})
 - PBR: {_fv(val.get('pbr'), 'x')}
-- PSR: {_fv(val.get('psr'), 'x')}
-- EPS: {_fv(val.get('eps'), '$') if val.get('eps') else '—'}
+- {psr_text}
+- EPS(GAAP): {_fv(val.get('eps'), '$') if val.get('eps') else '—'}
 - 매출 성장률: {_fv(val.get('revenue_growth'), '% YoY')}
 - 영업이익률: {_fv(val.get('profit_margin'), '%')}
 - 섹터: {val.get('sector') or '—'}
-""" if val else ""
+{loss_flag}
+{anomaly_flag}
+{exp_flag}
+""" if val else "밸류에이션 데이터 없음"
 
     ma200_text = (
         f"${stats['ma200']}"
@@ -239,12 +316,16 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 
 [분석 기준일: {analysis_date or "오늘"} — 반드시 이 날짜 기준으로만 분석할 것]
 
+{FINANCIAL_RULE}
+{expectation_rule}
+
 ## 종목: {ticker}
 
 ### 현재 지표
 - 현재가: ${stats['price']}
 - 최근 5일 등락률: {_pct(stats.get('change_5d'))}
 - 최근 20일 등락률: {_pct(stats.get('change_20d'))}
+- 최근 1개월 등락률: {_pct(stats.get('change_1m'))}
 - S&P500 대비 초과 수익: {_pct(stats.get('vs_spy'))}
 - MA20: ${stats.get('ma20') or '데이터 없음'}
 - MA60: ${stats.get('ma60') or '데이터 없음'}
@@ -258,7 +339,10 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 - 스토캐스틱 K: {stats['stoch_k']} / D: {stats['stoch_d']}
 - 52주 고가: ${stats['52w_high']} / 저가: ${stats['52w_low']}
 - 현재 거래량: {stats['volume']:,} / 평균 거래량: {stats['avg_volume']:,}
+
+### 밸류에이션
 {valuation_text}
+
 ### 실적/어닝 컨텍스트 (yfinance 수집 — 이 데이터만 사용, 추측 금지)
 {earnings_text}
 
