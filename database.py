@@ -141,6 +141,15 @@ def get_all_history(limit: int = 5, skip: int = 0, user_id: str = "") -> list:
     ).sort("created_at", -1).skip(skip).limit(limit)
     return list(cursor)
 
+def get_user_analyses(user_id: str, limit: int = 30) -> list:
+    """성과 트래커용 — signal/current_price 포함, 차트 제외"""
+    db = get_db()
+    cursor = db["analyses"].find(
+        {"user_id": user_id},
+        {"chart_b64": 0, "analysis": 0, "news": 0, "chat_history": 0}
+    ).sort("created_at", -1).limit(limit)
+    return list(cursor)
+
 def get_history_count(user_id: str = "") -> int:
     """전체 분석 개수"""
     db = get_db()

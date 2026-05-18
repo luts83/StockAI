@@ -34,6 +34,7 @@ from database import (
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
+    get_user_analyses,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -459,7 +460,7 @@ async def chat_stream(
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=1000,  # 안전마진, 실제 답변은 500토큰 내외 유도
+            max_tokens=1500,  # 안전마진, 실제 답변은 500토큰 내외 유도
             system=system,
             messages=messages,
         ) as stream:
@@ -562,12 +563,14 @@ async def compare_analyses(
 ## 1. 주요 지표 변화
 ## 2. 추세 변화
 ## 3. 예측 vs 실제
-## 4. 현재 시점 시사점"""
+## 4. 현재 시점 시사점
+
+반드시 모든 섹션을 완성해서 출력할 것. 장기 전략까지 빠짐없이 작성."""
 
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=2000,
+            max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for text in stream.text_stream:
@@ -805,6 +808,78 @@ async def _run_brief(brief_type: str):
 async def startup():
     ensure_indexes()
     print("[db] 인덱스 확인 완료")
+
+@app.get("/performance/tracker")
+async def get_performance_tracker(
+    limit: int = 30,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """과거 분석 시그널 vs 현재 가격 자동 비교"""
+    import yfinance as yf
+
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+
+    user_id = user.get("sub", "")
+    analyses = get_user_analyses(user_id, limit=limit)
+
+    results = []
+    for doc in analyses:
+        ticker      = doc.get("ticker", "")
+        signal      = doc.get("signal", "")
+        entry_price = doc.get("current_price")
+        data_date   = doc.get("data_date") or (doc.get("created_at", "")[:10])
+
+        if not ticker or not entry_price:
+            continue
+
+        current_price = None
+        try:
+            hist = yf.Ticker(ticker).history(period="2d")
+            if hist is not None and not hist.empty:
+                current_price = round(float(hist["Close"].iloc[-1]), 2)
+        except Exception:
+            pass
+
+        if not current_price:
+            continue
+
+        pnl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+
+        is_correct = None
+        if signal == "BUY"  and pnl_pct > 0:   is_correct = True
+        if signal == "BUY"  and pnl_pct < -5:  is_correct = False
+        if signal == "SELL" and pnl_pct < 0:   is_correct = True
+        if signal == "SELL" and pnl_pct > 5:   is_correct = False
+
+        results.append({
+            "ticker":        ticker,
+            "signal":        signal,
+            "data_date":     data_date,
+            "entry_price":   entry_price,
+            "current_price": current_price,
+            "pnl_pct":       pnl_pct,
+            "is_correct":    is_correct,
+            "doc_id":        str(doc.get("_id", "")),
+        })
+
+    total   = len(results)
+    correct = sum(1 for r in results if r["is_correct"] is True)
+    wrong   = sum(1 for r in results if r["is_correct"] is False)
+
+    return {
+        "results": results,
+        "summary": {
+            "total":        total,
+            "correct":      correct,
+            "wrong":        wrong,
+            "accuracy_pct": round(correct / total * 100, 1) if total else 0,
+            "avg_pnl_pct":  round(sum(r["pnl_pct"] for r in results) / total, 2) if total else 0,
+        },
+    }
+
 
 @app.on_event("startup")
 async def start_scheduler():

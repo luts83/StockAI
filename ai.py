@@ -193,6 +193,15 @@ EXPECTATION_RULE_TEMPLATE = """
    - ❌ "어닝 서프라이즈 → 상승 기대"
 """
 
+OUTPUT_RULE = """
+[출력 원칙 — 반드시 준수]
+1. 모든 분석은 반드시 완결 — 중간에 끊기지 말 것
+2. "단, 조건:" 같은 미완성 문장 절대 금지
+3. 섹션별 핵심만 — 과도한 나열 금지
+4. 투자자 유형별 액션은 각 3줄 이내
+5. ** 볼드는 반드시 여닫기 쌍으로 (**텍스트**) — 홀로 시작/끝 금지
+"""
+
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
                           analysis_date: str = "",
@@ -318,6 +327,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 
 {FINANCIAL_RULE}
 {expectation_rule}
+{OUTPUT_RULE}
 
 ## 종목: {ticker}
 

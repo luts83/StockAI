@@ -1,7 +1,7 @@
 import re
 import anthropic
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from news import fetch_macro_news, format_macro_news_for_brief
 
@@ -44,6 +44,22 @@ NEWS_RULE = """
 """
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _get_next_trading_day(now: datetime) -> str:
+    """오늘 기준 다음 거래일 (토→월, 일→월, 평일→내일) 반환"""
+    weekday = now.weekday()  # 0=월 ... 4=금, 5=토, 6=일
+    if weekday == 4:    # 금요일
+        delta = 3
+    elif weekday == 5:  # 토요일
+        delta = 2
+    elif weekday == 6:  # 일요일
+        delta = 1
+    else:
+        delta = 1
+    next_day = now + timedelta(days=delta)
+    next_weekday = WEEKDAY_KR[next_day.weekday()]
+    return f"{next_day.strftime('%m/%d')} {next_weekday}요일"
 
 
 def _fetch_ticker(ticker: str, name: str) -> dict | None:
@@ -193,6 +209,8 @@ async def generate_market_brief(brief_type: str) -> dict:
     recent = get_recent_market_briefs(limit=2)
     prev_context = _build_prev_context(recent)
 
+    next_trading_day = _get_next_trading_day(now)
+
     # 현재 시각 컨텍스트
     timing_context = f"""
 [현재 시각 정보 — 반드시 확인]
@@ -201,6 +219,13 @@ async def generate_market_brief(brief_type: str) -> dict:
 - 데이터의 [데이터일] 표시를 반드시 확인하여 날짜/요일 오류 방지
 - 데이터일이 금요일이면 → 주말을 지나 월요일 시황에서 사용되는 데이터
 - 절대 데이터에 없는 날짜나 요일을 추측해서 쓰지 말 것
+
+[다음 거래일 계산 — 반드시 이 값 사용]
+- 오늘({weekday_today}요일) 기준 다음 거래일: {next_trading_day}
+- '내일', '다음날' 표현 대신 반드시 '다음 거래일 ({next_trading_day})' 형식으로 명시
+- 금요일 마감 시황이면: '내일' 표현 절대 금지, '다음 거래일 (월요일 MM/DD)' 사용
+- 토/일요일은 장이 열리지 않으므로 한국 시장 전망 섹션 제목도 수정할 것
+  → 예: '### 2. 🇰🇷 다음 거래일 ({next_trading_day}) 한국 시장 전망'
 """
 
     if brief_type == "premarket":
@@ -283,6 +308,7 @@ DOW     ▼X.XX%  거래량 XXX%
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # closing
+        next_trading_label = f"다음 거래일 ({next_trading_day})" if now.weekday() == 4 else "내일"
         prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
@@ -323,8 +349,8 @@ VIX     XX.XX   ▼XX%
 
 ---
 
-### 2. 🇰🇷 내일 한국 시장 전망
-오늘 미국 마감 결과가 내일 한국장에 어떤 영향을 줄지 먼저 서술:
+### 2. 🇰🇷 {next_trading_label} 한국 시장 전망
+오늘 미국 마감 결과가 {next_trading_label} 한국장에 어떤 영향을 줄지 먼저 서술:
 
 (서술 예시)
 "미국 증시 강세가 내일 한국 시장에도 긍정적으로 작용할 것으로 보입니다.
@@ -334,14 +360,14 @@ VIX     XX.XX   ▼XX%
 강세 조건: 구체적 수치 조건
 약세 조건: 구체적 수치 조건
 신뢰도: 상/중/하
-핵심 체크: 내일 한국장에서 봐야 할 것 1개
+핵심 체크: {next_trading_label} 한국장에서 봐야 할 것 1개
 
 ---
 
 ### 3. 📊 시장 심리
-수치 나열 말고 내일 한국장과의 연관성 서술:
+수치 나열 말고 {next_trading_label} 한국장과의 연관성 서술:
 
-- VIX XX ▼XX% → 공포 완화 의미 + 내일 영향 한 줄
+- VIX XX ▼XX% → 공포 완화 의미 + {next_trading_label} 영향 한 줄
 - 달러 XX ▼XX% → 원화 강세 의미 + 외국인 영향 한 줄
 - 금리 XX% ▼XX% → 성장주 밸류에이션 의미 + 코스닥 영향 한 줄
 
@@ -349,7 +375,7 @@ VIX     XX.XX   ▼XX%
 
 ### 4. 💡 한 줄 요약
 독자가 자기 전에 딱 한 문장만 읽는다면:
-"XXX 덕분에 / 때문에 내일 한국장은 XXX에 주목하세요."
+"XXX 덕분에 / 때문에 {next_trading_label} 한국장은 XXX에 주목하세요."
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 

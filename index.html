@@ -627,7 +627,17 @@ header {
 
 <div id="home-history-section" style="display:none; max-width:640px; margin:32px auto 28px; padding:0 16px;">
   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-    <span style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.7px;">🕐 분석 히스토리</span>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.7px;">🕐 분석 히스토리</span>
+      <button id="perf-tab-btn" onclick="togglePerformanceSection()"
+        style="font-size:11px; color:var(--dim); background:var(--card); border:1px solid var(--border2);
+        border-radius:16px; padding:3px 10px; cursor:pointer; font-family:'JetBrains Mono',monospace;
+        transition:all 0.15s;"
+        onmouseover="this.style.color='var(--green)';this.style.borderColor='var(--green)'"
+        onmouseout="this.style.color='var(--dim)';this.style.borderColor='var(--border2)'">
+        📊 성과
+      </button>
+    </div>
     <span id="home-history-count" style="font-size:11px; color:var(--dim); font-family:'JetBrains Mono',monospace;"></span>
   </div>
   <div id="home-history-list" style="display:flex; flex-direction:column; gap:6px;"></div>
@@ -640,6 +650,9 @@ header {
     </button>
   </div>
 </div>
+
+<!-- ── 성과 트래커 섹션 ── -->
+<div id="performance-section" style="display:none; max-width:640px; margin:28px auto; padding:0 16px;"></div>
 
 <div class="main">
   <div id="loading">
@@ -1246,13 +1259,11 @@ function renderResults(data) {
 
   const analysis = data.analysis || "";
 
-  // ── 1. 시그널 파싱 (try/catch로 격리 — 실패해도 렌더링 계속)
-  let signal = "WATCH", confidence = "";
+  // ── 1. 시그널 파싱 — DB의 signal 필드 우선 사용 (텍스트 파싱 오류 방지)
+  let signal = (data.signal || "WATCH").toUpperCase();
+  let confidence = "";
   let sigDisplay = getSignalDisplay(signal, analysis);
   try {
-    // 콜론 뒤 공백 허용: "SIGNAL:WATCH" 또는 "SIGNAL: WATCH"
-    const sigMatch = analysis.match(/SIGNAL:\s*(BUY|WATCH|SELL)/);
-    if (sigMatch) signal = sigMatch[1];
     // CONFIDENCE 파싱
     const confMatch = analysis.match(/CONFIDENCE:\s*(상|중|하)/);
     confidence = confMatch?.[1] || "";
@@ -1632,7 +1643,7 @@ async function loadHomeHistory(reset = true) {
 
     if (!data.items.length && reset) { section.style.display = "none"; return; }
 
-    section.style.display = "block";
+    if (!_perfVisible) section.style.display = "block";
     countEl.textContent   = `전체 ${homeHistoryTotal}개`;
 
     if (reset) list.innerHTML = "";
@@ -1772,6 +1783,8 @@ function goHome() {
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("chat-section").style.display = "none";
   document.getElementById("history-section").style.display = "none";
+  const perfSec = document.getElementById("performance-section");
+  if (perfSec) perfSec.style.display = "none";
 
   // 검색창 및 상태 초기화
   const input = document.getElementById("ticker-input");
@@ -1784,6 +1797,102 @@ function goHome() {
 
   // 상단으로 스크롤
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+let _perfVisible = false;
+function togglePerformanceSection() {
+  const sec = document.getElementById("performance-section");
+  const histSec = document.getElementById("home-history-section");
+  if (!sec) return;
+  _perfVisible = !_perfVisible;
+  if (_perfVisible) {
+    sec.style.display = "block";
+    if (histSec) histSec.style.display = "none";
+    loadPerformanceTracker();
+  } else {
+    sec.style.display = "none";
+    if (histSec) histSec.style.display = "block";
+  }
+}
+
+async function loadPerformanceTracker() {
+  const sec = document.getElementById("performance-section");
+  if (!sec) return;
+  sec.innerHTML = `<div style="text-align:center;padding:40px;color:var(--dim);font-size:13px;">⏳ 성과 데이터 불러오는 중...</div>`;
+
+  try {
+    const res = await fetch(`${API}/performance/tracker?limit=30`, {
+      headers: { ...authHeaders() }
+    });
+    if (!res.ok) {
+      sec.innerHTML = `<div style="padding:20px;color:var(--red);font-size:13px;">⚠️ 로그인 후 이용 가능합니다.</div>`;
+      return;
+    }
+    const data = await res.json();
+    const { results, summary } = data;
+
+    const summaryHTML = `
+      <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-bottom:20px;">
+        <div style="background:var(--card); border-radius:10px; padding:14px; text-align:center;">
+          <div style="font-size:22px; font-weight:700; color:var(--text)">${summary.total}</div>
+          <div style="font-size:11px; color:var(--dim); margin-top:4px;">총 분석</div>
+        </div>
+        <div style="background:var(--card); border-radius:10px; padding:14px; text-align:center;">
+          <div style="font-size:22px; font-weight:700; color:var(--green)">${summary.accuracy_pct}%</div>
+          <div style="font-size:11px; color:var(--dim); margin-top:4px;">시그널 적중률</div>
+        </div>
+        <div style="background:var(--card); border-radius:10px; padding:14px; text-align:center;">
+          <div style="font-size:22px; font-weight:700; color:${summary.avg_pnl_pct >= 0 ? 'var(--green)' : 'var(--red)'}">
+            ${summary.avg_pnl_pct > 0 ? "+" : ""}${summary.avg_pnl_pct}%
+          </div>
+          <div style="font-size:11px; color:var(--dim); margin-top:4px;">평균 수익률</div>
+        </div>
+        <div style="background:var(--card); border-radius:10px; padding:14px; text-align:center;">
+          <div style="font-size:22px; font-weight:700; color:var(--text)">${summary.correct}승 ${summary.wrong}패</div>
+          <div style="font-size:11px; color:var(--dim); margin-top:4px;">BUY/SELL 결과</div>
+        </div>
+      </div>`;
+
+    const rows = results.length === 0
+      ? `<div style="padding:20px;color:var(--dim);font-size:13px;text-align:center;">BUY/SELL 시그널 분석 결과가 없습니다.</div>`
+      : results.map(r => {
+          const pnlColor = r.pnl_pct >= 0 ? "var(--green)" : "var(--red)";
+          const resultIcon = r.is_correct === true ? "✅" : r.is_correct === false ? "❌" : "⏳";
+          const sigClass = r.signal === "BUY" ? "signal-buy" : r.signal === "SELL" ? "signal-sell" : "signal-watch";
+          return `
+            <div class="history-item" onclick="loadSavedAnalysis('${r.doc_id}')">
+              <span class="history-ticker">${r.ticker}</span>
+              <span style="font-size:11px; color:var(--dim)">${r.data_date}</span>
+              <span class="history-signal ${sigClass}" style="margin-left:4px">${r.signal}</span>
+              <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+                <span style="font-size:11px; color:var(--dim);">$${r.entry_price} → $${r.current_price}</span>
+                <span style="font-weight:700; color:${pnlColor}; min-width:56px; text-align:right;">
+                  ${r.pnl_pct > 0 ? "+" : ""}${r.pnl_pct}%
+                </span>
+                <span style="font-size:15px;">${resultIcon}</span>
+              </div>
+            </div>`;
+        }).join("");
+
+    sec.innerHTML = `
+      <div>
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+          <h3 style="margin:0; font-size:14px; color:var(--text);">📊 시그널 성과 트래커</h3>
+          <button onclick="togglePerformanceSection()"
+            style="font-size:11px; color:var(--dim); background:none; border:none; cursor:pointer;">
+            ← 히스토리로
+          </button>
+        </div>
+        <p style="font-size:11px; color:var(--dim); margin-bottom:16px;">
+          ⏳ 판단 보류 (±5% 이내) &nbsp;·&nbsp; ✅ 적중 &nbsp;·&nbsp; ❌ 빗나감
+        </p>
+        ${summaryHTML}
+        <div style="display:flex; flex-direction:column; gap:6px;">${rows}</div>
+      </div>`;
+  } catch(e) {
+    const sec2 = document.getElementById("performance-section");
+    if (sec2) sec2.innerHTML = `<div style="padding:20px;color:var(--red);font-size:13px;">⚠️ 오류: ${e.message}</div>`;
+  }
 }
 
 function renderHistory(items) {
@@ -1900,8 +2009,7 @@ async function loadSavedAnalysis(docId) {
 
     // 시그널
     const analysis = doc.analysis || "";
-    const sigMatch2 = analysis.match(/SIGNAL:\s*(BUY|WATCH|SELL)/);
-    const signal2 = sigMatch2?.[1] || "WATCH";
+    const signal2 = (doc.signal || "WATCH").toUpperCase();
     const sigDisplay2 = getSignalDisplay(signal2, analysis);
     const confMatch2     = analysis.match(/CONFIDENCE:\s*(상|중|하)/);
     const conf2 = confMatch2?.[1] || "";
