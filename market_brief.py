@@ -108,12 +108,17 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
             avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
             vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
 
+            today_utc2 = datetime.now(timezone.utc).date()
+            days_old = (today_utc2 - ld).days
+            stale = days_old > 1
+
             print(
-                f"[market_brief] ✅ {ticker} {date_label} "
+                f"[market_brief] {'⚠️ STALE' if stale else '✅'} {ticker} {date_label} "
                 f"${current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
+                + (f" — {days_old}일 지연" if stale else "")
             )
 
-            return {
+            result = {
                 "name":         name,
                 "price":        round(current, 2),
                 "change_pct":   round(change_pct, 2),
@@ -121,7 +126,14 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
                 "avg_volume":   avg_volume,
                 "volume_ratio": vol_ratio,
                 "last_date":    date_label,
+                "stale":        stale,
+                "stale_days":   days_old,
             }
+
+            if stale:
+                print(f"[market_brief] ⚠️ {ticker} 데이터 {days_old}일 지연 — stale 처리")
+
+            return result
         except Exception as e:
             print(f"[market_brief] ❌ {ticker} 오류 (시도 {attempt+1}): {e}")
             time.sleep(2 ** attempt)
@@ -156,12 +168,20 @@ def _build_data_text(market_data: dict) -> str:
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
             arrow = "▲" if d["change_pct"] > 0 else "▼"
-            lines.append(
-                f"- {d['name']}({ticker}) [데이터일: {d['last_date']}]: "
-                f"${d['price']} "
-                f"{arrow}{abs(d['change_pct'])}% "
-                f"(거래량 평균 대비 {d['volume_ratio']}%)"
-            )
+            if d.get("stale"):
+                lines.append(
+                    f"- {d['name']}({ticker}) "
+                    f"[⚠️ {d['last_date']} 데이터 — 당일 미수집, 전망 활용 금지]: "
+                    f"${d['price']} {arrow}{abs(d['change_pct'])}% "
+                    f"(※ 오늘 데이터 아님)"
+                )
+            else:
+                lines.append(
+                    f"- {d['name']}({ticker}) [데이터일: {d['last_date']}]: "
+                    f"${d['price']} "
+                    f"{arrow}{abs(d['change_pct'])}% "
+                    f"(거래량 평균 대비 {d['volume_ratio']}%)"
+                )
     return "\n".join(lines)
 
 
@@ -210,22 +230,27 @@ async def generate_market_brief(brief_type: str) -> dict:
     prev_context = _build_prev_context(recent)
 
     next_trading_day = _get_next_trading_day(now)
+    next_trading_label = (
+        f"다음 거래일 ({next_trading_day})"
+        if now.weekday() == 4   # 금요일에만
+        else "내일"
+    )
 
     # 현재 시각 컨텍스트
     timing_context = f"""
 [현재 시각 정보 — 반드시 확인]
 - 영국 시각: {now.strftime('%Y-%m-%d %H:%M')} ({weekday_today}요일, Europe/London)
 - 시황 종류: {'장전 시황' if brief_type == 'premarket' else '마감 시황'}
-- 데이터의 [데이터일] 표시를 반드시 확인하여 날짜/요일 오류 방지
-- 데이터일이 금요일이면 → 주말을 지나 월요일 시황에서 사용되는 데이터
-- 절대 데이터에 없는 날짜나 요일을 추측해서 쓰지 말 것
+- 다음 거래일: {next_trading_day}
+- '내일', '다음날' 표현 대신 반드시 '{next_trading_label}' 형식으로 명시
+- 금요일 마감 시황: '내일' 표현 절대 금지
 
-[다음 거래일 계산 — 반드시 이 값 사용]
-- 오늘({weekday_today}요일) 기준 다음 거래일: {next_trading_day}
-- '내일', '다음날' 표현 대신 반드시 '다음 거래일 ({next_trading_day})' 형식으로 명시
-- 금요일 마감 시황이면: '내일' 표현 절대 금지, '다음 거래일 (월요일 MM/DD)' 사용
-- 토/일요일은 장이 열리지 않으므로 한국 시장 전망 섹션 제목도 수정할 것
-  → 예: '### 2. 🇰🇷 다음 거래일 ({next_trading_day}) 한국 시장 전망'
+[데이터 신뢰성 원칙]
+- [데이터일] 이 오늘({today})과 다른 항목은 ⚠️ 표시되어 있음
+- ⚠️ stale 데이터는 해당 시장의 당일 결과 서술에 절대 사용 금지
+- stale 데이터가 있는 시장은 반드시 아래 문구로 명시:
+  "오늘 [시장명] 데이터 미수집 — 전망에서 제외합니다"
+- 데이터에 없는 날짜·요일·수치 추측 금지
 """
 
     if brief_type == "premarket":
@@ -308,7 +333,6 @@ DOW     ▼X.XX%  거래량 XXX%
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # closing
-        next_trading_label = f"다음 거래일 ({next_trading_day})" if now.weekday() == 4 else "내일"
         prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
