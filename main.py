@@ -903,8 +903,16 @@ async def start_scheduler():
         id="closing_brief",
         replace_existing=True,
     )
+    # 한국 장 마감 시황: KST 16:10 = UTC 07:10 (평일)
+    scheduler.add_job(
+        _run_brief,
+        CronTrigger(hour=7, minute=10, day_of_week="mon-fri", timezone="UTC"),
+        args=["korea_close"],
+        id="korea_close_brief",
+        replace_existing=True,
+    )
     scheduler.start()
-    print("[scheduler] 스케줄러 시작 — 테스트 UTC 13:15 / 장전 UTC 12:30(~04-18) / 마감 UTC 21:30")
+    print("[scheduler] 스케줄러 시작 — 장전 UTC 12:30 / 한국마감 UTC 07:10 / 미국마감 UTC 21:30")
 
     # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
     utc = pytz.utc
@@ -928,6 +936,13 @@ async def start_scheduler():
             if not today_pre or today_pre.get("date") != today_str:
                 print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("premarket"))
+
+        # 한국 마감 시황: UTC 07:10 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 7 * 60 + 10:
+            today_kr = get_latest_market_brief("korea_close")
+            if not today_kr or today_kr.get("date") != today_str:
+                print("[scheduler] 오늘 한국 마감 시황 누락 감지 → 즉시 생성")
+                asyncio.create_task(_run_brief("korea_close"))
 
 
 if __name__ == "__main__":

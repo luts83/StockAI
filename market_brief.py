@@ -31,6 +31,8 @@ STRICT_RULE = """
 5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
 6. 전망은 현재 데이터 패턴에서만 도출, 외부 변수 추측 금지
 7. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
+8. 신뢰도는 반드시 상/중/하 세 단계 중 하나만 사용. '중상', '중하' 등 중간 단계 표현 금지
+9. 추측성 표현 금지 — "~로 추정", "~가능성" 대신 데이터가 없으면 "데이터 없음"으로 명시
 """
 
 NEWS_RULE = """
@@ -185,29 +187,68 @@ def _build_data_text(market_data: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_prev_context(recent_briefs: list) -> str:
+def _build_prev_context(recent_briefs: list, current_type: str = "") -> str:
     if not recent_briefs:
         return ""
-    prev = recent_briefs[0]
-    prev_type = "장전" if prev.get("type") == "premarket" else "마감"
-    analysis = prev.get("analysis", "")
 
-    # 전망 섹션만 추출
-    forecast_match = re.search(
-        r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘)\s*[^\n]*)[\s\S]*?(?=###|\Z)",
-        analysis,
-    )
-    forecast_text = (
-        forecast_match.group(0).strip()
-        if forecast_match
-        else analysis[:400]
-    )
+    # 시황 타입별 참조 우선순위
+    priority = {
+        "premarket":   ["korea_close", "close"],
+        "close":       ["premarket", "korea_close"],
+        "korea_close": ["close", "premarket"],
+    }
+    order    = priority.get(current_type, [])
+    type_map = {b.get("type"): b for b in recent_briefs}
 
-    return f"""
-[직전 시황 — {prev.get('date')} {prev_type} / SIGNAL:{prev.get('signal')}]
-{forecast_text}
-[직전 시황 끝 — 이 전망을 기반으로 ### 0. 직전 전망 검증 작성]
-"""
+    TYPE_LABEL = {
+        "premarket":   "미국 장전",
+        "close":       "미국 마감",
+        "korea_close": "한국 마감",
+    }
+
+    sections = []
+    for t in order:
+        brief = type_map.get(t)
+        if not brief:
+            continue
+        analysis = brief.get("analysis", "")
+
+        forecast_match = re.search(
+            r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘|한국)[^\n]*)[\s\S]*?(?=###|\Z)",
+            analysis,
+        )
+        summary_match = re.search(
+            r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)",
+            analysis,
+        )
+        forecast_text = forecast_match.group(0).strip() if forecast_match else analysis[:300]
+        summary_text  = summary_match.group(1).strip() if summary_match else ""
+
+        label = TYPE_LABEL.get(t, t)
+        sections.append(
+            f"\n[참조 시황 — {brief.get('date')} {label} / SIGNAL:{brief.get('signal')}]\n"
+            f"한 줄 요약: {summary_text}\n"
+            f"{forecast_text}\n"
+            f"[참조 끝]"
+        )
+
+    if not sections:
+        # 우선순위에 맞는 타입이 없으면 최신 시황으로 fallback
+        prev      = recent_briefs[0]
+        label     = TYPE_LABEL.get(prev.get("type", ""), prev.get("type", ""))
+        analysis  = prev.get("analysis", "")
+        forecast_match = re.search(
+            r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘|한국)[^\n]*)[\s\S]*?(?=###|\Z)",
+            analysis,
+        )
+        forecast_text = forecast_match.group(0).strip() if forecast_match else analysis[:400]
+        return (
+            f"\n[직전 시황 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
+            f"{forecast_text}\n"
+            f"[직전 시황 끝 — 이 전망을 기반으로 ### 0. 직전 전망 검증 작성]\n"
+        )
+
+    return "\n".join(sections) + "\n[위 참조 시황의 전망을 기반으로 ### 0. 직전 전망 검증 작성]\n"
 
 
 async def generate_market_brief(brief_type: str) -> dict:
@@ -226,8 +267,8 @@ async def generate_market_brief(brief_type: str) -> dict:
     weekday_today = WEEKDAY_KR[now.weekday()]
 
     data_text = _build_data_text(market_data)
-    recent = get_recent_market_briefs(limit=2)
-    prev_context = _build_prev_context(recent)
+    recent = get_recent_market_briefs(limit=6)
+    prev_context = _build_prev_context(recent, brief_type)
 
     next_trading_day = _get_next_trading_day(now)
     next_trading_label = (
@@ -235,6 +276,18 @@ async def generate_market_brief(brief_type: str) -> dict:
         if now.weekday() == 4   # 금요일에만
         else "내일"
     )
+
+    # 적중률 자기보정 컨텍스트
+    from database import get_brief_accuracy
+    accuracy = get_brief_accuracy(limit=20)
+    accuracy_context = ""
+    if accuracy["total"] >= 3:
+        accuracy_context = f"""
+[최근 시황 적중률 — 자기보정 참고용]
+- 최근 {accuracy['total']}회 중 {accuracy['correct']}회 적중 ({accuracy['accuracy_pct']}%)
+- 반복 오류 패턴: {', '.join(accuracy['recent_errors']) if accuracy['recent_errors'] else '없음'}
+- 위 오류 패턴이 있으면 이번 전망에서 반대 방향 가중치를 높일 것
+"""
 
     # 현재 시각 컨텍스트
     timing_context = f"""
@@ -252,6 +305,7 @@ async def generate_market_brief(brief_type: str) -> dict:
   "오늘 [시장명] 데이터 미수집 — 전망에서 제외합니다"
 - 데이터에 없는 날짜·요일·수치 추측 금지
 """
+    timing_context += accuracy_context
 
     if brief_type == "premarket":
         prompt = f"""오늘 {today}({weekday_today}) 장전 시황을 아래 데이터만 사용해서 작성해줘.
@@ -329,6 +383,65 @@ DOW     ▼X.XX%  거래량 XXX%
 ### 5. 💡 한 줄 요약
 독자가 출근길에 딱 한 문장만 읽는다면 뭘 알아야 하는지:
 "XXX 때문에 오늘 XXX에 주목하세요."
+
+SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
+
+    elif brief_type == "korea_close":
+        prompt = f"""오늘 {today}({weekday_today}) 한국 장 마감 시황을 아래 데이터만 사용해서 작성해줘.
+
+{STRICT_RULE}
+{NEWS_RULE}
+{timing_context}
+
+[제공 데이터]
+{data_text}
+
+[최근 24시간 매크로 뉴스]
+{news_text}
+
+{prev_context}
+
+### 0. 직전 전망 검증
+(직전 시황 전망 있을 때만. 없으면 생략)
+- ✅ 적중 또는 ❌ 빗나감 — 전망 vs 실제 결과 한 줄
+- 원인: 데이터 기반 원인 수치 포함
+- 교훈: 다음 분석에 반영할 점 한 줄
+
+---
+
+### 1. 🇰🇷 한국 시장 마감 결과
+오늘 한국 증시 흐름을 자연스러운 문장으로 먼저 서술한 뒤 수치 정리.
+stale 데이터가 있으면 절대 서술하지 말고 "오늘 데이터 미수집" 명시.
+
+KOSPI  ▲/▼X.XX%  거래량 XXX%
+KOSDAQ ▲/▼X.XX%  거래량 XXX%
+
+뉴스 연결 (데이터 방향과 일치할 때만):
+"[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."
+
+---
+
+### 2. 📊 시장 심리
+- 달러/원 환율 동향 → 외국인 수급 영향 한 줄
+- 글로벌 선물 동향 (있을 때만) → 내일 방향성 힌트 한 줄
+- 섹터별 특이사항 (있을 때만) → 수치 포함
+
+---
+
+### 3. 🔮 내일 한국 시장 전망
+결론을 먼저 한 문장으로.
+
+**결론: 강세 우위 / 약세 우위 / 중립**
+강세 조건: 구체적 수치 조건
+약세 조건: 구체적 수치 조건
+신뢰도: 상 / 중 / 하 (세 가지 중 하나만 사용)
+핵심 체크: 내일 한국장에서 봐야 할 것 1개
+
+---
+
+### 4. 💡 한 줄 요약
+한 문장, 30자 이내:
+"XXX 때문에 내일 한국장은 XXX 예상."
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
@@ -422,6 +535,9 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         "",
         analysis,
     ).strip()
+
+    # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
+    analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
     return {
         "type":        brief_type,

@@ -221,6 +221,42 @@ def get_market_briefs(limit: int = 10) -> list:
     return items
 
 
+# ── 시황 적중률 ──────────────────────────────────────────
+def save_brief_performance(brief_id: str, predicted: str, actual: str, is_correct: bool):
+    """시황 예측 결과 저장"""
+    get_db()["brief_performance"].insert_one({
+        "brief_id":   brief_id,
+        "predicted":  predicted,
+        "actual":     actual,
+        "is_correct": is_correct,
+        "created_at": datetime.utcnow().isoformat(),
+    })
+
+def get_brief_accuracy(limit: int = 20) -> dict:
+    """최근 N회 시황 적중률 계산"""
+    records = list(
+        get_db()["brief_performance"]
+        .find({}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    if not records:
+        return {"total": 0, "correct": 0, "accuracy_pct": 0, "recent_errors": []}
+
+    correct = sum(1 for r in records if r["is_correct"])
+    errors  = [
+        f"{r['predicted']}→실제{r['actual']}"
+        for r in records if not r["is_correct"]
+    ][:3]
+
+    return {
+        "total":         len(records),
+        "correct":       correct,
+        "accuracy_pct":  round(correct / len(records) * 100, 1),
+        "recent_errors": errors,
+    }
+
+
 # ── 유저 저장/조회 ──────────────────────────────────────
 def upsert_user(user_id: str, email: str, name: str, picture: str) -> dict:
     """Google 로그인 시 유저 생성 또는 업데이트"""
