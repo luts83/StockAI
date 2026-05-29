@@ -295,7 +295,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           earnings_context: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
-        for item in news_items[:8] if item.get("title")
+        for item in news_items[:15] if item.get("title")
     ]) or "뉴스 없음"
 
     val = valuation or {}
@@ -304,6 +304,28 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
     def _pct(v):
         return f"{v}%" if v is not None else "데이터 없음"
     change_1m = stats.get("change_1m")
+
+    # 시가총액 읽기 쉽게 포맷 (T/B 단위)
+    _mc = val.get("market_cap") or 0
+    if _mc >= 1e12:
+        _mc_str = f"${_mc/1e12:.1f}T"
+    elif _mc >= 1e9:
+        _mc_str = f"${_mc/1e9:.1f}B"
+    elif _mc > 0:
+        _mc_str = f"${_mc:,.0f}"
+    else:
+        _mc_str = "알 수 없음"
+
+    sector_hint = f"""
+[STEP 0 판단용 기본 정보 — 시대적 맥락 판단에 활용]
+- 티커: {ticker}
+- 섹터: {val.get('sector') or '알 수 없음'}
+- 산업: {val.get('industry') or '알 수 없음'}
+- 시가총액: {_mc_str}
+- 최근 1개월 수익률: {f"{change_1m:+.1f}" if change_1m is not None else "—"}%
+- S&P500 대비 초과수익: {stats.get('vs_spy') or '—'}%
+위 정보를 바탕으로 STEP 0의 시대적 흐름 분류를 수행할 것.
+"""
     expectation_rule = EXPECTATION_RULE_TEMPLATE.format(
         change_1m=f"{change_1m:+.1f}" if change_1m is not None else "데이터 없음"
     )
@@ -411,7 +433,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
     return f"""다음 주식을 분석해줘.
 
 [분석 기준일: {analysis_date or "오늘"} — 반드시 이 날짜 기준으로만 분석할 것]
-
+{sector_hint}
 {FINANCIAL_RULE}
 {expectation_rule}
 {OUTPUT_RULE}

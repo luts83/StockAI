@@ -191,6 +191,7 @@ def get_valuation_data(ticker: str) -> dict:
                 "revenue_growth": 0,
                 "profit_margin":  0,
                 "sector":         info.get("category", ""),  # ETF는 category 필드
+                "industry":       "",
             }
         else:
             # 개별 주식: 전체 지표 수집
@@ -204,6 +205,7 @@ def get_valuation_data(ticker: str) -> dict:
                 "revenue_growth": _r((info.get("revenueGrowth") or 0) * 100, 1),
                 "profit_margin":  _r((info.get("profitMargins") or 0) * 100, 1),
                 "sector":         info.get("sector", ""),
+                "industry":       info.get("industry", ""),
             }
     except Exception as e:
         print(f"[valuation] {ticker} 데이터 수집 실패: {e}")
