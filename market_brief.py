@@ -165,7 +165,7 @@ def _build_data_text(market_data: dict) -> str:
     lines = []
     for region, tickers in market_data.items():
         if not tickers:
-            lines.append(f"\n### {region} — ⚠️ 데이터 수집 실패")
+            lines.append(f"\n### {region} — ⚠️ 데이터 없음 (오늘 데이터 미수집, 전망 생략)")
             continue
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
@@ -266,8 +266,27 @@ async def generate_market_brief(brief_type: str) -> dict:
     today = now.strftime("%Y-%m-%d")
     weekday_today = WEEKDAY_KR[now.weekday()]
 
-    data_text = _build_data_text(market_data)
     recent = get_recent_market_briefs(limit=6)
+
+    # 한국 지수 stale 여부 확인 → korea_close 브리프 데이터로 대체
+    kr_data = market_data.get("한국", {})
+    kr_stale = any(v.get("stale") for v in kr_data.values())
+    if kr_stale:
+        korea_brief = next(
+            (b for b in recent if b.get("type") == "korea_close"),
+            None
+        )
+        if korea_brief and korea_brief.get("market_data", {}).get("한국"):
+            market_data["한국"] = korea_brief["market_data"]["한국"]
+            print(
+                f"[market_brief] 한국 지수 stale → korea_close 브리프 데이터로 대체 "
+                f"({korea_brief['date']})"
+            )
+        else:
+            print("[market_brief] 한국 지수 stale + korea_close 브리프 없음 → 데이터 없음 처리")
+            market_data["한국"] = {}
+
+    data_text = _build_data_text(market_data)
     prev_context = _build_prev_context(recent, brief_type)
 
     next_trading_day = _get_next_trading_day(now)
