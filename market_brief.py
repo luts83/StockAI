@@ -432,8 +432,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 오늘 한국 증시 흐름을 자연스러운 문장으로 먼저 서술한 뒤 수치 정리.
 stale 데이터가 있으면 절대 서술하지 말고 "오늘 데이터 미수집" 명시.
 
-KOSPI  ▲/▼X.XX%  거래량 XXX%
-KOSDAQ ▲/▼X.XX%  거래량 XXX%
+KOSPI  X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
 
 뉴스 연결 (데이터 방향과 일치할 때만):
 "[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."
@@ -495,10 +495,10 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 (서술 예시)
 "오늘 미국 증시는 연준 금리 동결 발표와 빅테크 실적 호조가 겹치며 강하게 반등했습니다.
 특히 다우존스가 1.63% 급등하며 상승을 주도했는데, 캐터필러와 알파벳의 어닝 서프라이즈가..."
-S&P500  ▲X.XX%  거래량 XXX%
-NASDAQ  ▲X.XX%  거래량 XXX%
-DOW     ▲X.XX%  거래량 XXX%
-VIX     XX.XX   ▼XX%
+S&P500  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+NASDAQ  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+DOW     $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+VIX     XX.XX      ▲/▼XX%
 
 뉴스 연결 (데이터 방향과 일치할 때만):
 "[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."

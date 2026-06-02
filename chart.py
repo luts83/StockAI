@@ -1,5 +1,6 @@
 import io
 import base64
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -8,6 +9,16 @@ import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
 import pandas as pd
+
+
+def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
+    """NaN/inf 방어 처리 — 차트 생성 전 항상 호출"""
+    df = df.copy()
+    df = df.replace([np.inf, -np.inf], np.nan)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].ffill().bfill()
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+    return df
 
 DARK_BG  = "#0d1117"
 PANEL_BG = "#161b22"
@@ -21,6 +32,7 @@ ORANGE   = "#f0883e"
 
 def generate_chart(df: pd.DataFrame, ticker: str) -> str:
     """웹/모바일 균형 최적화 차트"""
+    df = _clean_df(df)
 
     # 가로 12인치 × 세로 16인치 — 웹에서 적당한 크기, 모바일에서 스크롤 가능
     fig = plt.figure(figsize=(12, 16), facecolor=DARK_BG)
@@ -58,15 +70,19 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
             facecolor=color, edgecolor=color, linewidth=0.4
         ))
 
-    # ── 이동평균 ──
-    ax_main.plot(dates, df["MA20"],  color=YELLOW, linewidth=LINE_W, label="MA20",  alpha=0.9)
-    ax_main.plot(dates, df["MA60"],  color=BLUE,   linewidth=LINE_W, label="MA60",  alpha=0.9)
-    ax_main.plot(dates, df["MA200"], color=WHITE,  linewidth=LINE_W, label="MA200", alpha=0.9)
+    # ── 이동평균 (전부 NaN인 컬럼은 건너뜀) ──
+    if not df["MA20"].isna().all():
+        ax_main.plot(dates, df["MA20"],  color=YELLOW, linewidth=LINE_W, label="MA20",  alpha=0.9)
+    if not df["MA60"].isna().all():
+        ax_main.plot(dates, df["MA60"],  color=BLUE,   linewidth=LINE_W, label="MA60",  alpha=0.9)
+    if not df["MA200"].isna().all():
+        ax_main.plot(dates, df["MA200"], color=WHITE,  linewidth=LINE_W, label="MA200", alpha=0.9)
 
     # ── 볼린저밴드 ──
-    ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
-    ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
-    ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+    if not df["BB_Upper"].isna().all() and not df["BB_Lower"].isna().all():
+        ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
+        ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+        ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
 
     ax_main.legend(loc="upper left", fontsize=LABEL_SIZE, facecolor=PANEL_BG,
                    labelcolor=WHITE, framealpha=0.8)
@@ -74,22 +90,26 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
                       fontsize=TITLE_SIZE, fontweight="bold", pad=10, loc="left")
 
     # ── RSI ──
-    ax_rsi.plot(dates, df["RSI"], color=BLUE, linewidth=LINE_W)
-    ax_rsi.axhline(70, color=RED,   linewidth=0.9, linestyle="--", alpha=0.7)
-    ax_rsi.axhline(30, color=GREEN, linewidth=0.9, linestyle="--", alpha=0.7)
-    ax_rsi.fill_between(dates, df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color=RED)
-    ax_rsi.fill_between(dates, df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color=GREEN)
+    if not df["RSI"].isna().all():
+        ax_rsi.plot(dates, df["RSI"], color=BLUE, linewidth=LINE_W)
+        ax_rsi.axhline(70, color=RED,   linewidth=0.9, linestyle="--", alpha=0.7)
+        ax_rsi.axhline(30, color=GREEN, linewidth=0.9, linestyle="--", alpha=0.7)
+        ax_rsi.fill_between(dates, df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color=RED)
+        ax_rsi.fill_between(dates, df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color=GREEN)
     ax_rsi.set_ylim(0, 100)
     ax_rsi.set_ylabel("RSI", color=GRAY, fontsize=LABEL_SIZE)
-    rsi_val = df["RSI"].iloc[-1]
+    rsi_val = df["RSI"].iloc[-1] if not df["RSI"].isna().all() else 50
     ax_rsi.text(0.01, 0.78, f"RSI {rsi_val:.1f}", transform=ax_rsi.transAxes,
                 color=BLUE, fontsize=LABEL_SIZE, fontweight="bold")
 
     # ── MACD ──
-    ax_macd.plot(dates, df["MACD"],        color=BLUE,   linewidth=LINE_W, label="MACD")
-    ax_macd.plot(dates, df["MACD_Signal"], color=ORANGE, linewidth=LINE_W, label="Signal")
-    hist_colors = [GREEN if v >= 0 else RED for v in df["MACD_Hist"]]
-    ax_macd.bar(dates, df["MACD_Hist"], width=width, color=hist_colors, alpha=0.7)
+    if not df["MACD"].isna().all():
+        ax_macd.plot(dates, df["MACD"],        color=BLUE,   linewidth=LINE_W, label="MACD")
+    if not df["MACD_Signal"].isna().all():
+        ax_macd.plot(dates, df["MACD_Signal"], color=ORANGE, linewidth=LINE_W, label="Signal")
+    if not df["MACD_Hist"].isna().all():
+        hist_colors = [GREEN if v >= 0 else RED for v in df["MACD_Hist"]]
+        ax_macd.bar(dates, df["MACD_Hist"], width=width, color=hist_colors, alpha=0.7)
     ax_macd.axhline(0, color=GRAY, linewidth=0.5)
     ax_macd.set_ylabel("MACD", color=GRAY, fontsize=LABEL_SIZE)
     ax_macd.legend(loc="upper left", fontsize=TICK_SIZE, facecolor=PANEL_BG,
@@ -99,7 +119,9 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
     vol_colors = [GREEN if df["Close"].iloc[i] >= df["Open"].iloc[i] else RED
                   for i in range(len(df))]
     ax_vol.bar(dates, df["Volume"], width=width, color=vol_colors, alpha=0.8)
-    ax_vol.axhline(df["Volume"].mean(), color=YELLOW, linewidth=0.9, linestyle="--", alpha=0.7)
+    vol_mean = df["Volume"].mean()
+    if np.isfinite(vol_mean):
+        ax_vol.axhline(vol_mean, color=YELLOW, linewidth=0.9, linestyle="--", alpha=0.7)
     ax_vol.set_ylabel("VOL", color=GRAY, fontsize=LABEL_SIZE)
     # 거래량 단위 자동 포맷 (1.2M, 500K 등) — 1e8 표기 제거
     def vol_formatter(x, pos):
@@ -130,6 +152,7 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
 
 def generate_chart_for_card(df: pd.DataFrame, ticker: str) -> str:
     """카드뉴스 전용 — 가로형 비율 (16:10), Volume 패널 생략"""
+    df = _clean_df(df)
     fig = plt.figure(figsize=(16, 10), facecolor=DARK_BG)
     gs  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 1.5], hspace=0.07)
 
@@ -163,15 +186,19 @@ def generate_chart_for_card(df: pd.DataFrame, ticker: str) -> str:
             facecolor=color, edgecolor=color, linewidth=0.4
         ))
 
-    # ── 이동평균 ──
-    ax_main.plot(dates, df["MA20"],  color=YELLOW, linewidth=LINE_W, label="MA20",  alpha=0.9)
-    ax_main.plot(dates, df["MA60"],  color=BLUE,   linewidth=LINE_W, label="MA60",  alpha=0.9)
-    ax_main.plot(dates, df["MA200"], color=WHITE,  linewidth=LINE_W, label="MA200", alpha=0.9)
+    # ── 이동평균 (전부 NaN인 컬럼은 건너뜀) ──
+    if not df["MA20"].isna().all():
+        ax_main.plot(dates, df["MA20"],  color=YELLOW, linewidth=LINE_W, label="MA20",  alpha=0.9)
+    if not df["MA60"].isna().all():
+        ax_main.plot(dates, df["MA60"],  color=BLUE,   linewidth=LINE_W, label="MA60",  alpha=0.9)
+    if not df["MA200"].isna().all():
+        ax_main.plot(dates, df["MA200"], color=WHITE,  linewidth=LINE_W, label="MA200", alpha=0.9)
 
     # ── 볼린저밴드 ──
-    ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
-    ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
-    ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+    if not df["BB_Upper"].isna().all() and not df["BB_Lower"].isna().all():
+        ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
+        ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+        ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
 
     ax_main.legend(loc="upper left", fontsize=LABEL_SIZE, facecolor=PANEL_BG,
                    labelcolor=WHITE, framealpha=0.8)
@@ -179,22 +206,26 @@ def generate_chart_for_card(df: pd.DataFrame, ticker: str) -> str:
                       fontsize=TITLE_SIZE, fontweight="bold", pad=10, loc="left")
 
     # ── RSI ──
-    ax_rsi.plot(dates, df["RSI"], color=BLUE, linewidth=LINE_W)
-    ax_rsi.axhline(70, color=RED,   linewidth=0.9, linestyle="--", alpha=0.7)
-    ax_rsi.axhline(30, color=GREEN, linewidth=0.9, linestyle="--", alpha=0.7)
-    ax_rsi.fill_between(dates, df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color=RED)
-    ax_rsi.fill_between(dates, df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color=GREEN)
+    if not df["RSI"].isna().all():
+        ax_rsi.plot(dates, df["RSI"], color=BLUE, linewidth=LINE_W)
+        ax_rsi.axhline(70, color=RED,   linewidth=0.9, linestyle="--", alpha=0.7)
+        ax_rsi.axhline(30, color=GREEN, linewidth=0.9, linestyle="--", alpha=0.7)
+        ax_rsi.fill_between(dates, df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color=RED)
+        ax_rsi.fill_between(dates, df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color=GREEN)
     ax_rsi.set_ylim(0, 100)
     ax_rsi.set_ylabel("RSI", color=GRAY, fontsize=LABEL_SIZE)
-    rsi_val = df["RSI"].iloc[-1]
+    rsi_val = df["RSI"].iloc[-1] if not df["RSI"].isna().all() else 50
     ax_rsi.text(0.01, 0.78, f"RSI {rsi_val:.1f}", transform=ax_rsi.transAxes,
                 color=BLUE, fontsize=LABEL_SIZE, fontweight="bold")
 
     # ── MACD ──
-    ax_macd.plot(dates, df["MACD"],        color=BLUE,   linewidth=LINE_W, label="MACD")
-    ax_macd.plot(dates, df["MACD_Signal"], color=ORANGE, linewidth=LINE_W, label="Signal")
-    hist_colors = [GREEN if v >= 0 else RED for v in df["MACD_Hist"]]
-    ax_macd.bar(dates, df["MACD_Hist"], width=width, color=hist_colors, alpha=0.7)
+    if not df["MACD"].isna().all():
+        ax_macd.plot(dates, df["MACD"],        color=BLUE,   linewidth=LINE_W, label="MACD")
+    if not df["MACD_Signal"].isna().all():
+        ax_macd.plot(dates, df["MACD_Signal"], color=ORANGE, linewidth=LINE_W, label="Signal")
+    if not df["MACD_Hist"].isna().all():
+        hist_colors = [GREEN if v >= 0 else RED for v in df["MACD_Hist"]]
+        ax_macd.bar(dates, df["MACD_Hist"], width=width, color=hist_colors, alpha=0.7)
     ax_macd.axhline(0, color=GRAY, linewidth=0.5)
     ax_macd.set_ylabel("MACD", color=GRAY, fontsize=LABEL_SIZE)
     ax_macd.legend(loc="upper left", fontsize=TICK_SIZE, facecolor=PANEL_BG,

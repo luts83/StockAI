@@ -19,6 +19,17 @@ def _last_valid(series: pd.Series, default: float = 0.0) -> float:
         return default
     return float(valid.iloc[-1])
 
+def _safe(val, default=0):
+    """NaN / inf / None 값을 기본값으로 대체"""
+    if val is None:
+        return default
+    try:
+        if not np.isfinite(float(val)):
+            return default
+    except (TypeError, ValueError):
+        return default
+    return val
+
 def get_stock_data(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
     """yfinance로 OHLCV 데이터 수집 (Yahoo 일시 오류 시 짧게 재시도)"""
     last_err = None
@@ -260,22 +271,22 @@ def get_summary_stats(df: pd.DataFrame, ticker: str = "") -> dict:
             print(f"[summary_stats] SPY 비교 실패: {e}")
 
     return {
-        "price":        round(float(latest["Close"]), 2),
-        "volume":       int(latest["Volume"]),
-        "avg_volume":   int(df["Volume"].tail(20).mean()),
-        "52w_high":     round(float(df["High"].tail(252).max()), 2),
-        "52w_low":      round(float(df["Low"].tail(252).min()), 2),
-        "rsi":          round(rsi, 2),
-        "macd":         round(macd, 4),
-        "macd_signal":  round(macd_signal, 4),
+        "price":        _safe(round(float(latest["Close"]), 2)),
+        "volume":       int(_safe(latest["Volume"], 0)),
+        "avg_volume":   int(_safe(df["Volume"].tail(20).mean(), 0)),
+        "52w_high":     _safe(round(float(df["High"].tail(252).max()), 2)),
+        "52w_low":      _safe(round(float(df["Low"].tail(252).min()), 2)),
+        "rsi":          _safe(round(rsi, 2), 50),
+        "macd":         _safe(round(macd, 4)),
+        "macd_signal":  _safe(round(macd_signal, 4)),
         "above_ma20":   bool(float(latest["Close"]) > ma20),
         "above_ma200":  bool(float(latest["Close"]) > ma200),
-        "bb_position":  round(float((float(latest["Close"]) - bb_lower) / bb_width * 100), 1),
-        "stoch_k":      round(stoch_k, 2),
-        "stoch_d":      round(stoch_d, 2),
-        "ma20":         round(float(ma20), 2) if ma20 else None,
-        "ma60":         round(float(ma60_val), 2) if ma60_val else None,
-        "ma200":        round(float(ma200_val), 2) if ma200_val else None,
+        "bb_position":  _safe(round(float((float(latest["Close"]) - bb_lower) / bb_width * 100), 1), 50),
+        "stoch_k":      _safe(round(stoch_k, 2), 50),
+        "stoch_d":      _safe(round(stoch_d, 2), 50),
+        "ma20":         _safe(round(float(ma20), 2)) if ma20 else None,
+        "ma60":         _safe(round(float(ma60_val), 2)) if ma60_val else None,
+        "ma200":        _safe(round(float(ma200_val), 2)) if ma200_val else None,
         "change_5d":    change_5d,
         "change_20d":   change_20d,
         "change_1m":    change_1m,
