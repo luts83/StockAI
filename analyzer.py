@@ -12,6 +12,17 @@ def _pick_col(df: pd.DataFrame, prefix: str) -> str:
             return col
     raise KeyError(f"지표 컬럼을 찾을 수 없습니다: {prefix}")
 
+def _is_foreign_ticker(ticker: str) -> bool:
+    """미국/한국 거래소 종목은 False, 기타 해외 거래소 종목은 True"""
+    t = ticker.upper()
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        return False
+    if "." not in t:
+        return False
+    foreign_suffixes = [".T", ".HK", ".L", ".PA", ".DE", ".AS", ".MI"]
+    return any(t.endswith(s) for s in foreign_suffixes)
+
+
 def _last_valid(series: pd.Series, default: float = 0.0) -> float:
     """Series의 마지막 유효값을 반환하고 없으면 기본값 사용"""
     valid = series.dropna()
@@ -101,15 +112,8 @@ def get_valuation_data(ticker: str) -> dict:
     try:
         info = yf.Ticker(ticker).info
 
-        is_etf   = info.get("quoteType", "").upper() == "ETF"
-        country  = info.get("country", "")
-        exchange = info.get("exchange", "")
-        is_foreign = (
-            country not in ("", "United States") or
-            ticker.endswith(".KS") or
-            ticker.endswith(".KQ") or
-            exchange in ("ASX", "TSX", "LSE")
-        )
+        is_etf     = info.get("quoteType", "").upper() == "ETF"
+        is_foreign = _is_foreign_ticker(ticker)
 
         def _r(val, decimals=1):
             try:
