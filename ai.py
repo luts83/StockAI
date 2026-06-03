@@ -496,7 +496,9 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 ## 6. 종합 의견
 현재 포지션 관점에서 한 줄 요약 (매수검토 / 관망 / 주의)
 
-⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다."""
+⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다.
+
+⚠️ 반드시 ## 6. 종합 의견과 한 줄 요약까지 완성할 것. 중간에 끊기면 안 됨."""
 
 async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               news_items: List[Dict], valuation: dict = None,
@@ -511,7 +513,7 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
     try:
         message = _get_client().messages.create(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=4000,
+            max_tokens=6000,
             system=SYSTEM_PROMPT,
             messages=[
                 {

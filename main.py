@@ -460,7 +460,7 @@ async def chat_stream(
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=1500,  # 안전마진, 실제 답변은 500토큰 내외 유도
+            max_tokens=2500,  # 안전마진, 실제 답변은 500토큰 내외 유도
             system=system,
             messages=messages,
         ) as stream:
