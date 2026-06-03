@@ -903,16 +903,18 @@ async def start_scheduler():
         id="closing_brief",
         replace_existing=True,
     )
-    # 한국 장 마감 시황: KST 16:10 = UTC 07:10 (평일)
+    # 한국 장 마감 시황: KST 18:00 = UTC 09:00 (평일)
+    # KST 16:10(UTC 07:10)은 yfinance 한국 데이터 갱신 전이라 항상 stale
+    # UTC 09:00(KST 18:00)은 yfinance 갱신(UTC 08:00~09:00) 이후라 당일 데이터 보장
     scheduler.add_job(
         _run_brief,
-        CronTrigger(hour=7, minute=10, day_of_week="mon-fri", timezone="UTC"),
+        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone="UTC"),
         args=["korea_close"],
         id="korea_close_brief",
         replace_existing=True,
     )
     scheduler.start()
-    print("[scheduler] 스케줄러 시작 — 장전 UTC 12:30 / 한국마감 UTC 07:10 / 미국마감 UTC 21:30")
+    print("[scheduler] 스케줄러 시작 — 장전 UTC 12:30 / 한국마감 UTC 09:00 / 미국마감 UTC 21:30")
 
     # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
     utc = pytz.utc
@@ -937,8 +939,8 @@ async def start_scheduler():
                 print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("premarket"))
 
-        # 한국 마감 시황: UTC 07:10 지났고 오늘 데이터 없으면 즉시 생성
-        if current_minutes >= 7 * 60 + 10:
+        # 한국 마감 시황: UTC 09:00 지났고 오늘 데이터 없으면 즉시 생성
+        if current_minutes >= 9 * 60 + 0:
             today_kr = get_latest_market_brief("korea_close")
             if not today_kr or today_kr.get("date") != today_str:
                 print("[scheduler] 오늘 한국 마감 시황 누락 감지 → 즉시 생성")
