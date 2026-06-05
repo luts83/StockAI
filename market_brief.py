@@ -266,6 +266,24 @@ async def generate_market_brief(brief_type: str) -> dict:
     today = now.strftime("%Y-%m-%d")
     weekday_today = WEEKDAY_KR[now.weekday()]
 
+    # 수집된 데이터의 실제 날짜로 today 보정
+    # BST 자정 이후 생성 시 제목 날짜와 yfinance 데이터 날짜 불일치 방지
+    all_dates = []
+    for region_data in market_data.values():
+        for d in region_data.values():
+            if not d.get("stale") and d.get("last_date"):
+                date_str = d["last_date"].split("(")[0]
+                all_dates.append(date_str)
+    if all_dates:
+        from collections import Counter
+        from datetime import datetime as _dt
+        data_today = Counter(all_dates).most_common(1)[0][0]
+        if data_today != today:
+            print(f"[market_brief] 날짜 보정: BST {today} → 데이터 {data_today}")
+            today = data_today
+            _d = _dt.strptime(today, "%Y-%m-%d")
+            weekday_today = WEEKDAY_KR[_d.weekday()]
+
     recent = get_recent_market_briefs(limit=6)
 
     # 한국 지수 stale 여부 확인 → korea_close 브리프 데이터로 대체
