@@ -288,7 +288,9 @@ async def generate_market_brief(brief_type: str) -> dict:
 
     # 한국 지수 stale 여부 확인 → korea_close 브리프 데이터로 대체
     kr_data = market_data.get("한국", {})
-    kr_stale = any(v.get("stale") for v in kr_data.values())
+    kr_stale = not kr_data or any(
+        v.get("stale") or not v.get("price") for v in kr_data.values()
+    )
     if kr_stale:
         korea_brief = next(
             (b for b in recent if b.get("type") == "korea_close"),
@@ -313,6 +315,26 @@ async def generate_market_brief(brief_type: str) -> dict:
         if now.weekday() == 4   # 금요일에만
         else "내일"
     )
+
+    # 미국 마감 시황일 때 korea_close 브리프 한 줄 요약을 별도 컨텍스트로 추출
+    kr_close_context = ""
+    if brief_type == "close":
+        korea_brief = next(
+            (b for b in recent if b.get("type") == "korea_close"),
+            None
+        )
+        if korea_brief:
+            summary_match = re.search(
+                r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)",
+                korea_brief.get("analysis", "")
+            )
+            kr_one_line = summary_match.group(1).strip() if summary_match else ""
+            kr_close_context = f"""
+[오늘 한국 장 마감 결과 — korea_close 브리프 {korea_brief['date']} 기준]
+{kr_one_line}
+SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
+(위 내용을 "{next_trading_label} 한국 시장 전망" 섹션 작성 시 참고할 것)
+"""
 
     # 적중률 자기보정 컨텍스트
     from database import get_brief_accuracy
@@ -496,7 +518,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {news_text}
 
 {prev_context}
-
+{kr_close_context}
 ## 📈 마감 시황 ({today} {weekday_today}요일)
 
 ### 0. 직전 전망 검증
