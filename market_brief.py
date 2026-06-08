@@ -314,6 +314,41 @@ async def generate_market_brief(brief_type: str) -> dict:
     data_text = _build_data_text(market_data)
     prev_context = _build_prev_context(recent, brief_type)
 
+    # 직전 브리프 적중률 저장 (현재 시장 데이터로 이전 전망 검증)
+    if recent and len(recent) > 0:
+        prev = recent[0]
+        prev_signal = prev.get("signal", "")
+        prev_id = str(prev.get("_id", ""))
+        actual_signal = ""
+
+        if brief_type == "close":
+            spy = market_data.get("미국", {}).get("SPY", {})
+            if spy and not spy.get("stale"):
+                actual_signal = "BULL" if spy.get("change_pct", 0) > 0 else "BEAR"
+        elif brief_type in ("korea_close", "premarket"):
+            kospi = market_data.get("한국", {}).get("^KS11", {})
+            if kospi and not kospi.get("stale"):
+                actual_signal = "BULL" if kospi.get("change_pct", 0) > 0 else "BEAR"
+
+        if actual_signal and prev_signal:
+            is_correct = (
+                (prev_signal == "BULL" and actual_signal == "BULL") or
+                (prev_signal == "BEAR" and actual_signal == "BEAR") or
+                (prev_signal == "NEUTRAL" and actual_signal == "")
+            )
+            try:
+                from database import save_brief_performance
+                save_brief_performance(
+                    brief_id=prev_id,
+                    predicted=prev_signal,
+                    actual=actual_signal,
+                    is_correct=is_correct,
+                    brief_type=prev.get("type", ""),
+                )
+                print(f"[market_brief] 적중률 저장: {prev_signal}→{actual_signal} {'✅' if is_correct else '❌'}")
+            except Exception as e:
+                print(f"[market_brief] 적중률 저장 실패: {e}")
+
     next_trading_day = _get_next_trading_day(now)
     next_trading_label = (
         f"다음 거래일 ({next_trading_day})"
@@ -346,11 +381,18 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
     accuracy = get_brief_accuracy(limit=20)
     accuracy_context = ""
     if accuracy["total"] >= 3:
+        error_text = (
+            ", ".join(accuracy["recent_errors"])
+            if accuracy["recent_errors"]
+            else "없음"
+        )
         accuracy_context = f"""
-[최근 시황 적중률 — 자기보정 참고용]
+[최근 시황 적중률 — 자기보정 참고]
 - 최근 {accuracy['total']}회 중 {accuracy['correct']}회 적중 ({accuracy['accuracy_pct']}%)
-- 반복 오류 패턴: {', '.join(accuracy['recent_errors']) if accuracy['recent_errors'] else '없음'}
+- 반복 오류 패턴: {error_text}
 - 위 오류 패턴이 있으면 이번 전망에서 반대 방향 가중치를 높일 것
+- BULL 전망이 반복 빗나갔으면 → 이번엔 BEAR 또는 NEUTRAL 검토
+- BEAR 전망이 반복 빗나갔으면 → 이번엔 BULL 또는 NEUTRAL 검토
 """
 
     # 현재 시각 컨텍스트

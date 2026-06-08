@@ -222,13 +222,15 @@ def get_market_briefs(limit: int = 10) -> list:
 
 
 # ── 시황 적중률 ──────────────────────────────────────────
-def save_brief_performance(brief_id: str, predicted: str, actual: str, is_correct: bool):
+def save_brief_performance(brief_id: str, predicted: str, actual: str,
+                           is_correct: bool, brief_type: str = ""):
     """시황 예측 결과 저장"""
     get_db()["brief_performance"].insert_one({
         "brief_id":   brief_id,
         "predicted":  predicted,
         "actual":     actual,
         "is_correct": is_correct,
+        "brief_type": brief_type,
         "created_at": datetime.utcnow().isoformat(),
     })
 

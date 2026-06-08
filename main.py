@@ -772,6 +772,13 @@ async def brief_list():
     return get_market_briefs(limit=10)
 
 
+@app.get("/market/brief/accuracy")
+async def brief_accuracy_api():
+    """시황 적중률 조회 (최근 50회)"""
+    from database import get_brief_accuracy
+    return get_brief_accuracy(limit=50)
+
+
 @app.post("/market/brief/generate")
 async def generate_brief(
     brief_type: str = "close",
