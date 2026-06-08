@@ -11,6 +11,11 @@ TICKERS = {
         "QQQ":  "NASDAQ 100",
         "DIA":  "DOW Jones",
     },
+    "미국선물": {
+        "ES=F": "S&P500 선물",
+        "NQ=F": "NASDAQ 선물",
+        "YM=F": "DOW 선물",
+    },
     "한국": {
         "^KS11": "KOSPI",
         "^KQ11": "KOSDAQ",
@@ -408,9 +413,17 @@ KOSDAQ ▼X.XX%  거래량 XXX%
 (서술 예시)
 "간밤 미국 증시는 빅테크 실적 발표를 앞두고 차익실현 매물이 쏟아지며 하락 마감했습니다.
 특히 NASDAQ은 금리 상승 부담으로..."
-NASDAQ  ▲X.XX%  거래량 XXX%
-S&P500  ▼X.XX%  거래량 XXX%
-DOW     ▼X.XX%  거래량 XXX%
+NASDAQ  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+S&P500  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+DOW     $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+
+선물 데이터가 있으면 반드시 포함:
+S&P500 선물  $X,XXX.XX  ▲/▼X.XX%
+NASDAQ 선물  $X,XXX.XX  ▲/▼X.XX%
+DOW 선물     $X,XXX.XX  ▲/▼X.XX%
+- 선물이 전일 마감 대비 +0.5% 이상 → "강세 개장 예상" 한 줄 서술
+- 선물이 전일 마감 대비 -0.5% 이상 → "약세 개장 예상" 한 줄 서술
+- 선물 데이터가 없으면 이 항목 생략
 
 뉴스가 있으면 한 줄 연결:
 "[뉴스] XX 이슈가 위 흐름과 연관됩니다."
