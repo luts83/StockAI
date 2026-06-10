@@ -926,32 +926,50 @@ async def start_scheduler():
     print("[scheduler] 스케줄러 시작 — 장전 UTC 12:30 / 한국마감 UTC 09:00 / 미국마감 UTC 23:30")
 
     # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
+    from datetime import timezone, timedelta as _td
+
+    def _is_fresh(brief, hours=20):
+        """UTC 기준 지정 시간 이내에 생성된 브리프인지 확인"""
+        if not brief:
+            return False
+        created = brief.get("created_at", "")
+        if not created:
+            return False
+        try:
+            from datetime import datetime as _dt
+            bt = _dt.fromisoformat(created.replace("Z", "+00:00"))
+            if bt.tzinfo is None:
+                bt = bt.replace(tzinfo=timezone.utc)
+            cutoff = datetime.now(timezone.utc) - _td(hours=hours)
+            return bt > cutoff
+        except Exception:
+            return False
+
     utc = pytz.utc
     now_utc = datetime.now(utc)
     is_weekday = now_utc.weekday() < 5
-    today_str = now_utc.strftime("%Y-%m-%d")
 
     if is_weekday:
         current_minutes = now_utc.hour * 60 + now_utc.minute
 
-        # 마감 시황: UTC 23:30 지났고 오늘 데이터 없으면 즉시 생성
+        # 마감 시황: UTC 23:30 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
         if current_minutes >= 23 * 60 + 30:
             today_close = get_latest_market_brief("close")
-            if not today_close or today_close.get("date") != today_str:
+            if not _is_fresh(today_close):
                 print("[scheduler] 오늘 마감 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("close"))
 
-        # 장전 시황: UTC 12:30 지났고 오늘 데이터 없으면 즉시 생성
+        # 장전 시황: UTC 12:30 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
         if current_minutes >= 12 * 60 + 30:
             today_pre = get_latest_market_brief("premarket")
-            if not today_pre or today_pre.get("date") != today_str:
+            if not _is_fresh(today_pre):
                 print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("premarket"))
 
-        # 한국 마감 시황: UTC 09:00 지났고 오늘 데이터 없으면 즉시 생성
+        # 한국 마감 시황: UTC 09:00 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
         if current_minutes >= 9 * 60 + 0:
             today_kr = get_latest_market_brief("korea_close")
-            if not today_kr or today_kr.get("date") != today_str:
+            if not _is_fresh(today_kr):
                 print("[scheduler] 오늘 한국 마감 시황 누락 감지 → 즉시 생성")
                 asyncio.create_task(_run_brief("korea_close"))
 

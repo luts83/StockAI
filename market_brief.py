@@ -16,6 +16,16 @@ TICKERS = {
         "NQ=F": "NASDAQ 선물",
         "YM=F": "DOW 선물",
     },
+    "원자재": {
+        "GC=F": "골드",
+        "CL=F": "WTI 유가",
+    },
+    "미국채권": {
+        "^IRX": "미국 2년물 금리",
+    },
+    "미국추가": {
+        "IWM": "러셀2000",
+    },
     "한국": {
         "^KS11": "KOSPI",
         "^KQ11": "KOSDAQ",
@@ -51,6 +61,37 @@ NEWS_RULE = """
 """
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _get_tomorrow_events(now) -> str:
+    """yfinance로 다음날 주요 실적발표 일정 수집"""
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    lines = [f"[내일({tomorrow}) 주요 일정]"]
+
+    watch_tickers = ["ORCL", "CHWY", "AVGO", "ADBE", "FDX",
+                     "COST", "WMT", "TGT", "HD", "LOW"]
+    earnings_tomorrow = []
+    for t in watch_tickers:
+        try:
+            cal = yf.Ticker(t).calendar
+            if cal is not None and not cal.empty:
+                earn_date = str(
+                    cal.columns[0].date()
+                    if hasattr(cal.columns[0], "date")
+                    else cal.columns[0]
+                )[:10]
+                if earn_date == tomorrow:
+                    earnings_tomorrow.append(t)
+        except Exception:
+            continue
+
+    if earnings_tomorrow:
+        lines.append(f"실적발표: {', '.join(earnings_tomorrow)}")
+    else:
+        lines.append("실적발표: 주요 종목 없음")
+
+    lines.append("※ CPI/FOMC/고용지표 등 주요 이벤트는 뉴스에서 확인")
+    return "\n".join(lines)
 
 
 def _get_next_trading_day(now: datetime) -> str:
@@ -314,6 +355,12 @@ async def generate_market_brief(brief_type: str) -> dict:
     data_text = _build_data_text(market_data)
     prev_context = _build_prev_context(recent, brief_type)
 
+    try:
+        tomorrow_events = _get_tomorrow_events(now)
+    except Exception as e:
+        print(f"[market_brief] 내일 일정 수집 실패: {e}")
+        tomorrow_events = ""
+
     # 직전 브리프 적중률 저장 (현재 시장 데이터로 이전 전망 검증)
     if recent and len(recent) > 0:
         prev = recent[0]
@@ -422,6 +469,8 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
 [제공 데이터]
 {data_text}
+{tomorrow_events}
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
 
 [최근 24시간 매크로 뉴스]
 {news_text}
@@ -479,6 +528,13 @@ DOW 선물     $X,XXX.XX  ▲/▼X.XX%
 - VIX XX → (공포/중립/탐욕) — 내일 한국장에 미치는 영향 한 줄
 - 달러 XX ▲/▼XX% → 원화/외국인 영향 한 줄
 - 금리 XX% ▲/▼XX% → 성장주/가치주 영향 한 줄
+- 2년물 금리 데이터가 있으면: X.XX% → 단기 금리 방향 + 연준 정책 기대 한 줄
+- 골드 데이터가 있으면: $X,XXX ▲/▼X.XX% → 안전자산 수요 의미 한 줄
+- WTI 유가 데이터가 있으면: $XX.XX ▲/▼X.XX% → 인플레이션/에너지 섹터 영향 한 줄
+- 러셀2000 데이터가 있으면: ▲/▼X.XX% → 중소형주 심리 + 한국 중소형주 영향 한 줄
+- 미국 선물 데이터가 있으면 (장전 전용):
+  S&P500 선물 $X,XXX ▲/▼X.XX% / NASDAQ 선물 $XX,XXX ▲/▼X.XX%
+  선물 +0.5% 이상 → "강세 개장 예상" / 선물 -0.5% 이상 → "약세 개장 예상"
 
 ---
 
@@ -509,6 +565,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [제공 데이터]
 {data_text}
+{tomorrow_events}
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
 
 [최근 24시간 매크로 뉴스]
 {news_text}
@@ -568,6 +626,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [제공 데이터]
 {data_text}
+{tomorrow_events}
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
 
 [최근 24시간 매크로 뉴스]
 {news_text}
@@ -621,6 +681,10 @@ VIX     XX.XX      ▲/▼XX%
 - VIX XX ▼XX% → 공포 완화 의미 + {next_trading_label} 영향 한 줄
 - 달러 XX ▼XX% → 원화 강세 의미 + 외국인 영향 한 줄
 - 금리 XX% ▼XX% → 성장주 밸류에이션 의미 + 코스닥 영향 한 줄
+- 2년물 금리 데이터가 있으면: X.XX% → 단기 금리 방향 + 연준 정책 기대 한 줄
+- 골드 데이터가 있으면: $X,XXX ▲/▼X.XX% → 안전자산 수요 의미 한 줄
+- WTI 유가 데이터가 있으면: $XX.XX ▲/▼X.XX% → 인플레이션/에너지 섹터 영향 한 줄
+- 러셀2000 데이터가 있으면: ▲/▼X.XX% → 중소형주 심리 + 한국 중소형주 영향 한 줄
 
 ---
 
