@@ -11,30 +11,16 @@ TICKERS = {
         "QQQ":  "NASDAQ 100",
         "DIA":  "DOW Jones",
     },
-    "미국선물": {
-        "ES=F": "S&P500 선물",
-        "NQ=F": "NASDAQ 선물",
-        "YM=F": "DOW 선물",
-    },
-    "원자재": {
-        "GC=F": "골드",
-        "CL=F": "WTI 유가",
-    },
-    "미국채권": {
-        "^IRX": "미국 2년물 금리",
-    },
-    "미국추가": {
-        "IWM": "러셀2000",
-    },
     "한국": {
         "^KS11": "KOSPI",
         "^KQ11": "KOSDAQ",
     },
-    "시장심리": {
+    "심리지표": {
         "^VIX":      "VIX 공포지수",
         "^TNX":      "미국 10년물 금리",
         "DX-Y.NYB":  "달러 인덱스",
     },
+    # 금/유가/선물/러셀 등은 제거 — 시황 복잡도만 높이고 핵심 아님
 }
 
 STRICT_RULE = """
@@ -58,6 +44,22 @@ NEWS_RULE = """
 - 예시 (허용): "[뉴스] 유가 하락 뉴스 + SPY ▼0.5% → 에너지 섹터 약세 가능성"
 - 예시 (금지): "연준 발언 뉴스 있음 → 금리 인상 우려로 약세" (수치 없는 추측)
 - 뉴스 언급 시 반드시 "[뉴스]" 태그 붙여서 데이터와 구분
+"""
+
+BRIEF_STYLE_RULE = """
+[시황 작성 스타일 원칙]
+1. 각 섹션은 '서술 먼저, 수치는 아래 줄로 분리'
+   ✅ 올바른 방식:
+      "오늘 미국 증시는 기술주 중심으로 하락했습니다."
+      NASDAQ ▼1.73%  거래량 105%
+      S&P500 ▼0.13%  거래량 80%
+   ❌ 잘못된 방식: "NASDAQ ▼1.73% 급락하며 [뉴스] 칩 매도로..."
+2. [뉴스] 태그를 서술 문장 중간에 삽입 금지
+   → 서술이 끝난 뒤 별도 줄로만: "📰 관련 뉴스: XXX"
+3. "다음 거래일 (07/06 월요일)" 같은 긴 표현은 처음 한 번만,
+   이후에는 "내일" 또는 "월요일"로만 축약
+4. 강세/약세 조건은 각 2개 이내, 불릿 최대 3개
+5. 전체 분석이 완결되어야 함 — 중간에 끊기지 말 것
 """
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
@@ -111,39 +113,51 @@ def _get_next_trading_day(now: datetime) -> str:
 
 
 def _fetch_ticker(ticker: str, name: str) -> dict | None:
-    """티커별 데이터 수집 — 날짜 포함 + 재시도 3회"""
+    """티커별 데이터 수집 — 날짜/타임존 정규화 + 장중 데이터 제외 + 재시도 3회"""
     import time
+    from datetime import timezone
 
     for attempt in range(3):
         try:
-            hist = yf.Ticker(ticker).history(period="10d")
-            if hist is None or hist.empty or len(hist) < 2:
+            # 한국 지수는 period를 더 넉넉하게 (거래일 확보)
+            period = "15d" if ticker.startswith("^K") else "10d"
+            hist = yf.Ticker(ticker).history(period=period)
+
+            if hist is None or hist.empty:
                 time.sleep(2 ** attempt)
                 continue
 
-            # 오늘 장중 불완전 데이터 제외
-            from datetime import timezone
+            # 타임존 정규화 (naive → UTC)
+            if hist.index.tz is None:
+                hist.index = hist.index.tz_localize("UTC")
+            hist.index = hist.index.tz_convert("UTC")
+
             now_utc = datetime.now(timezone.utc)
-            last_dt  = hist.index[-1]
-            if hasattr(last_dt, "date"):
-                last_date_val = last_dt.date()
-            else:
-                last_date_val = last_dt.to_pydatetime().date()
-
             today_utc = now_utc.date()
-            et_hour   = now_utc.hour - 4  # ET 근사
-            us_market_open = 9 <= et_hour < 16
 
-            if last_date_val == today_utc and us_market_open:
-                hist = hist.iloc[:-1]  # 장중 불완전 데이터 제외
+            # 마감 확정 시각 판단 (장중 불완전 데이터 제외용)
+            # 한국 지수: KST 15:30 마감 = UTC 06:30 → UTC 07:00 이후 마감 확정
+            # 미국 지수: ET 16:00 마감 = UTC 20:00~21:00 → UTC 21:00 이후 마감 확정
+            if ticker.startswith("^K"):
+                market_closed = now_utc.hour >= 7
+            else:
+                market_closed = now_utc.hour >= 21
+
+            last_dt = hist.index[-1].date()
+            if last_dt == today_utc and not market_closed:
+                hist = hist.iloc[:-1]  # 오늘 장중 불완전 데이터 제외
                 if len(hist) < 2:
+                    time.sleep(2 ** attempt)
                     continue
+
+            if len(hist) < 2:
+                time.sleep(2 ** attempt)
+                continue
 
             prev_close = float(hist["Close"].iloc[-2])
             current    = float(hist["Close"].iloc[-1])
             last_date  = hist.index[-1]
 
-            # 날짜 + 요일 계산
             if hasattr(last_date, "date"):
                 ld = last_date.date()
             else:
@@ -151,22 +165,21 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
             weekday_str = WEEKDAY_KR[ld.weekday()]
             date_label  = f"{ld.strftime('%Y-%m-%d')}({weekday_str})"
 
-            change_pct = (current - prev_close) / prev_close * 100
-            volume     = int(hist["Volume"].iloc[-1])
+            change_pct = (current - prev_close) / prev_close * 100 if prev_close else 0
+            volume     = int(hist["Volume"].iloc[-1]) if hist["Volume"].iloc[-1] else 0
             avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
             vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
 
-            today_utc2 = datetime.now(timezone.utc).date()
-            days_old = (today_utc2 - ld).days
+            days_old = (today_utc - ld).days
             stale = days_old > 1
 
             print(
                 f"[market_brief] {'⚠️ STALE' if stale else '✅'} {ticker} {date_label} "
-                f"${current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
+                f"{current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
                 + (f" — {days_old}일 지연" if stale else "")
             )
 
-            result = {
+            return {
                 "name":         name,
                 "price":        round(current, 2),
                 "change_pct":   round(change_pct, 2),
@@ -177,14 +190,11 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
                 "stale":        stale,
                 "stale_days":   days_old,
             }
-
-            if stale:
-                print(f"[market_brief] ⚠️ {ticker} 데이터 {days_old}일 지연 — stale 처리")
-
-            return result
         except Exception as e:
             print(f"[market_brief] ❌ {ticker} 오류 (시도 {attempt+1}): {e}")
             time.sleep(2 ** attempt)
+
+    print(f"[market_brief] ⚠️ {ticker} 수집 실패 — 3회 모두 실패")
     return None
 
 
@@ -233,11 +243,28 @@ def _build_data_text(market_data: dict) -> str:
     return "\n".join(lines)
 
 
+def _extract_forecast(analysis: str) -> str:
+    """직전 시황 분석에서 '전망 섹션'을 추출 — 여러 패턴 대응"""
+    if not analysis:
+        return ""
+    patterns = [
+        r"###\s*\d+[\.\s🔮]*[^\n]*(전망|Forecast)[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
+        r"###\s*\d+[\.\s🔮]*[^\n]*(오늘|내일|한국)[^\n]*장[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
+        r"(강세 우위|약세 우위|중립)[^\n]*\n([\s\S]{0,400}?)(?=\n###|\Z)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, analysis, re.IGNORECASE)
+        if m:
+            return m.group(0)[:500].strip()
+    # 마지막 fallback — 뒤쪽 300자 (전망은 보통 후반부)
+    return analysis[-300:].strip()
+
+
 def _build_prev_context(recent_briefs: list, current_type: str = "") -> str:
     if not recent_briefs:
         return ""
 
-    # 시황 타입별 참조 우선순위
+    # 시황 타입별 참조 우선순위 (마감→장전 검증 등 올바른 대상 선택)
     priority = {
         "premarket":   ["korea_close", "close"],
         "close":       ["premarket", "korea_close"],
@@ -258,43 +285,33 @@ def _build_prev_context(recent_briefs: list, current_type: str = "") -> str:
         if not brief:
             continue
         analysis = brief.get("analysis", "")
-
-        forecast_match = re.search(
-            r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘|한국)[^\n]*)[\s\S]*?(?=###|\Z)",
-            analysis,
-        )
-        summary_match = re.search(
-            r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)",
-            analysis,
-        )
-        forecast_text = forecast_match.group(0).strip() if forecast_match else analysis[:300]
+        forecast_text = _extract_forecast(analysis)
+        summary_match = re.search(r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)", analysis)
         summary_text  = summary_match.group(1).strip() if summary_match else ""
 
         label = TYPE_LABEL.get(t, t)
         sections.append(
-            f"\n[참조 시황 — {brief.get('date')} {label} / SIGNAL:{brief.get('signal')}]\n"
+            f"\n[직전 시황 — {brief.get('date')} {label} / SIGNAL:{brief.get('signal')}]\n"
             f"한 줄 요약: {summary_text}\n"
-            f"{forecast_text}\n"
-            f"[참조 끝]"
+            f"전망: {forecast_text}\n"
+            f"[직전 시황 끝]"
         )
 
     if not sections:
         # 우선순위에 맞는 타입이 없으면 최신 시황으로 fallback
-        prev      = recent_briefs[0]
-        label     = TYPE_LABEL.get(prev.get("type", ""), prev.get("type", ""))
-        analysis  = prev.get("analysis", "")
-        forecast_match = re.search(
-            r"(###\s*\d+\.\s*🔮[^\n]*|###\s*\d+\.\s*(내일|오늘|한국)[^\n]*)[\s\S]*?(?=###|\Z)",
-            analysis,
-        )
-        forecast_text = forecast_match.group(0).strip() if forecast_match else analysis[:400]
+        prev  = recent_briefs[0]
+        label = TYPE_LABEL.get(prev.get("type", ""), prev.get("type", ""))
         return (
             f"\n[직전 시황 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
-            f"{forecast_text}\n"
-            f"[직전 시황 끝 — 이 전망을 기반으로 ### 0. 직전 전망 검증 작성]\n"
+            f"전망: {_extract_forecast(prev.get('analysis', ''))}\n"
+            f"[직전 시황 끝]\n"
+            f"[위 전망을 ### 0. 직전 전망 검증에서 반드시 구체적으로 인용할 것]\n"
         )
 
-    return "\n".join(sections) + "\n[위 참조 시황의 전망을 기반으로 ### 0. 직전 전망 검증 작성]\n"
+    return (
+        "\n".join(sections)
+        + "\n[위 직전 시황의 전망을 ### 0. 직전 전망 검증에서 반드시 한 줄 인용할 것]\n"
+    )
 
 
 async def generate_market_brief(brief_type: str) -> dict:
@@ -464,95 +481,74 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
         prompt = f"""오늘 {today}({weekday_today}) 장전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
-{NEWS_RULE}
+{BRIEF_STYLE_RULE}
 {timing_context}
 
 [제공 데이터]
 {data_text}
 {tomorrow_events}
-(내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
 
-[최근 24시간 매크로 뉴스]
+[최근 뉴스]
 {news_text}
 
 {prev_context}
 
-## 📊 장전 시황 ({today} {weekday_today}요일)
+## 📊 장전 시황 · {today} {weekday_today}요일
 
 ### 0. 직전 전망 검증
-(직전 시황 전망 있을 때만. 없으면 생략)
-- ✅ 적중 또는 ❌ 빗나감 — 전망 vs 실제 결과 한 줄
-- 원인: 데이터+뉴스 기반 원인 1~2개 (수치 포함)
+반드시 직전 시황의 전망을 **한 줄 인용**하고 결과를 비교할 것.
+- 전망: "[직전 시황에서 예측한 방향과 근거 인용]"
+- 결과: ✅ 적중 또는 ❌ 빗나감 — 실제 수치로 판단
+- 원인: 데이터로 읽히는 원인 1개 (수치 포함)
 - 교훈: 다음 분석에 반영할 점 한 줄
+(직전 시황 없으면 이 섹션 생략)
 
 ---
 
 ### 1. 🇰🇷 한국 시장 마감 결과
-[데이터일] 기준 한국 시장 결과를 자연스러운 문장으로 먼저 설명한 뒤
-아래 형식으로 수치 정리:
+서술 (2~3문장): [데이터일] 기준 한국 증시가 어떻게 마감했는지, 이유와 함께 자연스럽게 서술.
 
-(서술 예시)
-"오늘 코스피는 보합 마감했습니다. 미국발 기술주 약세 여파로 외국인 매도세가 이어졌으며..."
-KOSPI  ▲X.XX%  거래량 XXX%
-KOSDAQ ▼X.XX%  거래량 XXX%
+KOSPI  ▲/▼X.XX%  거래량 XXX%
+KOSDAQ ▲/▼X.XX%  거래량 XXX%
+(데이터 없으면 "오늘 한국 시장 데이터 없음 — 전날 결과 기준 참고"로만 표기)
 
 ---
 
-### 2. 🇺🇸 미국 장전 현재 상황
-[데이터일] 기준 미국 최근 마감 결과를 자연스러운 문장으로 설명한 뒤 수치 정리:
+### 2. 🇺🇸 미국 장전 상황
+서술 (2~3문장): 전일 미국 마감 결과와 장 시작 전 분위기를 서술.
 
-(서술 예시)
-"간밤 미국 증시는 빅테크 실적 발표를 앞두고 차익실현 매물이 쏟아지며 하락 마감했습니다.
-특히 NASDAQ은 금리 상승 부담으로..."
-NASDAQ  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-S&P500  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-DOW     $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-
-선물 데이터가 있으면 반드시 포함:
-S&P500 선물  $X,XXX.XX  ▲/▼X.XX%
-NASDAQ 선물  $X,XXX.XX  ▲/▼X.XX%
-DOW 선물     $X,XXX.XX  ▲/▼X.XX%
-- 선물이 전일 마감 대비 +0.5% 이상 → "강세 개장 예상" 한 줄 서술
-- 선물이 전일 마감 대비 -0.5% 이상 → "약세 개장 예상" 한 줄 서술
-- 선물 데이터가 없으면 이 항목 생략
-
-뉴스가 있으면 한 줄 연결:
-"[뉴스] XX 이슈가 위 흐름과 연관됩니다."
-(뉴스 제목만으로 내용 추측 금지. 데이터와 방향이 일치할 때만 언급)
+S&P500 ▲/▼X.XX%  거래량 XXX%
+NASDAQ ▲/▼X.XX%  거래량 XXX%
+DOW    ▲/▼X.XX%  거래량 XXX%
+📰 관련 뉴스: (있을 때만 1줄)
 
 ---
 
-### 3. 📊 시장 심리
-수치만 나열하지 말고 내일 한국장과의 연관성을 한 줄씩 서술:
-
-- VIX XX → (공포/중립/탐욕) — 내일 한국장에 미치는 영향 한 줄
-- 달러 XX ▲/▼XX% → 원화/외국인 영향 한 줄
-- 금리 XX% ▲/▼XX% → 성장주/가치주 영향 한 줄
-- 2년물 금리 데이터가 있으면: X.XX% → 단기 금리 방향 + 연준 정책 기대 한 줄
-- 골드 데이터가 있으면: $X,XXX ▲/▼X.XX% → 안전자산 수요 의미 한 줄
-- WTI 유가 데이터가 있으면: $XX.XX ▲/▼X.XX% → 인플레이션/에너지 섹터 영향 한 줄
-- 러셀2000 데이터가 있으면: ▲/▼X.XX% → 중소형주 심리 + 한국 중소형주 영향 한 줄
-- 미국 선물 데이터가 있으면 (장전 전용):
-  S&P500 선물 $X,XXX ▲/▼X.XX% / NASDAQ 선물 $XX,XXX ▲/▼X.XX%
-  선물 +0.5% 이상 → "강세 개장 예상" / 선물 -0.5% 이상 → "약세 개장 예상"
+### 3. 📊 시장 심리 한 눈에
+| 지표 | 수치 | 방향 | 오늘 영향 |
+|------|------|------|-----------|
+| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
+| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
+| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
 
 ---
 
 ### 4. 🔮 오늘 미국 장 전망
 결론을 먼저 한 문장으로:
-"오늘 미국 장은 XX 가능성이 높습니다. XX 때문입니다."
 
-**결론: 강세 우위 / 약세 우위 / 중립** (반드시 방향 제시)
-강세 조건: 구체적 수치 조건
-약세 조건: 구체적 수치 조건
+**결론: 강세 우위 / 약세 우위 / 중립**
+
+- 강세: [데이터 기반 근거 1줄]
+- 약세: [데이터 기반 근거 1줄]
+
 신뢰도: 상/중/하
-핵심 체크: 오늘 봐야 할 것 1개
+핵심 체크: [오늘 장에서 봐야 할 것 1개]
 
 ---
 
 ### 5. 💡 한 줄 요약
-독자가 출근길에 딱 한 문장만 읽는다면 뭘 알아야 하는지:
-"XXX 때문에 오늘 XXX에 주목하세요."
+[가장 중요한 수치 1개] 때문에 오늘 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
@@ -621,83 +617,72 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
-{NEWS_RULE}
+{BRIEF_STYLE_RULE}
 {timing_context}
 
 [제공 데이터]
 {data_text}
 {tomorrow_events}
-(내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
 
-[최근 24시간 매크로 뉴스]
+[최근 뉴스]
 {news_text}
 
 {prev_context}
 {kr_close_context}
-## 📈 마감 시황 ({today} {weekday_today}요일)
+## 📈 마감 시황 · {today} {weekday_today}요일
 
 ### 0. 직전 전망 검증
-(오늘 장전 전망 있을 때만. 없으면 생략)
-- ✅ 적중 또는 ❌ 빗나감 — 장전 전망 vs 실제 마감 결과
-- 원인: 데이터+뉴스 기반 원인 수치 포함
+반드시 오늘 장전 시황의 전망을 **한 줄 인용**하고 결과를 비교할 것.
+- 전망: "[장전 시황에서 예측한 방향과 근거 인용]"
+- 결과: ✅ 적중 또는 ❌ 빗나감 — 실제 마감 수치로 판단
+- 원인: 예상과 달랐던 이유 1개 (수치 포함)
 - 교훈: 다음 분석에 반영할 점 한 줄
+(장전 시황 없으면 이 섹션 생략)
 
 ---
 
 ### 1. 🇺🇸 미국 시장 마감 결과
-오늘 미국 증시 흐름을 자연스러운 문장으로 먼저 서술한 뒤 수치 정리:
+서술 (2~3문장): 오늘 미국 증시가 어떻게 마감했는지, 왜 그랬는지 자연스럽게 서술.
 
-(서술 예시)
-"오늘 미국 증시는 연준 금리 동결 발표와 빅테크 실적 호조가 겹치며 강하게 반등했습니다.
-특히 다우존스가 1.63% 급등하며 상승을 주도했는데, 캐터필러와 알파벳의 어닝 서프라이즈가..."
-S&P500  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-NASDAQ  $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-DOW     $X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-VIX     XX.XX      ▲/▼XX%
-
-뉴스 연결 (데이터 방향과 일치할 때만):
-"[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."
+S&P500 ▲/▼X.XX%  거래량 XXX%
+NASDAQ ▲/▼X.XX%  거래량 XXX%
+DOW    ▲/▼X.XX%  거래량 XXX%
+VIX    XX.XX     ▲/▼X.XX%
+📰 관련 뉴스: (있을 때만 1줄)
 
 ---
 
 ### 2. 🇰🇷 {next_trading_label} 한국 시장 전망
-오늘 미국 마감 결과가 {next_trading_label} 한국장에 어떤 영향을 줄지 먼저 서술:
+서술 (2~3문장): 오늘 미국 결과가 {next_trading_label} 한국장에 미칠 영향을 미국→한국 경로로 설명.
 
-(서술 예시)
-"미국 증시 강세가 내일 한국 시장에도 긍정적으로 작용할 것으로 보입니다.
-특히 나스닥 상승은 코스닥 기술주에 동조 상승 기대를 높이며..."
+**결론: 강세 우위 / 약세 우위 / 중립**
+- 강세 조건: [구체적 수치 조건]
+- 약세 조건: [구체적 수치 조건]
 
-**결론: 강세 우위 / 약세 우위 / 중립** (반드시 방향 제시)
-강세 조건: 구체적 수치 조건
-약세 조건: 구체적 수치 조건
 신뢰도: 상/중/하
-핵심 체크: {next_trading_label} 한국장에서 봐야 할 것 1개
+핵심 체크: [{next_trading_label} 개장 후 봐야 할 것 1개]
 
 ---
 
-### 3. 📊 시장 심리
-수치 나열 말고 {next_trading_label} 한국장과의 연관성 서술:
-
-- VIX XX ▼XX% → 공포 완화 의미 + {next_trading_label} 영향 한 줄
-- 달러 XX ▼XX% → 원화 강세 의미 + 외국인 영향 한 줄
-- 금리 XX% ▼XX% → 성장주 밸류에이션 의미 + 코스닥 영향 한 줄
-- 2년물 금리 데이터가 있으면: X.XX% → 단기 금리 방향 + 연준 정책 기대 한 줄
-- 골드 데이터가 있으면: $X,XXX ▲/▼X.XX% → 안전자산 수요 의미 한 줄
-- WTI 유가 데이터가 있으면: $XX.XX ▲/▼X.XX% → 인플레이션/에너지 섹터 영향 한 줄
-- 러셀2000 데이터가 있으면: ▲/▼X.XX% → 중소형주 심리 + 한국 중소형주 영향 한 줄
+### 3. 📊 시장 심리 한 눈에
+| 지표 | 수치 | 방향 | 내일 영향 |
+|------|------|------|-----------|
+| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
+| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
+| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
 
 ---
 
 ### 4. 💡 한 줄 요약
-독자가 자기 전에 딱 한 문장만 읽는다면:
-"XXX 덕분에 / 때문에 {next_trading_label} 한국장은 XXX에 주목하세요."
+오늘 [가장 중요한 수치] 때문에 {next_trading_label} 한국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     client = anthropic.Anthropic()
     message = client.messages.create(
         model="claude-sonnet-4-5-20250929",
-        max_tokens=2500,
+        max_tokens=3000,
         messages=[{"role": "user", "content": prompt}],
     )
     analysis = message.content[0].text
