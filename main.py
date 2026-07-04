@@ -30,7 +30,7 @@ from database import (
     get_all_history, get_history_count, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
-    get_recent_market_briefs,
+    get_recent_market_briefs, delete_market_brief,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
@@ -800,9 +800,46 @@ async def generate_brief(
     return {"ok": True, "id": doc_id, "signal": brief["signal"]}
 
 
+@app.delete("/market/brief/{doc_id}")
+async def delete_brief(
+    doc_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """시황 삭제 (관리자 전용) — 잘못 생성된 브리프 제거용
+    doc_id 형식: {type}_{date}  예: close_2026-07-02
+    """
+    token = stockai_token or (
+        authorization.replace("Bearer ", "") if authorization else None
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    user = decode_jwt(token)
+    if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
+        raise HTTPException(status_code=403, detail="관리자 전용")
+
+    deleted = delete_market_brief(doc_id)
+    return {"ok": deleted > 0, "deleted": deleted, "id": doc_id}
+
+
 # ── 스케줄러 ───────────────────────────────────────────
 
 async def _run_brief(brief_type: str):
+    import pytz
+    from datetime import datetime
+    from market_brief import is_us_market_open, is_kr_market_open
+
+    now_et  = datetime.now(pytz.timezone("America/New_York"))
+    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+
+    # 휴장일/주말이면 생성 스킵
+    if brief_type in ("close", "premarket") and not is_us_market_open(now_et):
+        print(f"[scheduler] 미국 휴장/주말({now_et.strftime('%Y-%m-%d')}) — {brief_type} 스킵")
+        return
+    if brief_type == "korea_close" and not is_kr_market_open(now_kst):
+        print(f"[scheduler] 한국 휴장/주말({now_kst.strftime('%Y-%m-%d')}) — korea_close 스킵")
+        return
+
     try:
         brief  = await generate_market_brief(brief_type)
         doc_id = save_market_brief(brief)

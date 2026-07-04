@@ -5,6 +5,56 @@ from datetime import datetime, timedelta
 import pytz
 from news import fetch_macro_news, format_macro_news_for_brief
 
+# ── 2026 증시 휴장일 ──────────────────────────────────
+US_MARKET_HOLIDAYS_2026 = {
+    "2026-01-01",  # New Year
+    "2026-01-19",  # MLK Day
+    "2026-02-16",  # Presidents Day
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day
+    "2026-06-19",  # Juneteenth
+    "2026-07-03",  # Independence Day (observed)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving
+    "2026-12-25",  # Christmas
+}
+
+KR_MARKET_HOLIDAYS_2026 = {
+    "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18",  # 설날
+    "2026-03-01", "2026-05-05", "2026-05-24", "2026-06-06",
+    "2026-08-15", "2026-09-24", "2026-09-25", "2026-09-26",  # 추석
+    "2026-10-03", "2026-10-09", "2026-12-25",
+}
+
+
+def is_us_market_open(dt: datetime) -> bool:
+    """미국 증시 개장일 여부 (요일 + 휴장일)"""
+    if dt.weekday() >= 5:  # 토/일
+        return False
+    if dt.strftime("%Y-%m-%d") in US_MARKET_HOLIDAYS_2026:
+        return False
+    return True
+
+
+def is_kr_market_open(dt: datetime) -> bool:
+    """한국 증시 개장일 여부"""
+    if dt.weekday() >= 5:
+        return False
+    if dt.strftime("%Y-%m-%d") in KR_MARKET_HOLIDAYS_2026:
+        return False
+    return True
+
+
+def get_last_us_trading_day(dt: datetime) -> str:
+    """dt 기준 가장 최근 미국 거래일 반환"""
+    check = dt
+    for _ in range(10):
+        if is_us_market_open(check):
+            return check.strftime("%Y-%m-%d")
+        check -= timedelta(days=1)
+    return dt.strftime("%Y-%m-%d")
+
+
 TICKERS = {
     "미국": {
         "SPY":  "S&P 500",
@@ -21,6 +71,12 @@ TICKERS = {
         "DX-Y.NYB":  "달러 인덱스",
     },
     # 금/유가/선물/러셀 등은 제거 — 시황 복잡도만 높이고 핵심 아님
+}
+
+# 한국 지수 폴백 매핑 (^KS11/^KQ11 수집 실패 시 EWY ETF로 방향 확인)
+KR_FALLBACK = {
+    "^KS11": "EWY",   # iShares MSCI South Korea ETF
+    "^KQ11": "EWY",
 }
 
 STRICT_RULE = """
@@ -198,12 +254,26 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
     return None
 
 
+def _fetch_ticker_with_fallback(ticker: str, name: str) -> dict | None:
+    """정규 티커 수집 실패 시 폴백 티커(ETF)로 방향 확인"""
+    d = _fetch_ticker(ticker, name)
+    if d:
+        return d
+    fb = KR_FALLBACK.get(ticker)
+    if fb:
+        print(f"[market_brief] {ticker} 실패 → {fb} 폴백 시도")
+        d = _fetch_ticker(fb, f"{name}(ETF대체)")
+        if d:
+            d["is_fallback"] = True
+    return d
+
+
 def get_market_data() -> dict:
     result = {}
     for region, tickers in TICKERS.items():
         result[region] = {}
         for ticker, name in tickers.items():
-            d = _fetch_ticker(ticker, name)
+            d = _fetch_ticker_with_fallback(ticker, name)
             if d:
                 result[region][ticker] = d
     total = sum(len(v) for v in result.values())
@@ -317,6 +387,25 @@ def _build_prev_context(recent_briefs: list, current_type: str = "") -> str:
 async def generate_market_brief(brief_type: str) -> dict:
     from database import get_recent_market_briefs
 
+    bst = pytz.timezone("Europe/London")  # BST/GMT 자동 처리
+    now = datetime.now(bst)
+    et  = now.astimezone(pytz.timezone("America/New_York"))
+
+    # ── 생성 조건 검증 (주말/휴장 원천 차단) ──────────────
+    if now.weekday() >= 5:
+        raise RuntimeError(f"주말({WEEKDAY_KR[now.weekday()]}요일) — 시황 생성 안 함")
+
+    if brief_type in ("close", "premarket") and not is_us_market_open(et):
+        reason = "휴장일" if et.strftime("%Y-%m-%d") in US_MARKET_HOLIDAYS_2026 else "주말"
+        raise RuntimeError(
+            f"미국 증시 {reason}({et.strftime('%Y-%m-%d')}) — "
+            f"{'마감' if brief_type == 'close' else '장전'} 시황 생성 안 함"
+        )
+
+    if brief_type == "korea_close" and not is_kr_market_open(now):
+        reason = "휴장일" if now.strftime("%Y-%m-%d") in KR_MARKET_HOLIDAYS_2026 else "주말"
+        raise RuntimeError(f"한국 증시 {reason}({now.strftime('%Y-%m-%d')}) — 한국 마감 시황 생성 안 함")
+
     market_data = get_market_data()
     macro_news = fetch_macro_news(max_per_source=3)
     news_text = format_macro_news_for_brief(macro_news)
@@ -324,8 +413,6 @@ async def generate_market_brief(brief_type: str) -> dict:
     if not _has_minimum_data(market_data):
         raise RuntimeError("yfinance에서 핵심 지수 데이터를 가져오지 못했습니다")
 
-    bst = pytz.timezone("Europe/London")  # BST/GMT 자동 처리
-    now = datetime.now(bst)
     today = now.strftime("%Y-%m-%d")
     weekday_today = WEEKDAY_KR[now.weekday()]
 
@@ -459,17 +546,49 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 - BEAR 전망이 반복 빗나갔으면 → 이번엔 BULL 또는 NEUTRAL 검토
 """
 
+    # 시장 개장/휴장 상태 + 데이터 신선도 검증
+    us_open_today = is_us_market_open(et)
+    kr_open_today = is_kr_market_open(now)
+    expected_us_date = get_last_us_trading_day(et)
+
+    stale_warning = ""
+    us_data = market_data.get("미국", {})
+    if us_data:
+        first_ticker = list(us_data.values())[0]
+        data_date = first_ticker.get("last_date", "")[:10]
+        if data_date and data_date != expected_us_date:
+            stale_warning = (
+                f"\n⚠️ 미국 데이터 날짜({data_date})가 예상 최근 거래일"
+                f"({expected_us_date})과 다름 — 휴장/지연 가능성, 당일 마감으로 단정 금지"
+            )
+
+    # 다음 미국 거래일 (휴장 반영)
+    next_us = et + timedelta(days=1)
+    for _ in range(10):
+        if is_us_market_open(next_us):
+            break
+        next_us += timedelta(days=1)
+    next_us_date = next_us.strftime("%Y-%m-%d")
+    next_us_weekday = WEEKDAY_KR[next_us.weekday()]
+
     # 현재 시각 컨텍스트
     timing_context = f"""
-[현재 시각 정보 — 반드시 확인]
+[현재 시각 및 시장 상태 — 반드시 반영]
 - 영국 시각: {now.strftime('%Y-%m-%d %H:%M')} ({weekday_today}요일, Europe/London)
+- 미국 동부: {et.strftime('%Y-%m-%d %H:%M')} ET
+- 오늘 미국 증시: {'개장' if us_open_today else '⚠️ 휴장 (공휴일 또는 주말)'}
+- 오늘 한국 증시: {'개장' if kr_open_today else '⚠️ 휴장 (공휴일 또는 주말)'}
+- 미국 최근 거래일: {expected_us_date}
+- 다음 미국 거래일: {next_us_date} ({next_us_weekday}요일)
 - 시황 종류: {'장전 시황' if brief_type == 'premarket' else '마감 시황'}
 - 다음 거래일: {next_trading_day}
 - '내일', '다음날' 표현 대신 반드시 '{next_trading_label}' 형식으로 명시
-- 금요일 마감 시황: '내일' 표현 절대 금지
+- 금요일 마감 시황: '내일' 표현 절대 금지{stale_warning}
 
-[데이터 신뢰성 원칙]
+[휴장/데이터 신뢰성 원칙]
 - [데이터일] 이 오늘({today})과 다른 항목은 ⚠️ 표시되어 있음
+- [데이터일]이 오늘이 아니면 "가장 최근 거래일 데이터"임을 명시할 것
+- 미국이 휴장이었으면 "직전 거래일 마감 기준"으로만 서술, 절대 "오늘 마감"으로 표현 금지
 - ⚠️ stale 데이터는 해당 시장의 당일 결과 서술에 절대 사용 금지
 - stale 데이터가 있는 시장은 반드시 아래 문구로 명시:
   "오늘 [시장명] 데이터 미수집 — 전망에서 제외합니다"

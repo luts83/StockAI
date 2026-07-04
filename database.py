@@ -189,6 +189,12 @@ def save_market_brief(brief: dict) -> str:
     db["market_briefs"].replace_one({"_id": doc_id}, doc, upsert=True)
     return doc_id
 
+def delete_market_brief(doc_id: str) -> int:
+    """시황 삭제 — 잘못 생성된 브리프 제거용. 삭제 개수 반환"""
+    db = get_db()
+    res = db["market_briefs"].delete_one({"_id": doc_id})
+    return res.deleted_count
+
 def get_latest_market_brief(brief_type: str = None) -> dict | None:
     db = get_db()
     query = {"type": brief_type} if brief_type else {}
