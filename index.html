@@ -592,20 +592,34 @@ header {
     </div>
     <div style="padding:0 18px 14px; display:flex;
       justify-content:space-between; align-items:center;">
-      <div id="brief-admin-controls" style="display:none; gap:6px;">
-        <button id="brief-gen-premarket" onclick="generateBrief('premarket')"
+      <div id="brief-admin-controls" style="display:none; gap:6px; flex-wrap:wrap;">
+        <button id="brief-gen-kr_premarket" onclick="generateBrief('kr_premarket')"
           style="font-size:11px; color:var(--yellow); background:none;
           border:1px solid var(--yellow); border-radius:5px;
-          padding:4px 10px; cursor:pointer;
+          padding:4px 10px; cursor:pointer; margin:2px;
           font-family:'JetBrains Mono',monospace;">
-          🔄 장전 생성
+          🇰🇷 한국장전
         </button>
-        <button id="brief-gen-close" onclick="generateBrief('close')"
+        <button id="brief-gen-kr_close" onclick="generateBrief('kr_close')"
+          style="font-size:11px; color:var(--yellow); background:none;
+          border:1px solid var(--yellow); border-radius:5px;
+          padding:4px 10px; cursor:pointer; margin:2px;
+          font-family:'JetBrains Mono',monospace;">
+          🇰🇷 한국마감
+        </button>
+        <button id="brief-gen-us_premarket" onclick="generateBrief('us_premarket')"
           style="font-size:11px; color:var(--muted); background:none;
           border:1px solid var(--border2); border-radius:5px;
-          padding:4px 10px; cursor:pointer;
-          font-family:'JetBrains Mono',monospace; margin-left:6px;">
-          🔄 마감 생성
+          padding:4px 10px; cursor:pointer; margin:2px;
+          font-family:'JetBrains Mono',monospace;">
+          🇺🇸 미국장전
+        </button>
+        <button id="brief-gen-us_close" onclick="generateBrief('us_close')"
+          style="font-size:11px; color:var(--muted); background:none;
+          border:1px solid var(--border2); border-radius:5px;
+          padding:4px 10px; cursor:pointer; margin:2px;
+          font-family:'JetBrains Mono',monospace;">
+          🇺🇸 미국마감
         </button>
       </div>
       <button onclick="showMarketBriefModal()"
@@ -2229,9 +2243,19 @@ const SIGNAL_MAP = {
   NEUTRAL: { icon: "⚪", text: "중립", color: "var(--muted)", bg: "var(--border)" },
 };
 
+const BRIEF_LABELS = {
+  kr_premarket: "🇰🇷 한국장 전 시황",
+  kr_close:     "🇰🇷 한국장 마감 시황",
+  us_premarket: "🇺🇸 미국장 전 시황",
+  us_close:     "🇺🇸 미국장 마감 시황",
+  // 구버전 호환
+  premarket:    "📊 장전 시황",
+  close:        "📈 마감 시황",
+};
+
 function _applyBriefToBanner(brief) {
   const s = SIGNAL_MAP[brief.signal] || SIGNAL_MAP.NEUTRAL;
-  const typeLabel = brief.type === "premarket" ? "📊 장전 시황" : "📈 마감 시황";
+  const typeLabel = BRIEF_LABELS[brief.type] || "📊 시황";
 
   document.getElementById("banner-type-label").textContent  = typeLabel;
   const bannerDate = document.getElementById("banner-date");
@@ -2331,9 +2355,7 @@ function showMarketBriefModal() {
     ? `${briefDate} ${weekdayKr[d.getDay()]}요일`
     : briefDate;
   document.getElementById("modal-brief-title").textContent =
-    marketBriefData.type === "premarket"
-      ? `📊 장전 시황 (${dateLabel})`
-      : `📈 마감 시황 (${dateLabel})`;
+    `${BRIEF_LABELS[marketBriefData.type] || "📊 시황"} (${dateLabel})`;
   document.getElementById("modal-brief-content").innerHTML =
     typeof marked !== "undefined"
       ? marked.parse(marketBriefData.analysis)

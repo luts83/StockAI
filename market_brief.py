@@ -185,6 +185,34 @@ BREADTH_RULE = """
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
+# 시황 4종 — 시장별 장전/마감이 서로를 검증하는 짝 구조
+BRIEF_TYPES = {
+    "kr_premarket": {
+        "label":   "🇰🇷 한국장 전 시황",
+        "market":  "한국",
+        "verify":  "kr_close",       # 직전 한국 마감 시황을 검증
+        "predict": "오늘 한국장",
+    },
+    "kr_close": {
+        "label":   "🇰🇷 한국장 마감 시황",
+        "market":  "한국",
+        "verify":  "kr_premarket",   # 오늘 한국 장전 전망을 검증
+        "predict": "오늘 밤 미국장 관전 포인트",
+    },
+    "us_premarket": {
+        "label":   "🇺🇸 미국장 전 시황",
+        "market":  "미국",
+        "verify":  "us_close",       # 직전 미국 마감 시황을 검증
+        "predict": "오늘 미국장",
+    },
+    "us_close": {
+        "label":   "🇺🇸 미국장 마감 시황",
+        "market":  "미국",
+        "verify":  "us_premarket",   # 오늘 미국 장전 전망을 검증
+        "predict": "내일 한국장",
+    },
+}
+
 
 def _get_tomorrow_events(now) -> str:
     """yfinance로 다음날 주요 실적발표 일정 수집"""
@@ -381,57 +409,28 @@ def _extract_forecast(analysis: str) -> str:
     return analysis[-300:].strip()
 
 
-def _build_prev_context(recent_briefs: list, current_type: str = "") -> str:
-    if not recent_briefs:
+def _build_prev_context(brief_type: str) -> str:
+    """같은 시장의 검증 짝(verify) 시황만 가져와 직전 전망 검증에 사용"""
+    from database import get_recent_market_briefs
+    cfg = BRIEF_TYPES.get(brief_type)
+    if not cfg:
+        return ""
+    verify_type = cfg["verify"]
+
+    prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
+    if not prev_list:
         return ""
 
-    # 시황 타입별 참조 우선순위 (마감→장전 검증 등 올바른 대상 선택)
-    priority = {
-        "premarket":   ["korea_close", "close"],
-        "close":       ["premarket", "korea_close"],
-        "korea_close": ["close", "premarket"],
-    }
-    order    = priority.get(current_type, [])
-    type_map = {b.get("type"): b for b in recent_briefs}
-
-    TYPE_LABEL = {
-        "premarket":   "미국 장전",
-        "close":       "미국 마감",
-        "korea_close": "한국 마감",
-    }
-
-    sections = []
-    for t in order:
-        brief = type_map.get(t)
-        if not brief:
-            continue
-        analysis = brief.get("analysis", "")
-        forecast_text = _extract_forecast(analysis)
-        summary_match = re.search(r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)", analysis)
-        summary_text  = summary_match.group(1).strip() if summary_match else ""
-
-        label = TYPE_LABEL.get(t, t)
-        sections.append(
-            f"\n[직전 시황 — {brief.get('date')} {label} / SIGNAL:{brief.get('signal')}]\n"
-            f"한 줄 요약: {summary_text}\n"
-            f"전망: {forecast_text}\n"
-            f"[직전 시황 끝]"
-        )
-
-    if not sections:
-        # 우선순위에 맞는 타입이 없으면 최신 시황으로 fallback
-        prev  = recent_briefs[0]
-        label = TYPE_LABEL.get(prev.get("type", ""), prev.get("type", ""))
-        return (
-            f"\n[직전 시황 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
-            f"전망: {_extract_forecast(prev.get('analysis', ''))}\n"
-            f"[직전 시황 끝]\n"
-            f"[위 전망을 ### 0. 직전 전망 검증에서 반드시 구체적으로 인용할 것]\n"
-        )
+    prev    = prev_list[0]
+    label   = BRIEF_TYPES.get(verify_type, {}).get("label", verify_type)
+    predict = BRIEF_TYPES.get(verify_type, {}).get("predict", "")
+    forecast_text = _extract_forecast(prev.get("analysis", ""))
 
     return (
-        "\n".join(sections)
-        + "\n[위 직전 시황의 전망을 ### 0. 직전 전망 검증에서 반드시 한 줄 인용할 것]\n"
+        f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
+        f"{forecast_text}\n"
+        f"[이 전망({predict} 예측)을 오늘 실제 결과와 비교해 "
+        f"### 0. 직전 전망 검증에서 한 줄 인용하고 ✅/❌ 판정할 것]\n"
     )
 
 
@@ -445,6 +444,12 @@ async def generate_market_brief(brief_type: str) -> dict:
 
     today         = now.strftime("%Y-%m-%d")
     weekday_today = WEEKDAY_KR[now.weekday()]
+
+    # 시황 타입 검증
+    if brief_type not in BRIEF_TYPES:
+        raise RuntimeError(f"알 수 없는 시황 타입: {brief_type}")
+    cfg           = BRIEF_TYPES[brief_type]
+    target_market = cfg["market"]   # "한국" 또는 "미국"
 
     # 주말이면 생성 안 함
     if now.weekday() >= 5:
@@ -461,9 +466,10 @@ async def generate_market_brief(brief_type: str) -> dict:
     us_status = get_market_status(market_data.get("미국", {}), "미국", now_et)
     kr_status = get_market_status(market_data.get("한국", {}), "한국", now_kst)
 
-    # 마감 시황인데 미국 휴장이면 생성 안 함
-    if brief_type == "close" and us_status["status"] == "CLOSED":
-        raise RuntimeError(f"미국 증시 휴장({us_status['reason']}) — 마감 시황 스킵")
+    # 대상 시장이 휴장이면 생성 안 함
+    status = kr_status if target_market == "한국" else us_status
+    if status["status"] == "CLOSED":
+        raise RuntimeError(f"{target_market} 증시 휴장({status['reason']}) — {brief_type} 스킵")
 
     # 수집된 데이터의 실제 날짜로 today 보정
     # BST 자정 이후 생성 시 제목 날짜와 yfinance 데이터 날짜 불일치 방지
@@ -485,28 +491,28 @@ async def generate_market_brief(brief_type: str) -> dict:
 
     recent = get_recent_market_briefs(limit=6)
 
-    # 한국 지수 stale 여부 확인 → korea_close 브리프 데이터로 대체
+    # 한국 지수 stale 여부 확인 → kr_close 브리프 데이터로 대체
     kr_data = market_data.get("한국", {})
     kr_stale = not kr_data or any(
         v.get("stale") or not v.get("price") for v in kr_data.values()
     )
     if kr_stale:
         korea_brief = next(
-            (b for b in recent if b.get("type") == "korea_close"),
+            (b for b in recent if b.get("type") == "kr_close"),
             None
         )
         if korea_brief and korea_brief.get("market_data", {}).get("한국"):
             market_data["한국"] = korea_brief["market_data"]["한국"]
             print(
-                f"[market_brief] 한국 지수 stale → korea_close 브리프 데이터로 대체 "
+                f"[market_brief] 한국 지수 stale → kr_close 브리프 데이터로 대체 "
                 f"({korea_brief['date']})"
             )
         else:
-            print("[market_brief] 한국 지수 stale + korea_close 브리프 없음 → 데이터 없음 처리")
+            print("[market_brief] 한국 지수 stale + kr_close 브리프 없음 → 데이터 없음 처리")
             market_data["한국"] = {}
 
     data_text = _build_data_text(market_data)
-    prev_context = _build_prev_context(recent, brief_type)
+    prev_context = _build_prev_context(brief_type)
 
     try:
         tomorrow_events = _get_tomorrow_events(now)
@@ -514,40 +520,38 @@ async def generate_market_brief(brief_type: str) -> dict:
         print(f"[market_brief] 내일 일정 수집 실패: {e}")
         tomorrow_events = ""
 
-    # 직전 브리프 적중률 저장 (현재 시장 데이터로 이전 전망 검증)
-    if recent and len(recent) > 0:
-        prev = recent[0]
-        prev_signal = prev.get("signal", "")
-        prev_id = str(prev.get("_id", ""))
-        actual_signal = ""
+    # 적중률 저장 — 마감 시황일 때 같은 시장의 당일 장전 전망을 검증
+    if brief_type in ("kr_close", "us_close"):
+        verify_type = cfg["verify"]   # kr_premarket / us_premarket
+        prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
+        if prev_list:
+            prev = prev_list[0]
+            prev_signal = prev.get("signal", "")
+            if target_market == "한국":
+                idx = market_data.get("한국", {}).get("^KS11", {})
+            else:
+                idx = market_data.get("미국", {}).get("SPY", {})
+            actual_signal = ""
+            if idx and not idx.get("stale"):
+                actual_signal = "BULL" if idx.get("change_pct", 0) > 0 else "BEAR"
 
-        if brief_type == "close":
-            spy = market_data.get("미국", {}).get("SPY", {})
-            if spy and not spy.get("stale"):
-                actual_signal = "BULL" if spy.get("change_pct", 0) > 0 else "BEAR"
-        elif brief_type in ("korea_close", "premarket"):
-            kospi = market_data.get("한국", {}).get("^KS11", {})
-            if kospi and not kospi.get("stale"):
-                actual_signal = "BULL" if kospi.get("change_pct", 0) > 0 else "BEAR"
-
-        if actual_signal and prev_signal:
-            is_correct = (
-                (prev_signal == "BULL" and actual_signal == "BULL") or
-                (prev_signal == "BEAR" and actual_signal == "BEAR") or
-                (prev_signal == "NEUTRAL" and actual_signal == "")
-            )
-            try:
-                from database import save_brief_performance
-                save_brief_performance(
-                    brief_id=prev_id,
-                    predicted=prev_signal,
-                    actual=actual_signal,
-                    is_correct=is_correct,
-                    brief_type=prev.get("type", ""),
-                )
-                print(f"[market_brief] 적중률 저장: {prev_signal}→{actual_signal} {'✅' if is_correct else '❌'}")
-            except Exception as e:
-                print(f"[market_brief] 적중률 저장 실패: {e}")
+            if actual_signal and prev_signal:
+                is_correct = (prev_signal == actual_signal)
+                try:
+                    from database import save_brief_performance
+                    save_brief_performance(
+                        brief_id=str(prev.get("_id", "")),
+                        predicted=prev_signal,
+                        actual=actual_signal,
+                        is_correct=is_correct,
+                        brief_type=prev.get("type", ""),
+                    )
+                    print(
+                        f"[market_brief] 적중률 저장: {prev.get('type')} "
+                        f"{prev_signal}→{actual_signal} {'✅' if is_correct else '❌'}"
+                    )
+                except Exception as e:
+                    print(f"[market_brief] 적중률 저장 실패: {e}")
 
     next_trading_day = _get_next_trading_day(now)
     next_trading_label = (
@@ -556,11 +560,11 @@ async def generate_market_brief(brief_type: str) -> dict:
         else "내일"
     )
 
-    # 미국 마감 시황일 때 korea_close 브리프 한 줄 요약을 별도 컨텍스트로 추출
+    # 미국 마감 시황일 때 kr_close 브리프 한 줄 요약을 별도 컨텍스트로 추출
     kr_close_context = ""
-    if brief_type == "close":
+    if brief_type == "us_close":
         korea_brief = next(
-            (b for b in recent if b.get("type") == "korea_close"),
+            (b for b in recent if b.get("type") == "kr_close"),
             None
         )
         if korea_brief:
@@ -570,7 +574,7 @@ async def generate_market_brief(brief_type: str) -> dict:
             )
             kr_one_line = summary_match.group(1).strip() if summary_match else ""
             kr_close_context = f"""
-[오늘 한국 장 마감 결과 — korea_close 브리프 {korea_brief['date']} 기준]
+[오늘 한국 장 마감 결과 — kr_close 브리프 {korea_brief['date']} 기준]
 {kr_one_line}
 SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 (위 내용을 "{next_trading_label} 한국 시장 전망" 섹션 작성 시 참고할 것)
@@ -628,8 +632,8 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 """
     timing_context += accuracy_context
 
-    if brief_type == "premarket":
-        prompt = f"""오늘 {today}({weekday_today}) 장전 시황을 아래 데이터만 사용해서 작성해줘.
+    if brief_type == "us_premarket":
+        prompt = f"""오늘 {today}({weekday_today}) 미국장 전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
 {BREADTH_RULE}
@@ -704,7 +708,7 @@ DOW    ▲/▼X.XX%  거래량 XXX%
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
-    elif brief_type == "korea_close":
+    elif brief_type == "kr_close":
         prompt = f"""오늘 {today}({weekday_today}) 한국 장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
@@ -765,8 +769,8 @@ KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
-    else:  # closing
-        prompt = f"""오늘 {today}({weekday_today}) 마감 시황을 아래 데이터만 사용해서 작성해줘.
+    elif brief_type == "us_close":
+        prompt = f"""오늘 {today}({weekday_today}) 미국장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
 {BREADTH_RULE}
@@ -838,6 +842,77 @@ DOW         ▲/▼X.XX%  거래량 XXX%
 
 ### 4. 💡 한 줄 요약
 오늘 [가장 중요한 수치] 때문에 {next_trading_label} 한국장은 [핵심 포인트] 주목.
+
+SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
+
+    else:  # kr_premarket
+        prompt = f"""오늘 {today}({weekday_today}) 한국장 전 시황을 아래 데이터만 사용해서 작성해줘.
+
+{STRICT_RULE}
+{BREADTH_RULE}
+{BRIEF_STYLE_RULE}
+{timing_context}
+
+[제공 데이터]
+{data_text}
+{tomorrow_events}
+(내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
+
+[최근 뉴스]
+{news_text}
+
+{prev_context}
+
+## 📊 🇰🇷 한국장 전 시황 · {today} {weekday_today}요일
+
+### 0. 직전 전망 검증
+직전 한국장 마감 시황의 전망을 **한 줄 인용**하고 간밤 미국장 결과로 검증할 것.
+- 전망: "[직전 한국 마감 시황의 관전 포인트 인용]"
+- 결과: ✅ 적중 또는 ❌ 빗나감 — 간밤 미국 실제 수치로 판단
+- 원인: 데이터로 읽히는 원인 1개 (수치 포함)
+- 교훈: 다음 분석에 반영할 점 한 줄
+(직전 시황 없으면 이 섹션 생략)
+
+---
+
+### 1. 🌙 간밤 미국 시장 결과
+서술 (2~3문장): 간밤 미국 증시 마감 흐름과 오늘 한국장에 줄 영향을 서술.
+- SPY vs RSP 갭이 0.5%p 이상이면 시장 폭 해석을 배치
+- 섹터 중 낙폭/상승폭 상위 2개만 지목 (특히 반도체는 삼성/하이닉스와 직결)
+
+S&P500      ▲/▼X.XX%  거래량 XXX%
+NASDAQ      ▲/▼X.XX%  거래량 XXX%
+DOW         ▲/▼X.XX%
+러셀2000     ▲/▼X.XX%
+반도체(SMH)  ▲/▼X.XX%
+📰 관련 뉴스: (데이터 방향과 일치할 때만 1줄)
+
+---
+
+### 2. 📊 시장 심리 한 눈에
+| 지표 | 수치 | 방향 | 오늘 한국장 영향 |
+|------|------|------|-----------------|
+| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
+| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세, 외국인 수급 |
+| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
+
+---
+
+### 3. 🔮 오늘 한국 장 전망
+결론을 먼저 한 문장으로:
+
+**결론: 강세 우위 / 약세 우위 / 중립**
+
+- 강세: [데이터 기반 근거 1줄]
+- 약세: [데이터 기반 근거 1줄]
+
+신뢰도: 상/중/하
+핵심 체크: [오늘 한국장에서 봐야 할 것 1개]
+
+---
+
+### 4. 💡 한 줄 요약
+간밤 [가장 중요한 수치] 때문에 오늘 한국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 

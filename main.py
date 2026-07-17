@@ -30,7 +30,7 @@ from database import (
     get_all_history, get_history_count, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
-    get_recent_market_briefs, delete_market_brief,
+    get_recent_market_briefs, delete_market_brief, migrate_brief_types,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
@@ -705,7 +705,14 @@ async def create_card(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "scheduler_running": scheduler.running}
+    return {
+        "status": "ok",
+        "scheduler_running": scheduler.running,
+        "jobs": [
+            {"id": j.id, "next_run": str(j.next_run_time)}
+            for j in scheduler.get_jobs()
+        ],
+    }
 
 @app.get("/debug/admin")
 def debug_admin():
@@ -722,14 +729,11 @@ def debug_admin():
 
 @app.get("/debug/scheduler")
 async def debug_scheduler():
-    """스케줄러 상태 + 최신 시황 생성 시각 확인"""
+    """스케줄러 상태 + 최신 시황 생성 시각 확인 (4종)"""
     import pytz
     from datetime import datetime
     kst = pytz.timezone("Asia/Seoul")
     now_kst = datetime.now(kst)
-
-    close_brief   = get_latest_market_brief("close")
-    pre_brief     = get_latest_market_brief("premarket")
 
     def _brief_info(b):
         if not b:
@@ -743,13 +747,16 @@ async def debug_scheduler():
         }
 
     return {
-        "server_time_kst":    now_kst.strftime("%Y-%m-%d %H:%M:%S KST"),
-        "scheduler_jobs": [
-            {"name": "마감 시황", "cron": "평일 KST 05:30 (BST 21:30)"},
-            {"name": "장전 시황", "cron": "평일 KST 21:30 (BST 13:30)"},
+        "server_time_kst": now_kst.strftime("%Y-%m-%d %H:%M:%S KST"),
+        "scheduler_running": scheduler.running,
+        "jobs": [
+            {"id": j.id, "next_run": str(j.next_run_time)}
+            for j in scheduler.get_jobs()
         ],
-        "latest_close":     _brief_info(close_brief),
-        "latest_premarket": _brief_info(pre_brief),
+        "latest": {
+            bt: _brief_info(get_latest_market_brief(bt))
+            for bt in ("kr_premarket", "kr_close", "us_premarket", "us_close")
+        },
     }
 
 # ── 시황 엔드포인트 ────────────────────────────────────
@@ -781,11 +788,12 @@ async def brief_accuracy_api():
 
 @app.post("/market/brief/generate")
 async def generate_brief(
-    brief_type: str = "close",
+    brief_type: str = "us_close",
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
-    """수동 시황 생성 (관리자 전용)"""
+    """수동 시황 생성 (관리자 전용)
+    brief_type: kr_premarket | kr_close | us_premarket | us_close"""
     token = stockai_token or (
         authorization.replace("Bearer ", "") if authorization else None
     )
@@ -842,6 +850,10 @@ async def _run_brief(brief_type: str):
 async def startup():
     ensure_indexes()
     print("[db] 인덱스 확인 완료")
+    try:
+        migrate_brief_types()
+    except Exception as e:
+        print(f"[db] 시황 타입 마이그레이션 실패: {e}")
 
 @app.get("/performance/tracker")
 async def get_performance_tracker(
@@ -920,42 +932,39 @@ async def start_scheduler():
     import pytz
     from datetime import datetime
 
-    # 장전 시황 — 정식: UTC 12:30 (BST 13:30)
-    scheduler.add_job(
-        _run_brief,
-        CronTrigger(hour=12, minute=30, day_of_week="mon-fri", timezone="UTC",
-                    start_date="2026-04-18"),
-        args=["premarket"],
-        id="premarket_brief",
-        replace_existing=True,
-    )
-    # 미국 마감 시황: KST 08:30 = UTC 23:30 (평일)
-    # 미국장 마감 KST 06:00(UTC 21:00) 후 yfinance 갱신까지 1.5~2시간 필요
-    # UTC 23:30(KST 08:30)이면 당일 미국 데이터 안정적으로 수집 가능
-    scheduler.add_job(
-        _run_brief,
-        CronTrigger(hour=23, minute=30, day_of_week="mon-fri", timezone="UTC"),
-        args=["close"],
-        id="closing_brief",
-        replace_existing=True,
-    )
-    # 한국 장 마감 시황: KST 18:00 = UTC 09:00 (평일)
-    # KST 16:10(UTC 07:10)은 yfinance 한국 데이터 갱신 전이라 항상 stale
-    # UTC 09:00(KST 18:00)은 yfinance 갱신(UTC 08:00~09:00) 이후라 당일 데이터 보장
-    scheduler.add_job(
-        _run_brief,
-        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone="UTC"),
-        args=["korea_close"],
-        id="korea_close_brief",
-        replace_existing=True,
-    )
-    scheduler.start()
-    print("[scheduler] 스케줄러 시작 — 장전 UTC 12:30 / 한국마감 UTC 09:00 / 미국마감 UTC 23:30")
+    # ⚠️ timezone은 반드시 각 시장 현지 기준 — 서머타임 자동 처리
+    #   (id, hour, minute, timezone)
+    jobs = [
+        ("kr_premarket", 8,  0,  "Asia/Seoul"),        # 한국 개장(09:00) 1시간 전
+        ("kr_close",     16, 0,  "Asia/Seoul"),        # 한국 마감(15:30) 30분 후
+        ("us_premarket", 8,  30, "America/New_York"),  # 미국 개장(09:30) 1시간 전
+        ("us_close",     16, 30, "America/New_York"),  # 미국 마감(16:00) 30분 후
+    ]
+    for job_id, h, m, tz in jobs:
+        scheduler.add_job(
+            _run_brief,
+            CronTrigger(hour=h, minute=m, day_of_week="mon-fri", timezone=tz),
+            args=[job_id],
+            id=job_id,
+            replace_existing=True,
+        )
 
-    # ── 재배포 후 누락된 오늘 시황 자동 보완 ──────────────
+    # 구버전/테스트 job 잔재 제거
+    for old in ("premarket_brief", "closing_brief", "korea_close_brief",
+                "premarket_brief_test"):
+        try:
+            scheduler.remove_job(old)
+        except Exception:
+            pass
+
+    scheduler.start()
+    for j in scheduler.get_jobs():
+        print(f"[scheduler] {j.id} → next: {j.next_run_time}")
+
+    # ── 재배포 후 누락된 오늘 시황 자동 보완 (현지 시각 기준) ──
     from datetime import timezone, timedelta as _td
 
-    def _is_fresh(brief, hours=20):
+    def _is_fresh(brief, hours=14):
         """UTC 기준 지정 시간 이내에 생성된 브리프인지 확인"""
         if not brief:
             return False
@@ -972,33 +981,27 @@ async def start_scheduler():
         except Exception:
             return False
 
-    utc = pytz.utc
-    now_utc = datetime.now(utc)
-    is_weekday = now_utc.weekday() < 5
+    def _mins(dt):
+        return dt.hour * 60 + dt.minute
 
-    if is_weekday:
-        current_minutes = now_utc.hour * 60 + now_utc.minute
+    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+    now_et  = datetime.now(pytz.timezone("America/New_York"))
 
-        # 마감 시황: UTC 23:30 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
-        if current_minutes >= 23 * 60 + 30:
-            today_close = get_latest_market_brief("close")
-            if not _is_fresh(today_close):
-                print("[scheduler] 오늘 마감 시황 누락 감지 → 즉시 생성")
-                asyncio.create_task(_run_brief("close"))
-
-        # 장전 시황: UTC 12:30 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
-        if current_minutes >= 12 * 60 + 30:
-            today_pre = get_latest_market_brief("premarket")
-            if not _is_fresh(today_pre):
-                print("[scheduler] 오늘 장전 시황 누락 감지 → 즉시 생성")
-                asyncio.create_task(_run_brief("premarket"))
-
-        # 한국 마감 시황: UTC 09:00 지났고 20시간 이내 생성된 브리프 없으면 즉시 생성
-        if current_minutes >= 9 * 60 + 0:
-            today_kr = get_latest_market_brief("korea_close")
-            if not _is_fresh(today_kr):
-                print("[scheduler] 오늘 한국 마감 시황 누락 감지 → 즉시 생성")
-                asyncio.create_task(_run_brief("korea_close"))
+    # (brief_type, 현지 now, 정규 생성 분(현지))
+    backfill = [
+        ("kr_premarket", now_kst, 8 * 60),
+        ("kr_close",     now_kst, 16 * 60),
+        ("us_premarket", now_et,  8 * 60 + 30),
+        ("us_close",     now_et,  16 * 60 + 30),
+    ]
+    for bt, now_local, sched_min in backfill:
+        if now_local.weekday() >= 5:
+            continue
+        if _mins(now_local) >= sched_min:
+            latest = get_latest_market_brief(bt)
+            if not _is_fresh(latest):
+                print(f"[scheduler] 오늘 {bt} 시황 누락 감지 → 즉시 생성")
+                asyncio.create_task(_run_brief(bt))
 
 
 if __name__ == "__main__":

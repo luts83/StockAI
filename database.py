@@ -203,17 +203,35 @@ def get_latest_market_brief(brief_type: str = None) -> dict | None:
         sort=[("created_at", -1)],
     )
 
-def get_recent_market_briefs(limit: int = 2) -> list:
-    """최근 시황 N개 반환 (최신순) — 직전 전망 검증에 사용"""
+def get_recent_market_briefs(limit: int = 2, brief_type: str = None) -> list:
+    """최근 시황 N개 반환 (최신순). brief_type 지정 시 해당 타입만 — 전망 검증용.
+    market_data 포함(한국 stale 대체·검증 짝 조회에 필요)."""
     db = get_db()
-    cursor = db["market_briefs"].find(
-        {},
-        {"market_data": 0},
-    ).sort("created_at", -1).limit(limit)
+    q = {"type": brief_type} if brief_type else {}
+    cursor = db["market_briefs"].find(q).sort("created_at", -1).limit(limit)
     items = list(cursor)
     for item in items:
         item["_id"] = str(item["_id"])
     return items
+
+
+def migrate_brief_types() -> dict:
+    """기존 시황 타입 → 4종 체계로 1회 마이그레이션 (idempotent).
+    premarket→us_premarket, close→us_close, korea_close→kr_close"""
+    db = get_db()
+    mapping = {
+        "premarket":   "us_premarket",
+        "close":       "us_close",
+        "korea_close": "kr_close",
+    }
+    result = {}
+    for old, new in mapping.items():
+        r = db["market_briefs"].update_many({"type": old}, {"$set": {"type": new}})
+        if r.modified_count:
+            result[f"{old}→{new}"] = r.modified_count
+    if result:
+        print(f"[db] 시황 타입 마이그레이션: {result}")
+    return result
 
 def get_market_briefs(limit: int = 10) -> list:
     db = get_db()
