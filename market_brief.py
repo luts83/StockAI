@@ -28,10 +28,28 @@ def _latest_data_date(region_data: dict):
     return max(dates) if dates else None
 
 
+# 시장별 개장/마감 시각 (현지 기준)
+MARKET_HOURS = {
+    "한국": {"open": (9, 0),  "close": (15, 30)},
+    "미국": {"open": (9, 30), "close": (16, 0)},
+}
+
+
+def _is_after_close(region: str, now_local) -> bool:
+    """해당 시장이 오늘 마감했는지 (마감 30분 후부터 True)"""
+    h, m = MARKET_HOURS[region]["close"]
+    close_min = h * 60 + m + 30          # 마감 + 30분 버퍼
+    now_min   = now_local.hour * 60 + now_local.minute
+    return now_min >= close_min
+
+
 def get_market_status(region_data: dict, region: str, now_local) -> dict:
     """휴장 판정 — 하드코딩 리스트 없이 데이터에서 추론 + 캘린더 교차검증
     region_data: market_data["미국"] 또는 market_data["한국"]
     now_local:   해당 시장 현지 시각 (미국=ET, 한국=KST)
+
+    ⚠️ "오늘 데이터 없음 = 휴장" 추론은 장 마감 이후에만 유효.
+       장 시작 전(PRE_OPEN)엔 오늘 데이터가 없는 게 정상이므로 별도 처리한다.
     """
     today = now_local.strftime("%Y-%m-%d")
 
@@ -55,7 +73,7 @@ def get_market_status(region_data: dict, region: str, now_local) -> dict:
 
     latest = _latest_data_date(region_data)
 
-    # 3) 오늘 데이터가 있으면 개장
+    # 3) 오늘 데이터가 있으면 개장 확정
     if latest == today:
         return {
             "status": "OPEN",
@@ -64,7 +82,25 @@ def get_market_status(region_data: dict, region: str, now_local) -> dict:
             "confidence": "확정",
         }
 
-    # 4) 평일인데 오늘 데이터 없음 → 휴장 추정, 라이브러리로 교차검증
+    # 4) ⚠️ 아직 마감 전이면 오늘 데이터 없는 게 정상 → 휴장 추론 금지
+    if not _is_after_close(region, now_local):
+        cal_open = _verify_with_calendar(region, today)
+        if cal_open is False:
+            return {
+                "status": "CLOSED",
+                "reason": "공휴일(캘린더)",
+                "last_trading_day": latest,
+                "confidence": "확정",
+            }
+        # True 또는 None → 개장일로 간주하고 진행
+        return {
+            "status": "PRE_OPEN",
+            "reason": "장 시작 전 (오늘 데이터 미생성은 정상)",
+            "last_trading_day": latest,
+            "confidence": "확정" if cal_open is True else "추정",
+        }
+
+    # 5) 마감 후인데 오늘 데이터 없음 → 여기서만 휴장 추론이 유효
     cal_open = _verify_with_calendar(region, today)
     if cal_open is False:
         return {
@@ -74,10 +110,10 @@ def get_market_status(region_data: dict, region: str, now_local) -> dict:
             "confidence": "확정",   # 데이터+캘린더 일치
         }
     if cal_open is True:
-        # 불일치 — 캘린더는 개장인데 데이터가 없음
+        # 불일치 — 캘린더는 개장인데 마감 후에도 데이터가 없음
         return {
             "status": "UNKNOWN",
-            "reason": "캘린더상 개장일이나 데이터 없음 — 수집 실패 또는 신규 휴장일",
+            "reason": "캘린더상 개장일이나 마감 후에도 데이터 없음 — 수집 실패 또는 신규 휴장일",
             "last_trading_day": latest,
             "confidence": "불일치",
         }
@@ -629,6 +665,10 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 5. 데이터의 [데이터일]이 오늘이 아니면 반드시 "N월 N일 마감 기준"으로 명시
    절대 과거 거래일을 "오늘 마감"으로 표현하지 말 것
 6. "다음 거래일 (MM/DD 요일)" 반복 표기 금지 — 처음 1회만, 이후 "다음 거래일"로만
+7. status=PRE_OPEN → "장 시작 전"으로 서술. "휴장"/"데이터 미수집"으로 표현 금지
+   ✅ "오늘 {target_market}장은 아직 개장 전입니다. 아래는 직전 거래일 마감 기준입니다."
+   ❌ "{target_market} 데이터 미수집" / "{target_market} 휴장"
+8. status=UNKNOWN → "데이터 확인 불가 (수집 실패 또는 신규 휴장 가능)"로 명시하고 단정 금지
 """
     timing_context += accuracy_context
 
