@@ -6,8 +6,22 @@ import pytz
 from news import fetch_macro_news, format_macro_news_for_brief
 
 # ── 휴장 판정 (하드코딩 X — 데이터 추론 + 라이브러리 교차검증) ──
+# 보정 레이어: exchange_calendars가 session=True로 '잘못' 보고하는 실제 휴장일만 교정.
+# 전체 휴장일 목록이 아니라 '라이브러리 누락분'만 등재한다(장 시작 전 오탐 방지).
+CALENDAR_PATCH = {
+    "한국": {
+        "2026-06-03",   # 제9회 전국동시지방선거 (임시공휴일) — 라이브러리 누락
+        "2026-07-17",   # 제헌절 (2026 공휴일 재지정) — 라이브러리 누락
+    },
+    "미국": set(),
+}
+
+
 def _verify_with_calendar(region: str, date_str: str):
-    """exchange_calendars 교차검증. 모르면 None."""
+    """exchange_calendars 교차검증. 모르면 None. 보정 레이어가 최우선."""
+    # 라이브러리가 놓친 휴장일 — 무조건 휴장(False)으로 교정
+    if date_str in CALENDAR_PATCH.get(region, set()):
+        return False
     try:
         import exchange_calendars as xcals
         import pandas as pd
