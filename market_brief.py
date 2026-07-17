@@ -125,6 +125,13 @@ def get_market_status(region_data: dict, region: str, now_local) -> dict:
         }
     if cal_open is True:
         # 불일치 — 캘린더는 개장인데 마감 후에도 데이터가 없음
+        # ⚠️ 자가 진단: CALENDAR_PATCH에 없는 신규 휴장일 의심 신호.
+        #   한 사이클 안에 사람이 발견 → PATCH에 추가하는 자가 보정 루프의 핵심.
+        print(
+            f"⚠️ [calendar] {region} {today}: 라이브러리 미반영 휴장일 의심. "
+            f"마감 후인데 데이터 없음 + 캘린더는 개장. "
+            f"KRX 확인 후 CALENDAR_PATCH 추가 검토 필요"
+        )
         return {
             "status": "UNKNOWN",
             "reason": "캘린더상 개장일이나 마감 후에도 데이터 없음 — 수집 실패 또는 신규 휴장일",
