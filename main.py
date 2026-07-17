@@ -825,27 +825,17 @@ async def delete_brief(
 # ── 스케줄러 ───────────────────────────────────────────
 
 async def _run_brief(brief_type: str):
-    import pytz
-    from datetime import datetime
-    from market_brief import is_us_market_open, is_kr_market_open
-
-    now_et  = datetime.now(pytz.timezone("America/New_York"))
-    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-
-    # 휴장일/주말이면 생성 스킵
-    if brief_type in ("close", "premarket") and not is_us_market_open(now_et):
-        print(f"[scheduler] 미국 휴장/주말({now_et.strftime('%Y-%m-%d')}) — {brief_type} 스킵")
-        return
-    if brief_type == "korea_close" and not is_kr_market_open(now_kst):
-        print(f"[scheduler] 한국 휴장/주말({now_kst.strftime('%Y-%m-%d')}) — korea_close 스킵")
-        return
-
+    # 주말/휴장 판정은 generate_market_brief 내부에서 데이터 기반으로 처리 후
+    # RuntimeError로 던지므로, 여기서는 스킵과 오류만 구분해서 로깅한다.
     try:
         brief  = await generate_market_brief(brief_type)
         doc_id = save_market_brief(brief)
-        print(f"[scheduler] 시황 생성 완료: {doc_id}")
+        print(f"[scheduler] {brief_type} 시황 생성 완료: {doc_id} (SIGNAL:{brief['signal']})")
+    except RuntimeError as e:
+        # 휴장/주말/데이터 부족은 정상 스킵 — 에러 아님
+        print(f"[scheduler] {brief_type} 스킵: {e}")
     except Exception as e:
-        print(f"[scheduler] 시황 생성 오류: {e}")
+        print(f"[scheduler] {brief_type} 오류: {e}")
 
 
 @app.on_event("startup")
