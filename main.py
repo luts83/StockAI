@@ -759,6 +759,90 @@ async def debug_scheduler():
         },
     }
 
+
+@app.get("/debug/briefs")
+async def debug_briefs(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """관찰용 읽기 전용 — 4종 시황의 생성시각 vs 데이터 신선도 대조.
+    각 타입 최근 5건. 기존 로직/데이터는 전혀 변경하지 않음."""
+    token = stockai_token or (
+        authorization.replace("Bearer ", "") if authorization else None
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    user = decode_jwt(token)
+    if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
+        raise HTTPException(status_code=403, detail="관리자 전용")
+
+    import pytz
+    from datetime import datetime as _dt
+    kst = pytz.timezone("Asia/Seoul")
+    bst = pytz.timezone("Europe/London")
+
+    LABELS = {
+        "kr_premarket": "🇰🇷 한국장 전 시황",
+        "kr_close":     "🇰🇷 한국장 마감 시황",
+        "us_premarket": "🇺🇸 미국장 전 시황",
+        "us_close":     "🇺🇸 미국장 마감 시황",
+    }
+
+    def _fmt_dual(created: str):
+        """created_at(ISO) → BST/KST 둘 다 표기"""
+        if not created:
+            return {"raw": None, "bst": None, "kst": None}
+        try:
+            t = _dt.fromisoformat(created.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = pytz.utc.localize(t)
+            return {
+                "raw": created,
+                "bst": t.astimezone(bst).strftime("%Y-%m-%d %H:%M %Z"),
+                "kst": t.astimezone(kst).strftime("%Y-%m-%d %H:%M %Z"),
+            }
+        except Exception:
+            return {"raw": created, "bst": None, "kst": None}
+
+    def _data_last_date(doc: dict, brief_type: str):
+        """그 시황이 참조한 시장 데이터의 실제 최신 거래일 (신선도 확인용)"""
+        md = doc.get("market_data") or {}
+        region = "한국" if brief_type.startswith("kr_") else "미국"
+        out = {}
+        for reg, reg_data in md.items():
+            dates = [
+                d.get("last_date", "")[:10]
+                for d in reg_data.values()
+                if isinstance(d, dict) and d.get("last_date")
+            ]
+            if dates:
+                out[reg] = max(dates)
+        return {"target_region": region,
+                "target": out.get(region),
+                "all_regions": out}
+
+    result = {}
+    for bt in ("kr_premarket", "kr_close", "us_premarket", "us_close"):
+        docs = get_recent_market_briefs(limit=5, brief_type=bt)
+        rows = []
+        for d in docs:
+            dld = _data_last_date(d, bt)
+            rows.append({
+                "type":          bt,
+                "label":         LABELS[bt],
+                "date":          d.get("date"),
+                "created_at":    _fmt_dual(d.get("created_at", "")),
+                "signal":        d.get("signal"),
+                "status":        d.get("status"),   # 현재 문서엔 미저장 → 보통 None
+                "data_last_date": dld,
+                "_id":           str(d.get("_id", "")),
+            })
+        result[bt] = rows
+
+    return {"count_per_type": {k: len(v) for k, v in result.items()},
+            "briefs": result}
+
+
 # ── 시황 엔드포인트 ────────────────────────────────────
 
 @app.get("/market/brief/latest")
