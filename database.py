@@ -258,20 +258,35 @@ def save_brief_performance(brief_id: str, predicted: str, actual: str,
         "created_at": datetime.utcnow().isoformat(),
     })
 
-def get_brief_accuracy(limit: int = 20) -> dict:
-    """최근 N회 시황 적중률 계산"""
+def get_brief_accuracy(limit: int = 20, market: str = None) -> dict:
+    """최근 N회 시황 적중률 계산.
+    market="미국"/"한국" 지정 시 해당 시장(us_/kr_) 전망만 집계 → 시장별 적중률."""
+    q = {}
+    if market == "미국":
+        q = {"brief_type": {"$regex": "^us_"}}
+    elif market == "한국":
+        q = {"brief_type": {"$regex": "^kr_"}}
+
     records = list(
         get_db()["brief_performance"]
-        .find({}, {"_id": 0})
+        .find(q, {"_id": 0})
         .sort("created_at", -1)
         .limit(limit)
     )
     if not records:
         return {"total": 0, "correct": 0, "accuracy_pct": 0, "recent_errors": []}
 
+    def _mkt(bt: str) -> str:
+        if bt.startswith("us_"):
+            return "🇺🇸"
+        if bt.startswith("kr_"):
+            return "🇰🇷"
+        return ""
+
     correct = sum(1 for r in records if r["is_correct"])
     errors  = [
-        f"{r['predicted']}→실제{r['actual']}"
+        f"{r.get('created_at', '')[:10]} {_mkt(r.get('brief_type', ''))} "
+        f"{r['predicted']}→실제{r['actual']}".strip()
         for r in records if not r["is_correct"]
     ][:3]
 

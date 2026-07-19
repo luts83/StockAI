@@ -590,7 +590,14 @@ async def generate_market_brief(brief_type: str) -> dict:
                 idx = market_data.get("미국", {}).get("SPY", {})
             actual_signal = ""
             if idx and not idx.get("stale"):
-                actual_signal = "BULL" if idx.get("change_pct", 0) > 0 else "BEAR"
+                chg = idx.get("change_pct", 0) or 0
+                # 중립 밴드 ±0.3%: 보합은 NEUTRAL로 판정 → NEUTRAL 전망도 정당하게 채점
+                if abs(chg) < 0.3:
+                    actual_signal = "NEUTRAL"
+                elif chg > 0:
+                    actual_signal = "BULL"
+                else:
+                    actual_signal = "BEAR"
 
             if actual_signal and prev_signal:
                 is_correct = (prev_signal == actual_signal)
@@ -639,7 +646,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
     # 적중률 자기보정 컨텍스트
     from database import get_brief_accuracy
-    accuracy = get_brief_accuracy(limit=20)
+    accuracy = get_brief_accuracy(limit=20, market=target_market)
     accuracy_context = ""
     if accuracy["total"] >= 3:
         error_text = (
@@ -648,7 +655,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
             else "없음"
         )
         accuracy_context = f"""
-[최근 시황 적중률 — 자기보정 참고]
+[최근 {target_market} 시황 적중률 — 자기보정 참고 / 판정 기준: 실제 지수 등락률 ±0.3%는 NEUTRAL]
 - 최근 {accuracy['total']}회 중 {accuracy['correct']}회 적중 ({accuracy['accuracy_pct']}%)
 - 반복 오류 패턴: {error_text}
 - 위 오류 패턴이 있으면 이번 전망에서 반대 방향 가중치를 높일 것
