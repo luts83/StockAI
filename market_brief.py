@@ -333,24 +333,27 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
                 time.sleep(2 ** attempt)
                 continue
 
-            # 타임존 정규화 (naive → UTC)
+            # 타임존 정규화 — 거래소 현지 기준으로 날짜를 산출해야 하루 밀림 방지
+            #   (한국 지수는 KST 자정 인덱스를 UTC로 바꾸면 전날로 밀려 off-by-one 발생)
+            ex_tz = "Asia/Seoul" if ticker.startswith("^K") else "America/New_York"
             if hist.index.tz is None:
-                hist.index = hist.index.tz_localize("UTC")
-            hist.index = hist.index.tz_convert("UTC")
-
-            now_utc = datetime.now(timezone.utc)
-            today_utc = now_utc.date()
-
-            # 마감 확정 시각 판단 (장중 불완전 데이터 제외용)
-            # 한국 지수: KST 15:30 마감 = UTC 06:30 → UTC 07:00 이후 마감 확정
-            # 미국 지수: ET 16:00 마감 = UTC 20:00~21:00 → UTC 21:00 이후 마감 확정
-            if ticker.startswith("^K"):
-                market_closed = now_utc.hour >= 7
+                # naive 일봉은 거래소 현지 거래일로 간주
+                hist.index = hist.index.tz_localize(ex_tz)
             else:
-                market_closed = now_utc.hour >= 21
+                hist.index = hist.index.tz_convert(ex_tz)
+
+            now_ex   = datetime.now(pytz.timezone(ex_tz))
+            today_ex = now_ex.date()
+
+            # 마감 확정 시각 판단 (장중 불완전 데이터 제외용) — 현지 기준
+            # 한국: KST 15:30 마감 → 16시 이후 확정 / 미국: ET 16:00 마감 → 17시 이후 확정
+            if ticker.startswith("^K"):
+                market_closed = now_ex.hour >= 16
+            else:
+                market_closed = now_ex.hour >= 17
 
             last_dt = hist.index[-1].date()
-            if last_dt == today_utc and not market_closed:
+            if last_dt == today_ex and not market_closed:
                 hist = hist.iloc[:-1]  # 오늘 장중 불완전 데이터 제외
                 if len(hist) < 2:
                     time.sleep(2 ** attempt)
@@ -362,12 +365,7 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
 
             prev_close = float(hist["Close"].iloc[-2])
             current    = float(hist["Close"].iloc[-1])
-            last_date  = hist.index[-1]
-
-            if hasattr(last_date, "date"):
-                ld = last_date.date()
-            else:
-                ld = last_date.to_pydatetime().date()
+            ld = hist.index[-1].date()   # 거래소 현지 거래일
             weekday_str = WEEKDAY_KR[ld.weekday()]
             date_label  = f"{ld.strftime('%Y-%m-%d')}({weekday_str})"
 
@@ -376,7 +374,7 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
             avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
             vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
 
-            days_old = (today_utc - ld).days
+            days_old = (today_ex - ld).days
             stale = days_old > 1
 
             print(
@@ -528,23 +526,11 @@ async def generate_market_brief(brief_type: str) -> dict:
     if status["status"] == "CLOSED":
         raise RuntimeError(f"{target_market} 증시 휴장({status['reason']}) — {brief_type} 스킵")
 
-    # 수집된 데이터의 실제 날짜로 today 보정
-    # BST 자정 이후 생성 시 제목 날짜와 yfinance 데이터 날짜 불일치 방지
-    all_dates = []
-    for region_data in market_data.values():
-        for d in region_data.values():
-            if not d.get("stale") and d.get("last_date"):
-                date_str = d["last_date"].split("(")[0]
-                all_dates.append(date_str)
-    if all_dates:
-        from collections import Counter
-        from datetime import datetime as _dt
-        data_today = Counter(all_dates).most_common(1)[0][0]
-        if data_today != today:
-            print(f"[market_brief] 날짜 보정: BST {today} → 데이터 {data_today}")
-            today = data_today
-            _d = _dt.strptime(today, "%Y-%m-%d")
-            weekday_today = WEEKDAY_KR[_d.weekday()]
+    # 시황 date = 대상 시장 현지 실행일 (kr_*=KST, us_*=ET)
+    # 실행 타임존/데이터 지연과 무관하게 "무슨 거래일 시황이냐"를 정확히 표기
+    now_target    = now_kst if target_market == "한국" else now_et
+    today         = now_target.strftime("%Y-%m-%d")
+    weekday_today = WEEKDAY_KR[now_target.weekday()]
 
     recent = get_recent_market_briefs(limit=6)
 
