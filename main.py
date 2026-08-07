@@ -553,24 +553,27 @@ async def compare_analyses(
 === 분석 A ({doc_a['created_at'][:10]}) ===
 지표: RSI {doc_a['indicators'].get('rsi')}, MACD {doc_a['indicators'].get('macd')}
 시그널: {doc_a.get('signal')}
-{doc_a['analysis'][:1500]}
+{doc_a['analysis'][:4000]}
 
 === 분석 B ({doc_b['created_at'][:10]}) ===
 지표: RSI {doc_b['indicators'].get('rsi')}, MACD {doc_b['indicators'].get('macd')}
 시그널: {doc_b.get('signal')}
-{doc_b['analysis'][:1500]}
+{doc_b['analysis'][:4000]}
 
 ## 1. 주요 지표 변화
 ## 2. 추세 변화
 ## 3. 예측 vs 실제
-## 4. 현재 시점 시사점
+## 4. 현재 시점 시사점 (시나리오 A/B/C + 최종 결론까지)
 
-반드시 모든 섹션을 완성해서 출력할 것. 장기 전략까지 빠짐없이 작성."""
+규칙:
+- 반드시 위 4개 섹션을 끝까지 완성할 것. 중간에 끊지 말 것.
+- 표와 bullet 위주로 간결하게. 같은 내용 반복 금지.
+- 섹션 4는 시나리오별 대응 + 한 줄 최종 결론으로 끝낼 것."""
 
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=4000,
+            max_tokens=8000,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for text in stream.text_stream:
