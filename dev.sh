@@ -1,24 +1,23 @@
-#!/bin/bash
-# 백엔드(FastAPI auto-reload) + 프론트(livereload) 동시 실행
-# 사용: ./dev.sh  또는  bash dev.sh
+#!/usr/bin/env bash
+# 백엔드(FastAPI) 실행 — venv 자동 사용
+# 사용: ./dev.sh
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
-cleanup() {
-  echo ""
-  echo "서버 종료 중..."
-  kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
-  exit 0
-}
-trap cleanup SIGINT SIGTERM
+if [[ -f .venv/bin/activate ]]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+else
+  echo "ERROR: .venv 없음 → 먼저 ./setup.sh 실행" >&2
+  exit 1
+fi
 
-echo "🚀 백엔드  → http://localhost:8000"
-echo "🌐 프론트  → http://127.0.0.1:5500/index.html"
+if [[ ! -f .env ]]; then
+  echo "ERROR: .env 없음 → .env.example 참고해 생성하거나 다른 PC에서 복사" >&2
+  exit 1
+fi
+
+echo "백엔드 → http://127.0.0.1:8000"
 echo "Ctrl+C 로 종료"
-echo "-------------------------------------------"
-
-python main.py &
-BACKEND_PID=$!
-
-python serve.py &
-FRONTEND_PID=$!
-
-wait
+exec python main.py

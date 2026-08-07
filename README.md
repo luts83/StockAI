@@ -30,17 +30,46 @@ FastAPI · yfinance · pandas-ta · matplotlib · feedparser · Anthropic API ·
 ## Quick start (local)
 
 ```bash
-git clone https://github.com/luts83/StockAI.git
+git clone git@github.com:luts83/StockAI.git
 cd StockAI
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# .env 에 ANTHROPIC_API_KEY 설정
+./setup.sh                 # venv + deps + Playwright + .env 생성
+# .env 에 키 채우기 (아래 Environment / Multi-machine 참고)
+source .venv/bin/activate
 python main.py
 ```
 
 브라우저에서 **http://127.0.0.1:8000/** 를 열면 UI가 표시됩니다 (API와 동일 출처).
+
+---
+
+## Multi-machine workflow
+
+어느 PC에서든 같은 방식으로 이어서 작업합니다.
+
+| 동기화 대상 | 방법 |
+|-------------|------|
+| 코드 | `git push` / `git pull` (GitHub) |
+| 시크릿 (`.env`) | git에 올리지 않음 → 기존 PC에서 복사하거나 1Password 등에 보관 후 복원 |
+| Python/의존성 | 새 PC에서 `./setup.sh` 한 번 |
+| DB 데이터 | MongoDB Atlas 클라우드 → 별도 동기화 불필요 |
+
+**새 PC 체크리스트**
+
+1. SSH 키를 GitHub에 등록 (`ssh-keygen -t ed25519` → GitHub → Settings → SSH keys)
+2. `git clone git@github.com:luts83/StockAI.git && cd StockAI`
+3. `./setup.sh`
+4. 다른 PC의 `.env`를 이 폴더에 복사 (또는 `.env.example` 기준으로 키 입력)
+5. `source .venv/bin/activate && python main.py`
+
+**작업 끝나기 전 / 다른 PC로 넘어가기 전**
+
+```bash
+git status
+git add -A && git commit -m "..."
+git push
+```
+
+도착 PC에서는 `git pull` 후 바로 이어서 작업하면 됩니다.
 
 ---
 
@@ -54,6 +83,7 @@ StockAI/
 ├── news.py          # 뉴스·제목 번역
 ├── ai.py            # Claude Vision 분석
 ├── index.html       # 프론트엔드
+├── setup.sh         # 로컬 환경 원샷 세팅
 ├── requirements.txt
 ├── .env.example
 ├── render.yaml      # Render 배포 예시
@@ -99,9 +129,14 @@ StockAI/
 | Variable | 설명 |
 |----------|------|
 | `ANTHROPIC_API_KEY` | [Anthropic Console](https://console.anthropic.com) 에서 발급 |
+| `MONGODB_URI` | MongoDB Atlas connection string |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth |
+| `SECRET_KEY` | JWT 서명용 시크릿 |
+| `ADMIN_EMAIL` | 관리자 이메일 (콤마 구분 가능) |
+| `INSTAGRAM_HANDLE` | 카드용 핸들 (선택) |
 | `PORT` | 배포 플랫폼이 자동 설정 (로컬 기본 8000) |
 
-`.env`는 절대 커밋하지 마세요.
+`.env`는 절대 커밋하지 마세요. 템플릿은 `.env.example`을 보세요.
 
 ---
 
