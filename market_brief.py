@@ -50,11 +50,24 @@ MARKET_HOURS = {
 
 
 def _is_after_close(region: str, now_local) -> bool:
-    """해당 시장이 오늘 마감했는지 (마감 30분 후부터 True)"""
+    """해당 시장이 오늘 마감했는지 (마감 30분 후부터 True).
+    스케줄러(kr_close 16:00 KST / us_close 16:30 ET)와 동일 기준."""
     h, m = MARKET_HOURS[region]["close"]
     close_min = h * 60 + m + 30          # 마감 + 30분 버퍼
     now_min   = now_local.hour * 60 + now_local.minute
     return now_min >= close_min
+
+
+def _has_today_session_data(region_data: dict, today: str) -> bool:
+    """해당 시장 데이터에 오늘(현지) 거래일 봉 + 유효 price가 있는지"""
+    if not region_data:
+        return False
+    if _latest_data_date(region_data) != today:
+        return False
+    return any(
+        (d.get("last_date") or "").startswith(today) and d.get("price") is not None
+        for d in region_data.values()
+    )
 
 
 def get_market_status(region_data: dict, region: str, now_local) -> dict:
@@ -345,12 +358,10 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
             now_ex   = datetime.now(pytz.timezone(ex_tz))
             today_ex = now_ex.date()
 
-            # 마감 확정 시각 판단 (장중 불완전 데이터 제외용) — 현지 기준
-            # 한국: KST 15:30 마감 → 16시 이후 확정 / 미국: ET 16:00 마감 → 17시 이후 확정
-            if ticker.startswith("^K"):
-                market_closed = now_ex.hour >= 16
-            else:
-                market_closed = now_ex.hour >= 17
+            # 마감 확정 = 스케줄/상태판정과 동일 (_is_after_close: 마감+30분)
+            # 이전: 미국 hour>=17 이라 us_close(16:30 ET)가 오늘 봉을 버려 전날 시황이 저장됨
+            region = "한국" if ticker.startswith("^K") else "미국"
+            market_closed = _is_after_close(region, now_ex)
 
             last_dt = hist.index[-1].date()
             if last_dt == today_ex and not market_closed:
@@ -506,9 +517,13 @@ async def generate_market_brief(brief_type: str) -> dict:
     cfg           = BRIEF_TYPES[brief_type]
     target_market = cfg["market"]   # "한국" 또는 "미국"
 
-    # 주말이면 생성 안 함
-    if now.weekday() >= 5:
-        raise RuntimeError(f"주말({weekday_today}요일) — 시황 생성 안 함")
+    # 주말은 대상 시장 현지 요일 기준 (BST 금요일 밤 ≠ 한국 토요일 혼선 방지)
+    now_target = now_kst if target_market == "한국" else now_et
+    if now_target.weekday() >= 5:
+        wd = WEEKDAY_KR[now_target.weekday()]
+        raise RuntimeError(f"주말({wd}요일) — 시황 생성 안 함")
+
+    import asyncio
 
     market_data = get_market_data()
     macro_news = fetch_macro_news(max_per_source=3)
@@ -516,6 +531,34 @@ async def generate_market_brief(brief_type: str) -> dict:
 
     if not _has_minimum_data(market_data):
         raise RuntimeError("핵심 지수 데이터 수집 실패")
+
+    # 시황 date = 대상 시장 현지 실행일 (kr_*=KST, us_*=ET)
+    today         = now_target.strftime("%Y-%m-%d")
+    weekday_today = WEEKDAY_KR[now_target.weekday()]
+    region_key    = "한국" if target_market == "한국" else "미국"
+
+    # 마감 시황: 오늘 봉이 없으면 재수집 후, 그래도 없으면 저장하지 않음
+    # (전날 데이터로 "수집 실패" 리포트를 쓰는 사고 방지)
+    if brief_type in ("us_close", "kr_close") and _is_after_close(region_key, now_target):
+        for attempt in range(3):
+            if _has_today_session_data(market_data.get(region_key, {}), today):
+                break
+            if attempt < 2:
+                print(
+                    f"[market_brief] {brief_type}: 오늘({today}) {region_key} 봉 미확정 "
+                    f"— 45초 후 재수집 ({attempt + 1}/2)"
+                )
+                await asyncio.sleep(45)
+                now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+                now_et  = datetime.now(pytz.timezone("America/New_York"))
+                now_target = now_kst if target_market == "한국" else now_et
+                today = now_target.strftime("%Y-%m-%d")
+                market_data = get_market_data()
+        else:
+            raise RuntimeError(
+                f"{brief_type}: 오늘({today}) {region_key} 마감 데이터 미확정 — "
+                f"잘못된 시황 저장 방지"
+            )
 
     # 시장 상태 판정 (하드코딩 없이 데이터 추론 + 캘린더 교차검증)
     us_status = get_market_status(market_data.get("미국", {}), "미국", now_et)
@@ -525,12 +568,6 @@ async def generate_market_brief(brief_type: str) -> dict:
     status = kr_status if target_market == "한국" else us_status
     if status["status"] == "CLOSED":
         raise RuntimeError(f"{target_market} 증시 휴장({status['reason']}) — {brief_type} 스킵")
-
-    # 시황 date = 대상 시장 현지 실행일 (kr_*=KST, us_*=ET)
-    # 실행 타임존/데이터 지연과 무관하게 "무슨 거래일 시황이냐"를 정확히 표기
-    now_target    = now_kst if target_market == "한국" else now_et
-    today         = now_target.strftime("%Y-%m-%d")
-    weekday_today = WEEKDAY_KR[now_target.weekday()]
 
     recent = get_recent_market_briefs(limit=6)
 
@@ -672,7 +709,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 1. status=CLOSED → "휴장"으로 서술. "데이터 미수집" 표현 절대 금지
    ❌ "한국 데이터 미수집으로 파악 불가"
    ✅ "한국 증시는 {kr_status.get('reason', '휴장')}으로 거래가 없었습니다"
-2. status=UNKNOWN → 그때만 "데이터 수집 실패"로 표기
+2. status=UNKNOWN → "오늘 마감 데이터 미확정"으로만 표기. 제공된 전일 수치를 오늘 마감처럼 쓰지 말 것
 3. 휴장인 시장은 전망 검증 대상에서 제외하고 그 사실을 명시
    ✅ "직전 전망은 한국 증시 휴장으로 검증 대상이 아닙니다"
 4. 신뢰도=추정/불일치이면 "휴장으로 추정됩니다 (확인 필요)"로 표기
@@ -682,7 +719,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 7. status=PRE_OPEN → "장 시작 전"으로 서술. "휴장"/"데이터 미수집"으로 표현 금지
    ✅ "오늘 {target_market}장은 아직 개장 전입니다. 아래는 직전 거래일 마감 기준입니다."
    ❌ "{target_market} 데이터 미수집" / "{target_market} 휴장"
-8. status=UNKNOWN → "데이터 확인 불가 (수집 실패 또는 신규 휴장 가능)"로 명시하고 단정 금지
+8. status=UNKNOWN → 단정 금지. "수집 실패로 전망 불가"처럼 장황하게 쓰지 말고 전일 기준만 짧게 참고
 """
     timing_context += accuracy_context
 

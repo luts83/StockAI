@@ -919,7 +919,7 @@ async def delete_brief(
 
 # ── 스케줄러 ───────────────────────────────────────────
 
-async def _run_brief(brief_type: str):
+async def _run_brief(brief_type: str, _retries: int = 1):
     # 주말/휴장 판정은 generate_market_brief 내부에서 데이터 기반으로 처리 후
     # RuntimeError로 던지므로, 여기서는 스킵과 오류만 구분해서 로깅한다.
     try:
@@ -929,6 +929,11 @@ async def _run_brief(brief_type: str):
     except RuntimeError as e:
         # 휴장/주말/데이터 부족은 정상 스킵 — 에러 아님
         print(f"[scheduler] {brief_type} 스킵: {e}")
+        # 마감 봉 미확정이면 10분 후 1회 재시도 (Yahoo 지연 대비)
+        if _retries > 0 and "마감 데이터 미확정" in str(e):
+            print(f"[scheduler] {brief_type} 10분 후 재시도")
+            await asyncio.sleep(600)
+            await _run_brief(brief_type, _retries=_retries - 1)
     except Exception as e:
         print(f"[scheduler] {brief_type} 오류: {e}")
 
