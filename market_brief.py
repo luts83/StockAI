@@ -331,10 +331,10 @@ def _get_next_trading_day(now: datetime) -> str:
     return f"{next_day.strftime('%m/%d')} {next_weekday}요일"
 
 
-def _fetch_ticker(ticker: str, name: str) -> dict | None:
-    """티커별 데이터 수집 — 날짜/타임존 정규화 + 장중 데이터 제외 + 재시도 3회"""
+def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dict | None:
+    """티커별 데이터 수집 — 날짜/타임존 정규화 + 장중 데이터 제외 + 재시도 3회.
+    now_ex: 백필/재생성 시 기준 시각(거래소 현지). None이면 현재 시각."""
     import time
-    from datetime import timezone
 
     for attempt in range(3):
         try:
@@ -349,19 +349,31 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
             # 타임존 정규화 — 거래소 현지 기준으로 날짜를 산출해야 하루 밀림 방지
             #   (한국 지수는 KST 자정 인덱스를 UTC로 바꾸면 전날로 밀려 off-by-one 발생)
             ex_tz = "Asia/Seoul" if ticker.startswith("^K") else "America/New_York"
+            tz = pytz.timezone(ex_tz)
             if hist.index.tz is None:
                 # naive 일봉은 거래소 현지 거래일로 간주
                 hist.index = hist.index.tz_localize(ex_tz)
             else:
                 hist.index = hist.index.tz_convert(ex_tz)
 
-            now_ex   = datetime.now(pytz.timezone(ex_tz))
-            today_ex = now_ex.date()
+            if now_ex is None:
+                now_ex_local = datetime.now(tz)
+            else:
+                now_ex_local = (
+                    tz.localize(now_ex) if now_ex.tzinfo is None
+                    else now_ex.astimezone(tz)
+                )
+            today_ex = now_ex_local.date()
+
+            # 백필: 기준일 이후 봉 제거
+            hist = hist[hist.index.date <= today_ex]
+            if hist.empty:
+                time.sleep(2 ** attempt)
+                continue
 
             # 마감 확정 = 스케줄/상태판정과 동일 (_is_after_close: 마감+30분)
-            # 이전: 미국 hour>=17 이라 us_close(16:30 ET)가 오늘 봉을 버려 전날 시황이 저장됨
             region = "한국" if ticker.startswith("^K") else "미국"
-            market_closed = _is_after_close(region, now_ex)
+            market_closed = _is_after_close(region, now_ex_local)
 
             last_dt = hist.index[-1].date()
             if last_dt == today_ex and not market_closed:
@@ -413,17 +425,45 @@ def _fetch_ticker(ticker: str, name: str) -> dict | None:
     return None
 
 
-def get_market_data() -> dict:
+def get_market_data(
+    now_et: datetime | None = None,
+    now_kst: datetime | None = None,
+) -> dict:
+    """now_et/now_kst를 주면 그 시점 기준으로 봉을 자른다(백필/재생성용)."""
     result = {}
     for region, tickers in TICKERS.items():
         result[region] = {}
+        now_ex = now_kst if region == "한국" else now_et
         for ticker, name in tickers.items():
-            d = _fetch_ticker(ticker, name)
+            d = _fetch_ticker(ticker, name, now_ex=now_ex)
             if d:
                 result[region][ticker] = d
     total = sum(len(v) for v in result.values())
     print(f"[market_brief] 총 {total}개 지수 수집 완료")
     return result
+
+
+# 백필 시 각 시황 타입의 정규 생성 시각 (현지)
+_AS_OF_LOCAL = {
+    "kr_premarket": (8, 0, "Asia/Seoul"),
+    "kr_close":     (16, 0, "Asia/Seoul"),
+    "us_premarket": (8, 30, "America/New_York"),
+    "us_close":     (16, 30, "America/New_York"),
+}
+
+
+def _clocks_for_as_of(brief_type: str, as_of: str):
+    """as_of(YYYY-MM-DD) + 타입별 정규 시각 → now_et/now_kst/now(BST)"""
+    if brief_type not in _AS_OF_LOCAL:
+        raise RuntimeError(f"as_of 미지원 타입: {brief_type}")
+    h, m, tz_name = _AS_OF_LOCAL[brief_type]
+    local_tz = pytz.timezone(tz_name)
+    d = datetime.strptime(as_of, "%Y-%m-%d")
+    local = local_tz.localize(datetime(d.year, d.month, d.day, h, m))
+    now_et  = local.astimezone(pytz.timezone("America/New_York"))
+    now_kst = local.astimezone(pytz.timezone("Asia/Seoul"))
+    now     = local.astimezone(pytz.timezone("Europe/London"))
+    return now, now_et, now_kst
 
 
 def _has_minimum_data(market_data: dict) -> bool:
@@ -500,16 +540,10 @@ def _build_prev_context(brief_type: str) -> str:
     )
 
 
-async def generate_market_brief(brief_type: str) -> dict:
+async def generate_market_brief(brief_type: str, as_of: str | None = None) -> dict:
+    """as_of: 'YYYY-MM-DD' — 해당일 정규 시각 기준으로 백필/재생성."""
     from database import get_recent_market_briefs
-
-    bst = pytz.timezone("Europe/London")  # BST/GMT 자동 처리
-    now     = datetime.now(bst)
-    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-    now_et  = datetime.now(pytz.timezone("America/New_York"))
-
-    today         = now.strftime("%Y-%m-%d")
-    weekday_today = WEEKDAY_KR[now.weekday()]
+    import asyncio
 
     # 시황 타입 검증
     if brief_type not in BRIEF_TYPES:
@@ -517,15 +551,22 @@ async def generate_market_brief(brief_type: str) -> dict:
     cfg           = BRIEF_TYPES[brief_type]
     target_market = cfg["market"]   # "한국" 또는 "미국"
 
-    # 주말은 대상 시장 현지 요일 기준 (BST 금요일 밤 ≠ 한국 토요일 혼선 방지)
+    if as_of:
+        now, now_et, now_kst = _clocks_for_as_of(brief_type, as_of)
+        print(f"[market_brief] as_of={as_of} → ET {now_et} / KST {now_kst}")
+    else:
+        bst = pytz.timezone("Europe/London")
+        now     = datetime.now(bst)
+        now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+        now_et  = datetime.now(pytz.timezone("America/New_York"))
+
+    # 주말은 대상 시장 현지 요일 기준 (백필 as_of가 평일이면 허용)
     now_target = now_kst if target_market == "한국" else now_et
     if now_target.weekday() >= 5:
         wd = WEEKDAY_KR[now_target.weekday()]
         raise RuntimeError(f"주말({wd}요일) — 시황 생성 안 함")
 
-    import asyncio
-
-    market_data = get_market_data()
+    market_data = get_market_data(now_et=now_et, now_kst=now_kst)
     macro_news = fetch_macro_news(max_per_source=3)
     news_text = format_macro_news_for_brief(macro_news)
 
@@ -549,11 +590,12 @@ async def generate_market_brief(brief_type: str) -> dict:
                     f"— 45초 후 재수집 ({attempt + 1}/2)"
                 )
                 await asyncio.sleep(45)
-                now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-                now_et  = datetime.now(pytz.timezone("America/New_York"))
-                now_target = now_kst if target_market == "한국" else now_et
-                today = now_target.strftime("%Y-%m-%d")
-                market_data = get_market_data()
+                if not as_of:
+                    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+                    now_et  = datetime.now(pytz.timezone("America/New_York"))
+                    now_target = now_kst if target_market == "한국" else now_et
+                    today = now_target.strftime("%Y-%m-%d")
+                market_data = get_market_data(now_et=now_et, now_kst=now_kst)
         else:
             raise RuntimeError(
                 f"{brief_type}: 오늘({today}) {region_key} 마감 데이터 미확정 — "
@@ -1030,11 +1072,14 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
+    # created_at은 실제 생성 시각(재생성 시 최신으로 올라오게)
+    created = datetime.now(pytz.timezone("Europe/London")).isoformat()
+
     return {
         "type":        brief_type,
         "date":        today,
         "market_data": market_data,
         "analysis":    analysis_clean,
         "signal":      signal,
-        "created_at":  now.isoformat(),
+        "created_at":  created,
     }

@@ -876,11 +876,13 @@ async def brief_accuracy_api():
 @app.post("/market/brief/generate")
 async def generate_brief(
     brief_type: str = "us_close",
+    as_of: Optional[str] = None,
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
     """수동 시황 생성 (관리자 전용)
-    brief_type: kr_premarket | kr_close | us_premarket | us_close"""
+    brief_type: kr_premarket | kr_close | us_premarket | us_close
+    as_of: YYYY-MM-DD — 해당일 기준으로 백필/재생성"""
     token = stockai_token or (
         authorization.replace("Bearer ", "") if authorization else None
     )
@@ -890,9 +892,9 @@ async def generate_brief(
     if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
         raise HTTPException(status_code=403, detail="관리자 전용")
 
-    brief  = await generate_market_brief(brief_type)
+    brief  = await generate_market_brief(brief_type, as_of=as_of)
     doc_id = save_market_brief(brief)
-    return {"ok": True, "id": doc_id, "signal": brief["signal"]}
+    return {"ok": True, "id": doc_id, "signal": brief["signal"], "date": brief["date"]}
 
 
 @app.delete("/market/brief/{doc_id}")
@@ -938,6 +940,30 @@ async def _run_brief(brief_type: str, _retries: int = 1):
         print(f"[scheduler] {brief_type} 오류: {e}")
 
 
+async def _repair_bad_us_close_0807():
+    """버그로 저장된 us_close_2026-08-07(전날 봉)을 8/7 데이터로 1회 재생성."""
+    try:
+        from database import get_db
+        doc = get_db()["market_briefs"].find_one({"_id": "us_close_2026-08-07"})
+        if not doc:
+            return
+        spy = ((doc.get("market_data") or {}).get("미국") or {}).get("SPY") or {}
+        last = spy.get("last_date") or ""
+        if last.startswith("2026-08-07") and spy.get("price") is not None:
+            print("[repair] us_close_2026-08-07 이미 정상 — 스킵")
+            return
+        print(f"[repair] us_close_2026-08-07 재생성 시작 (기존 last_date={last})")
+        brief = await generate_market_brief("us_close", as_of="2026-08-07")
+        doc_id = save_market_brief(brief)
+        spy2 = ((brief.get("market_data") or {}).get("미국") or {}).get("SPY") or {}
+        print(
+            f"[repair] 완료 {doc_id} SIGNAL:{brief.get('signal')} "
+            f"SPY last_date={spy2.get('last_date')} chg={spy2.get('change_pct')}"
+        )
+    except Exception as e:
+        print(f"[repair] us_close_2026-08-07 실패: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     ensure_indexes()
@@ -946,6 +972,8 @@ async def startup():
         migrate_brief_types()
     except Exception as e:
         print(f"[db] 시황 타입 마이그레이션 실패: {e}")
+    # 깨진 8/7 미국마감 시황 자동 재생성 (배포 시 1회)
+    asyncio.create_task(_repair_bad_us_close_0807())
 
 @app.get("/performance/tracker")
 async def get_performance_tracker(
