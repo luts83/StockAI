@@ -2,6 +2,7 @@ from pymongo import MongoClient
 from datetime import datetime, date
 from dotenv import load_dotenv
 import certifi
+import math
 import os
 
 load_dotenv()
@@ -19,6 +20,25 @@ def get_db():
             serverSelectionTimeoutMS=10000,
         )
     return _client["stockai"]
+
+
+def _json_safe(obj):
+    """FastAPI JSON 응답용 — NaN/Inf 등 비직렬화 값을 None으로 치환."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    # numpy 스칼라 등이 섞인 경우
+    if hasattr(obj, "item") and callable(obj.item) and not isinstance(obj, (bytes, str)):
+        try:
+            return _json_safe(obj.item())
+        except Exception:
+            pass
+    return obj
 
 def ensure_indexes():
     """TTL 인덱스 등 필수 인덱스 보장 (서버 시작 시 1회 호출)"""
@@ -186,6 +206,7 @@ def save_market_brief(brief: dict) -> str:
     doc_id = f"{brief['type']}_{brief['date']}"
     doc = {k: v for k, v in brief.items() if k != "_id"}
     doc["_id"] = doc_id
+    doc = _json_safe(doc)
     db["market_briefs"].replace_one({"_id": doc_id}, doc, upsert=True)
     return doc_id
 
@@ -212,7 +233,7 @@ def get_recent_market_briefs(limit: int = 2, brief_type: str = None) -> list:
     items = list(cursor)
     for item in items:
         item["_id"] = str(item["_id"])
-    return items
+    return _json_safe(items)
 
 
 def migrate_brief_types() -> dict:
