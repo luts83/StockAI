@@ -964,6 +964,37 @@ async def _repair_bad_us_close_0807():
         print(f"[repair] us_close_2026-08-07 실패: {e}")
 
 
+async def _repair_kr_briefs_weekend_stale():
+    """월요 한국 시황에서 금요 미국 데이터가 calendar-stale로 폐기된 문서를 재생성."""
+    try:
+        from database import get_db
+        db = get_db()
+        for doc_id, brief_type, as_of in (
+            ("kr_premarket_2026-08-10", "kr_premarket", "2026-08-10"),
+            ("kr_close_2026-08-10", "kr_close", "2026-08-10"),
+        ):
+            doc = db["market_briefs"].find_one({"_id": doc_id})
+            if not doc:
+                continue
+            spy = ((doc.get("market_data") or {}).get("미국") or {}).get("SPY") or {}
+            # 금요 데이터인데 stale=True 로 저장된 경우만 재생성
+            if not (spy.get("last_date") or "").startswith("2026-08-07"):
+                continue
+            if not spy.get("stale"):
+                print(f"[repair] {doc_id} 미국 데이터 이미 신선 — 스킵")
+                continue
+            print(f"[repair] {doc_id} 재생성 (금요 미국 stale 오판 교정)")
+            brief = await generate_market_brief(brief_type, as_of=as_of)
+            save_market_brief(brief)
+            spy2 = ((brief.get("market_data") or {}).get("미국") or {}).get("SPY") or {}
+            print(
+                f"[repair] 완료 {doc_id} SPY stale={spy2.get('stale')} "
+                f"last={spy2.get('last_date')} SIGNAL:{brief.get('signal')}"
+            )
+    except Exception as e:
+        print(f"[repair] kr weekend-stale 실패: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     ensure_indexes()
@@ -972,8 +1003,8 @@ async def startup():
         migrate_brief_types()
     except Exception as e:
         print(f"[db] 시황 타입 마이그레이션 실패: {e}")
-    # 깨진 8/7 미국마감 시황 자동 재생성 (배포 시 1회)
     asyncio.create_task(_repair_bad_us_close_0807())
+    asyncio.create_task(_repair_kr_briefs_weekend_stale())
 
 @app.get("/performance/tracker")
 async def get_performance_tracker(

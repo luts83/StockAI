@@ -42,6 +42,36 @@ def _latest_data_date(region_data: dict):
     return max(dates) if dates else None
 
 
+def _prev_session_date(region: str, from_date):
+    """from_date 이전의 직전 거래일 (캘린더 우선, 실패 시 평일)."""
+    from datetime import date as _date
+    d = from_date - timedelta(days=1)
+    if not isinstance(d, _date):
+        d = d.date() if hasattr(d, "date") else d
+    for _ in range(15):
+        if d.weekday() < 5:
+            cal = _verify_with_calendar(region, d.strftime("%Y-%m-%d"))
+            if cal is not False:  # True 또는 None
+                return d
+        d -= timedelta(days=1)
+    return from_date - timedelta(days=1)
+
+
+def _expected_session_date(region: str, now_local):
+    """지금 시점에 '최신으로 기대하는' 거래일.
+    장전/주말/휴장 → 직전 거래일, 마감 후 개장일 → 오늘.
+    (금→월 주말 갭만으로 금요일 데이터를 stale 처리하지 않기 위함)"""
+    today = now_local.date() if hasattr(now_local, "date") else now_local
+    if today.weekday() >= 5:
+        return _prev_session_date(region, today)
+    cal_open = _verify_with_calendar(region, today.strftime("%Y-%m-%d"))
+    if cal_open is False:
+        return _prev_session_date(region, today)
+    if not _is_after_close(region, now_local):
+        return _prev_session_date(region, today)
+    return today
+
+
 # 시장별 개장/마감 시각 (현지 기준)
 MARKET_HOURS = {
     "한국": {"open": (9, 0),  "close": (15, 30)},
@@ -397,13 +427,16 @@ def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dic
             avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
             vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
 
+            # 달력 일수가 아니라 '기대 거래일' 대비 지연으로 stale 판정
+            # 예: 월요일이어도 금요일 미국 마감은 PRE_OPEN 시점에 정상(직전 세션)
             days_old = (today_ex - ld).days
-            stale = days_old > 1
+            expected = _expected_session_date(region, now_ex_local)
+            stale = ld < expected
 
             print(
                 f"[market_brief] {'⚠️ STALE' if stale else '✅'} {ticker} {date_label} "
                 f"{current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
-                + (f" — {days_old}일 지연" if stale else "")
+                + (f" — expected={expected}" if stale or ld != today_ex else "")
             )
 
             return {
@@ -480,19 +513,26 @@ def _build_data_text(market_data: dict) -> str:
             continue
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
-            arrow = "▲" if d["change_pct"] > 0 else "▼"
+            chg = d.get("change_pct")
+            if chg is None:
+                lines.append(
+                    f"- {d['name']}({ticker}) [데이터일: {d.get('last_date')}] — 가격 없음"
+                )
+                continue
+            arrow = "▲" if chg > 0 else "▼"
             if d.get("stale"):
                 lines.append(
                     f"- {d['name']}({ticker}) "
-                    f"[⚠️ {d['last_date']} 데이터 — 당일 미수집, 전망 활용 금지]: "
-                    f"${d['price']} {arrow}{abs(d['change_pct'])}% "
-                    f"(※ 오늘 데이터 아님)"
+                    f"[⚠️ {d['last_date']} 데이터 — 기대 거래일 대비 지연, 전망 활용 금지]: "
+                    f"${d['price']} {arrow}{abs(chg)}% "
+                    f"(※ 최신 세션 아님)"
                 )
             else:
+                # 직전 거래일 데이터여도 (월요일이 금요일 미국 마감 등) 정상 활용
                 lines.append(
                     f"- {d['name']}({ticker}) [데이터일: {d['last_date']}]: "
                     f"${d['price']} "
-                    f"{arrow}{abs(d['change_pct'])}% "
+                    f"{arrow}{abs(chg)}% "
                     f"(거래량 평균 대비 {d['volume_ratio']}%)"
                 )
     return "\n".join(lines)
@@ -758,9 +798,9 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 5. 데이터의 [데이터일]이 오늘이 아니면 반드시 "N월 N일 마감 기준"으로 명시
    절대 과거 거래일을 "오늘 마감"으로 표현하지 말 것
 6. "다음 거래일 (MM/DD 요일)" 반복 표기 금지 — 처음 1회만, 이후 "다음 거래일"로만
-7. status=PRE_OPEN → "장 시작 전"으로 서술. "휴장"/"데이터 미수집"으로 표현 금지
-   ✅ "오늘 {target_market}장은 아직 개장 전입니다. 아래는 직전 거래일 마감 기준입니다."
-   ❌ "{target_market} 데이터 미수집" / "{target_market} 휴장"
+7. status=PRE_OPEN → "장 시작 전"으로 서술. 직전 거래일 마감 데이터가 있으면 그걸 정상 기준으로 쓸 것.
+   ✅ "미국은 아직 개장 전입니다. 아래는 직전 거래일(금) 마감 기준입니다."
+   ❌ "미국 데이터 없음" / "미국 데이터 미수집" / "미국 데이터 부재"
 8. status=UNKNOWN → 단정 금지. "수집 실패로 전망 불가"처럼 장황하게 쓰지 말고 전일 기준만 짧게 참고
 """
     timing_context += accuracy_context
