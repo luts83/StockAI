@@ -32,8 +32,9 @@ def _claude_with_retry(client, max_retries=3, **kwargs):
     return None
 
 
-def fetch_news(ticker: str) -> List[Dict]:
-    """yfinance 뉴스 + Google News RSS 수집"""
+def fetch_news(ticker: str, translate: bool = True) -> List[Dict]:
+    """yfinance 뉴스 + Google News RSS 수집.
+    translate=False 이면 제목 한글 번역 생략(채팅 실시간 조회용)."""
     news_items = []
 
     # 1. yfinance 내장 뉴스
@@ -79,8 +80,8 @@ def fetch_news(ticker: str) -> List[Dict]:
 
     unique = unique[:8]
 
-    # Claude로 제목 일괄 한글 번역
-    unique = translate_titles(unique)
+    if translate:
+        unique = translate_titles(unique)
 
     return unique
 

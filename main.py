@@ -396,58 +396,88 @@ async def chat_stream(
     history = doc.get("chat_history", [])[-8:]
     messages = []
     from datetime import datetime as _dt
+    ticker = doc["ticker"]
     _data_date = doc.get("data_date") or doc.get("created_at", "")[:10]
+    _now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
+
+    # ── 질문 시 실시간 시세·뉴스 조회 (Yahoo로 가라 식 거절 방지) ──
+    live_blocks = []
+    try:
+        px = get_extended_price(ticker)
+        if px:
+            reg = px.get("regular_price")
+            ext = px.get("extended_price")
+            prev = px.get("previous_close")
+            chg = None
+            if reg is not None and prev:
+                chg = round((reg - prev) / prev * 100, 2)
+            live_blocks.append(
+                "[실시간 시세 — 방금 서버에서 조회]\n"
+                f"- 정규장 현재가: ${reg}"
+                + (f" (전일 대비 {chg:+.2f}%)" if chg is not None else "")
+                + "\n"
+                + (f"- 프리/애프터: ${ext}\n" if ext else "")
+                + f"- 전일종가: ${prev}\n"
+                + f"- 분석 기준가({_data_date}): ${doc.get('current_price', '—')}"
+            )
+    except Exception as e:
+        print(f"[chat] 시세 조회 실패 {ticker}: {e}")
+        live_blocks.append("[실시간 시세] 일시 조회 실패")
+
+    try:
+        news_live = fetch_news(ticker, translate=False)
+        if news_live:
+            lines = ["[최신 뉴스 — 방금 서버에서 조회 (최대 5건)]"]
+            for n in news_live[:5]:
+                title = n.get("title_ko") or n.get("title") or ""
+                src = n.get("source") or ""
+                pub = (n.get("published") or "")[:16]
+                if title:
+                    lines.append(f"- [{src} {pub}] {title}")
+            live_blocks.append("\n".join(lines))
+        else:
+            live_blocks.append("[최신 뉴스] 수집된 헤드라인 없음")
+    except Exception as e:
+        print(f"[chat] 뉴스 조회 실패 {ticker}: {e}")
+        live_blocks.append("[최신 뉴스] 일시 조회 실패")
+
+    live_context = "\n\n".join(live_blocks)
+
     system = (
         f"당신은 주식 기술적 분석 전문가입니다.\n"
         f"\n"
-        f"[분석 메타데이터 — 절대 무시 금지]\n"
-        f"- 분석 대상: {doc['ticker']}\n"
+        f"[분석 메타데이터]\n"
+        f"- 분석 대상: {ticker}\n"
         f"- 분석 기준일: {_data_date}\n"
         f"- 분석 기준가: ${doc.get('current_price', '—')}\n"
-        f"- 오늘 날짜: {_dt.utcnow().strftime('%Y-%m-%d')} (UTC 기준)\n"
+        f"- 서버 시각(UTC): {_now_utc}\n"
+        f"\n"
+        f"{live_context}\n"
         f"\n"
         f"[답변 규칙 — 반드시 준수]\n"
-        f"1. 길이 제한\n"
-        f"   - 기본: 3~5문장 (150자 이내)\n"
-        f"   - 복잡한 질문도 최대 10문장 (400자 이내)\n"
-        f"   - 절대 구조화된 긴 보고서 형식으로 답변 금지\n"
+        f"1. 길이: 기본 3~6문장. 복잡한 질문도 최대 12문장. 긴 보고서 형식 금지.\n"
+        f"2. 형식: ### 헤더 금지. 불릿은 최대 4개.\n"
+        f"3. 서론/인사 없이 결론부터.\n"
+        f"4. 숫자 인용은 꼭 필요한 1~3개만.\n"
         f"\n"
-        f"2. 형식 금지\n"
-        f"   - H1~H3 헤더 사용 금지 (###, ## 등)\n"
-        f"   - 번호 목록 (1, 2, 3...) 3개 이상 금지\n"
-        f"   - 불릿 포인트는 최대 3개까지만\n"
+        f"5. 실시간 데이터 규칙 (중요)\n"
+        f"   - 위 [실시간 시세]/[최신 뉴스]가 있으면 그걸 근거로 바로 답할 것.\n"
+        f"   - Yahoo/구글/HTS로 가서 확인하라는 안내 절대 금지.\n"
+        f"   - '실시간 조회 불가'라고 말하지 말 것. 서버가 이미 조회했다.\n"
+        f"   - 분석 기준일 이후 움직임은 실시간 시세/뉴스로 설명하고,\n"
+        f"     기존 분석과 다르면 '분석 이후 변화'로 짧게 구분할 것.\n"
+        f"   - 뉴스가 급등 원인으로 보이면 헤드라인 1~2개만 인용.\n"
+        f"   - 뉴스와 무관한 급등이면 기술/수급 가능성으로 짧게.\n"
         f"\n"
-        f"3. 서술 방식\n"
-        f"   - 서론 없이 결론부터\n"
-        f"   - 인사말 절대 금지 (안녕하세요, 좋은 질문이네요 등)\n"
-        f"   - 설명 나열보다 핵심 한 줄 -> 근거 1~2개 구조\n"
-        f"\n"
-        f"4. 숫자\n"
-        f"   - 숫자 인용은 꼭 필요한 것만\n"
-        f"   - RSI/MACD/거래량/PER 나열 금지, 가장 중요한 1~2개만\n"
-        f"\n"
-        f"5. 질문이 왜/어떻게로 끝나면 답변도 짧게\n"
+        f"6. 여전히 추측 금지인 것\n"
+        f"   - 제공되지 않은 실적 수치·어닝콜 발언·재무 세부 수치 생성 금지.\n"
+        f"   - 실시간 블록에 없는 내용은 '확인된 헤드라인/시세 기준으로는 ~'로 한정.\n"
         f"\n"
         f"질문 섹션: {req.section}\n"
         f"\n"
         f"=== 기존 분석 ({_data_date} 기준) ===\n"
         f"{doc['analysis']}\n"
-        f"=== 분석 종료 ===\n"
-        f"\n"
-        f"[절대 금지 — 데이터 없으면 반드시 거절]\n"
-        f"아래 항목은 제공된 분석 데이터에 없으면 절대 추측/생성 금지.\n"
-        f"모르면 반드시 이렇게만 답할 것:\n"
-        f"해당 정보는 분석 데이터에 포함되지 않습니다. 공식 IR 또는 뉴스를 확인하세요.\n"
-        f"\n"
-        f"금지 항목:\n"
-        f"- 분석 데이터에 없는 실적 수치 (EPS, 매출, 마진 등)\n"
-        f"- 어닝콜 발언, 경영진 코멘트, 가이던스\n"
-        f"- 분석 기준일({_data_date}) 이후 주가/뉴스\n"
-        f"- 재무제표 세부 수치 추측\n"
-        f"\n"
-        f"단, 분석 데이터에 실적 정보가 포함된 경우는 그 데이터를 근거로 답변 가능.\n"
-        f"모르는 것을 지어내면 사용자에게 치명적 피해를 준다.\n"
-        f"절대로 추측으로 수치를 만들어내지 말 것."
+        f"=== 분석 종료 ==="
     )
 
     for h in history:
@@ -460,7 +490,7 @@ async def chat_stream(
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=2500,  # 안전마진, 실제 답변은 500토큰 내외 유도
+            max_tokens=1200,
             system=system,
             messages=messages,
         ) as stream:
