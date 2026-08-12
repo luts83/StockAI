@@ -44,7 +44,11 @@ def _rgba(hex_color: str, alpha: float = 0.15) -> str:
 def _signal_info(signal: str):
     s = (signal or "WATCH").upper()
     if s == "BUY":  return "🟢 매수 검토 구간", GREEN
-    if s == "SELL": return "🔴 매수 자제 구간", RED
+    if s == "SELL" or s == "AVOID": return "🔴 매수 자제 구간", RED
+    if s == "WATCH_UP":   return "👀 상승 관망", GREEN
+    if s == "WATCH_DOWN": return "👀 하락 관망", RED
+    if s == "WATCH_RISK": return "👀 위험 관망", RED
+    if s == "WATCH_FLAT": return "👀 중립 관망", YELLOW
     return "👀 관망 구간", YELLOW
 
 

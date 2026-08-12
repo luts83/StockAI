@@ -893,7 +893,7 @@ function getSignalDisplay(signal, analysis = "") {
     WATCH_FLAT: { boxClass: "watch", text: "관망 · 중립", sub: "방향성 확인 필요" },
     WATCH_DOWN: { boxClass: "watch-bear", text: "관망 · 하락 편향", sub: "SELL 확신 부족 — 하락 가능성" },
     WATCH_RISK: { boxClass: "watch-bear", text: "관망 · 위험", sub: "변동성/이벤트 위험 — 진입 자제" },
-    WATCH:      { boxClass: "watch", text: "관망 구간", sub: "방향성 확인 필요" },
+    WATCH:      { boxClass: "watch", text: "관망 · 중립", sub: "방향성 확인 필요" },
   };
   const w = watchMap[s] || watchMap.WATCH_FLAT;
   let { boxClass, text, sub } = w;
@@ -904,22 +904,74 @@ function getSignalDisplay(signal, analysis = "") {
   return { boxClass, icon: "👀", text, sub, ...meta };
 }
 
+function inferWatchFromIndicators(item = {}) {
+  const eng = item.signal_engine || {};
+  if (eng.signal && String(eng.signal).toUpperCase().startsWith("WATCH_")) {
+    return String(eng.signal).toUpperCase();
+  }
+  if (typeof eng.score === "number") {
+    if (eng.score >= 18) return "WATCH_UP";
+    if (eng.score <= -18) return "WATCH_DOWN";
+  }
+  const ind = item.indicators || {};
+  let lean = 0;
+  const rsi = Number(ind.rsi);
+  if (!Number.isNaN(rsi)) {
+    if (rsi >= 58) lean += 2;
+    else if (rsi >= 52) lean += 1;
+    else if (rsi <= 42) lean -= 2;
+    else if (rsi <= 48) lean -= 1;
+  }
+  const macd = Number(ind.macd), macdSig = Number(ind.macd_signal);
+  if (!Number.isNaN(macd) && !Number.isNaN(macdSig)) {
+    lean += macd > macdSig ? 1 : -1;
+  }
+  const cp = Number(item.change_pct);
+  if (!Number.isNaN(cp)) {
+    if (cp >= 1.5) lean += 1;
+    else if (cp <= -1.5) lean -= 1;
+  }
+  if (lean > 0) return "WATCH_UP";
+  if (lean < 0) return "WATCH_DOWN";
+  return "WATCH_FLAT";
+}
+
+function resolveItemSignal(item = {}) {
+  if (item.display_signal) return String(item.display_signal).toUpperCase();
+  const s = String(item.signal || "WATCH").toUpperCase();
+  if (["BUY", "SELL", "AVOID", "WATCH_UP", "WATCH_FLAT", "WATCH_DOWN", "WATCH_RISK"].includes(s)) {
+    return s;
+  }
+  return inferWatchFromIndicators(item);
+}
+
 function getSignalBadge(signal, analysis = "") {
   const s = (signal || "WATCH_FLAT").toUpperCase();
   if (s === "BUY") return { cls: "sig-buy", text: "🟢 매수" };
   if (s === "SELL") return { cls: "sig-sell", text: "🔴 매도" };
   if (s === "AVOID") return { cls: "sig-sell", text: "🔴 회피" };
-  if (s === "WATCH_UP") return { cls: "sig-watch-bull", text: "👀 관망↑" };
-  if (s === "WATCH_DOWN" || s === "WATCH_RISK") return { cls: "sig-watch-bear", text: s === "WATCH_RISK" ? "👀 관망⚠" : "👀 관망↓" };
-  if (s === "WATCH_FLAT" || s === "WATCH") return { cls: "sig-watch", text: "👀 관망" };
+  if (s === "WATCH_UP") return { cls: "sig-watch-bull", text: "👀 상승관망" };
+  if (s === "WATCH_DOWN") return { cls: "sig-watch-bear", text: "👀 하락관망" };
+  if (s === "WATCH_RISK") return { cls: "sig-watch-bear", text: "👀 위험관망" };
+  if (s === "WATCH_FLAT") return { cls: "sig-watch", text: "👀 중립관망" };
+  if (s === "WATCH") {
+    const meta = parseWatchMeta(analysis);
+    if (meta.bias.includes("하락") || meta.bias.includes("약세")) {
+      return { cls: "sig-watch-bear", text: "👀 하락관망" };
+    }
+    if (meta.bias.includes("상승") || meta.bias.includes("강세")) {
+      return { cls: "sig-watch-bull", text: "👀 상승관망" };
+    }
+    return { cls: "sig-watch", text: "👀 중립관망" };
+  }
   const meta = parseWatchMeta(analysis);
   if (meta.bias.includes("하락") || meta.bias.includes("약세")) {
-    return { cls: "sig-watch-bear", text: "👀 관망↓" };
+    return { cls: "sig-watch-bear", text: "👀 하락관망" };
   }
   if (meta.bias.includes("상승") || meta.bias.includes("강세")) {
-    return { cls: "sig-watch-bull", text: "👀 관망↑" };
+    return { cls: "sig-watch-bull", text: "👀 상승관망" };
   }
-  return { cls: "sig-watch", text: "👀 관망" };
+  return { cls: "sig-watch", text: "👀 중립관망" };
 }
 
 // ── 토큰 관리 (localStorage 기반, 쿠키 크로스도메인 문제 해결) ──
@@ -1271,8 +1323,8 @@ function renderResults(data) {
 
   const analysis = data.analysis || "";
 
-  // ── 1. 시그널 파싱 — DB/엔진 signal 필드 우선
-  let signal = (data.signal || "WATCH").toUpperCase();
+  // ── 1. 시그널 파싱 — DB/엔진 signal 필드 우선 (구형 WATCH는 방향 세분화)
+  let signal = resolveItemSignal(data);
   let confidence = "";
   const eng = data.signal_engine || {};
   let sigDisplay = getSignalDisplay(signal, analysis);
@@ -1673,7 +1725,7 @@ async function loadHomeHistory(reset = true) {
       const d = new Date(item.created_at).toLocaleDateString("ko-KR", {
         month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"
       });
-      const sigBadge = getSignalBadge(item.signal, item.analysis || "");
+      const sigBadge = getSignalBadge(resolveItemSignal(item), item.analysis || "");
       return `
         <div class="history-item" onclick="loadSavedAnalysis('${item._id}')">
           <span class="history-ticker">${item.ticker}</span>
@@ -1772,7 +1824,7 @@ function renderRecentPreview(items) {
   const recent = items.slice(0, 3);
   list.innerHTML = recent.map(item => {
     const date = new Date(item.created_at).toLocaleDateString("ko-KR", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
-    const sigBadge = getSignalBadge(item.signal, item.analysis || "");
+    const sigBadge = getSignalBadge(resolveItemSignal(item), item.analysis || "");
     const chatCount = (item.chat_history || []).length / 2 | 0;
     return `<div class="history-item" onclick="loadSavedAnalysis('${item._id}')">
       <span class="history-ticker">${item.ticker}</span>
@@ -1924,7 +1976,7 @@ function renderHistory(items) {
   }
   list.innerHTML = items.map(item => {
     const date = new Date(item.created_at).toLocaleDateString("ko-KR", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
-    const sigBadge = getSignalBadge(item.signal, item.analysis || "");
+    const sigBadge = getSignalBadge(resolveItemSignal(item), item.analysis || "");
     const chatCount = (item.chat_history || []).length / 2 | 0;
     return `<div class="history-item" id="hist-${item._id}" onclick="loadSavedAnalysis('${item._id}')">
       <span class="history-ticker">${item.ticker}</span>
@@ -2030,7 +2082,7 @@ async function loadSavedAnalysis(docId) {
 
     // 시그널
     const analysis = doc.analysis || "";
-    const signal2 = (doc.signal || "WATCH").toUpperCase();
+    const signal2 = resolveItemSignal(doc);
     const sigDisplay2 = getSignalDisplay(signal2, analysis);
     const confMatch2     = analysis.match(/CONFIDENCE:\s*(상|중|하)/);
     const conf2 = confMatch2?.[1] || "";

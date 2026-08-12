@@ -434,3 +434,113 @@ def refine_llm_watch(llm_signal: str, features: dict) -> str:
     if s in ("BUY", "SELL", "AVOID"):
         return s
     return classify_watch(compute_score(features)["score"], features, hard_gates(features))
+
+
+def infer_watch_from_indicators(
+    indicators: dict | None,
+    *,
+    signal_engine: dict | None = None,
+    analysis: str = "",
+    change_pct: float | None = None,
+) -> str:
+    """
+    구형 SIGNAL:WATCH / 히스토리 표시용 — 지표로 WATCH_UP|FLAT|DOWN|RISK 추정.
+    Score 엔진 결과가 있으면 그걸 우선한다.
+    """
+    eng = signal_engine or {}
+    eng_sig = normalize_signal(eng.get("signal")) if eng.get("signal") else None
+    if eng_sig and eng_sig.startswith("WATCH_"):
+        return eng_sig
+    score = eng.get("score")
+    if score is not None:
+        try:
+            return classify_watch(float(score), {}, {"risk": True, "liquidity": True})
+        except (TypeError, ValueError):
+            pass
+
+    text = (analysis or "").upper()
+    if "WATCH_RISK" in text or "WATCH RISK" in text:
+        return "WATCH_RISK"
+    if "WATCH_UP" in text:
+        return "WATCH_UP"
+    if "WATCH_DOWN" in text:
+        return "WATCH_DOWN"
+    if "WATCH_FLAT" in text:
+        return "WATCH_FLAT"
+
+    # 한국어 편향 힌트 (LLM 본문)
+    raw = analysis or ""
+    if any(k in raw for k in ("WATCH_BIAS", "하락 편향", "약세 편향", "하방")):
+        if any(k in raw for k in ("상승", "강세")) and not any(k in raw for k in ("하락", "약세", "하방")):
+            return "WATCH_UP"
+        if any(k in raw for k in ("하락", "약세", "하방")):
+            return "WATCH_DOWN"
+    if "상승 편향" in raw or "강세 편향" in raw:
+        return "WATCH_UP"
+
+    ind = indicators or {}
+    lean = 0
+    rsi = ind.get("rsi")
+    try:
+        rsi = float(rsi) if rsi is not None else None
+    except (TypeError, ValueError):
+        rsi = None
+    if rsi is not None:
+        if rsi >= 58:
+            lean += 2
+        elif rsi >= 52:
+            lean += 1
+        elif rsi <= 42:
+            lean -= 2
+        elif rsi <= 48:
+            lean -= 1
+
+    macd = ind.get("macd")
+    macd_sig = ind.get("macd_signal")
+    try:
+        if macd is not None and macd_sig is not None:
+            if float(macd) > float(macd_sig):
+                lean += 1
+            else:
+                lean -= 1
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if change_pct is not None:
+            cp = float(change_pct)
+            if cp >= 1.5:
+                lean += 1
+            elif cp <= -1.5:
+                lean -= 1
+    except (TypeError, ValueError):
+        pass
+
+    if lean >= 2:
+        return "WATCH_UP"
+    if lean <= -2:
+        return "WATCH_DOWN"
+    if lean > 0:
+        return "WATCH_UP"
+    if lean < 0:
+        return "WATCH_DOWN"
+    return "WATCH_FLAT"
+
+
+def resolve_display_signal(doc: dict | None) -> str:
+    """분석 문서 → UI용 최종 시그널 (구형 WATCH를 방향 세분화)."""
+    if not doc:
+        return "WATCH_FLAT"
+    raw_orig = (doc.get("signal") or "").strip().upper().replace(" ", "_")
+    raw = normalize_signal(doc.get("signal"))
+    if raw in ("BUY", "SELL", "AVOID"):
+        return raw
+    # DB에 이미 세분화된 WATCH_* 만 그대로 사용 (구형 plain WATCH는 추론)
+    if raw_orig in ("WATCH_UP", "WATCH_FLAT", "WATCH_DOWN", "WATCH_RISK"):
+        return raw_orig
+    return infer_watch_from_indicators(
+        doc.get("indicators"),
+        signal_engine=doc.get("signal_engine") or {},
+        analysis=doc.get("analysis") or "",
+        change_pct=doc.get("change_pct"),
+    )

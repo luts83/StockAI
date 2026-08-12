@@ -46,7 +46,11 @@ from signal_eval import (
 from signal_features import (
     extract_features_from_df, FEATURES_VERSION,
 )
-from signal_engine import decide_signal, ENGINE_VERSION as SIGNAL_ENGINE_VERSION
+from signal_engine import (
+    decide_signal,
+    resolve_display_signal,
+    ENGINE_VERSION as SIGNAL_ENGINE_VERSION,
+)
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -590,6 +594,7 @@ async def all_history(
     total = get_history_count(uid)
     for item in items:
         item["_id"] = str(item["_id"])
+        item["display_signal"] = resolve_display_signal(item)
     return {"items": items, "total": total, "skip": skip, "limit": limit}
 
 @app.get("/history/{ticker}")
@@ -604,6 +609,7 @@ async def ticker_history(
     items = get_history(ticker.upper(), limit=10, user_id=user.get("sub", ""))
     for item in items:
         item["_id"] = str(item["_id"])
+        item["display_signal"] = resolve_display_signal(item)
     return items
 
 @app.get("/analysis/{doc_id}")
