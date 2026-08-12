@@ -136,15 +136,17 @@ BUY/SELL **비율 목표를 두지 않는다.** Precision·위험조정 수익�
 ### BUY 제안 조건 (2개 이상 + 과확장 아닐 것)
 - RSI 30~65 + 상승 모멘텀 확인
 - MACD 골든크로스 또는 히스토그램 플러스 전환
-- 주요 지지선 근처 반등 (MA20/MA60 터치 후)
+- 주요 지지선 근처 반등 (MA20/MA60 또는 **매물대 지지**)
 - 거래량 증가 동반 상승
 - S&P500 대비 상대 강세 (+3% 이상 아웃퍼폼)
+- 매물대 저항 돌파 후 종가 안착(저항→지지 전환)은 가산, 단독 BUY 근거 금지
 - 볼린저 상단 이탈/근접은 BUY 근거가 아니라 **과확장 위험**으로 서술
 
 ### SELL/비중축소 제안 조건 (2개 이상)
 - RSI 70 이상 + 하락 반전 신호 (데드크로스 임박 포함)
 - 주요 이동평균 이탈 + 하락 추세 가속
 - 거래량 감소 속 고점 형성
+- 매물대 지지 이탈 후 종가 안착(지지→저항 전환)
 - S&P500 대비 상대 약세 (-3% 이상 언더퍼폼)
 - 악재 뉴스 + 기술적 약세 동시 출현
 - ETF는 SELL 대신 반드시 "비중 축소" 사용
@@ -286,7 +288,8 @@ OUTPUT_RULE = """
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
                           analysis_date: str = "",
-                          earnings_context: dict = None) -> str:
+                          earnings_context: dict = None,
+                          volume_profile: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:15] if item.get("title")
@@ -424,6 +427,9 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
         else "데이터 없음 (기간 부족)"
     )
 
+    from volume_profile import format_volume_profile_for_prompt
+    vp_text = format_volume_profile_for_prompt(volume_profile)
+
     return f"""다음 주식을 분석해줘.
 
 [분석 기준일: {analysis_date or "오늘"} — 반드시 이 날짜 기준으로만 분석할 것]
@@ -453,6 +459,9 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 - 52주 고가: ${stats['52w_high']} / 저가: ${stats['52w_low']}
 - 현재 거래량: {stats['volume']:,} / 평균 거래량: {stats['avg_volume']:,}
 
+### 매물대 (Volume Profile — 객관 계산값, 추측 금지)
+{vp_text}
+
 ### 밸류에이션
 {valuation_text}
 
@@ -467,7 +476,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 차트 이미지를 보고 아래 항목을 분석해줘:
 
 ## 1. 전체 트렌드 분석
-현재 추세(상승/하락/횡보), 주요 지지/저항 레벨, 이동평균선 배열
+현재 추세(상승/하락/횡보), 주요 지지/저항 레벨(이동평균 + 매물대), 이동평균선 배열
 
 ## 2. 기술적 지표 해석
 RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
@@ -477,8 +486,9 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 - 성장률 대비 밸류에이션 적정성 (PEG 관점)
 - 현재 주가 수준의 밸류에이션 리스크
 
-## 3. 거래량 분석
-최근 거래량 추이, 평균 대비 수준, 의미
+## 3. 거래량·매물대 분석
+최근 거래량 추이, 평균 대비 수준, POC/HVN 위치, 지지↔저항 역할 전환 여부
+(차트에 POC·지지/저항 매물 수평선이 표시됨)
 
 ## 4. 뉴스/이슈 영향
 최신 뉴스가 주가에 미치는 영향
@@ -499,10 +509,13 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               analysis_date: str = "",
                               earnings_context: dict = None) -> str:
     """Claude Vision API로 차트 + 뉴스 + 밸류에이션 + 어닝 종합 분석"""
+    from volume_profile import compute_volume_profile
     stats  = get_summary_stats(df, ticker=ticker)
+    vp = compute_volume_profile(df)
     prompt = build_analysis_prompt(ticker, stats, news_items, valuation,
                                    analysis_date=analysis_date,
-                                   earnings_context=earnings_context)
+                                   earnings_context=earnings_context,
+                                   volume_profile=vp)
 
     try:
         message = _get_client().messages.create(

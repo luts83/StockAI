@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from volume_profile import compute_volume_profile
+
 FEATURES_VERSION = "features_v1"
 
 SECTOR_ETF_MAP = {
@@ -349,6 +351,7 @@ def extract_features_from_df(
             "avg_volume_20": _safe(avg_vol_20, 0) if avg_vol_20 is not None else None,
             "volume_ratio": vol_ratio,
         },
+        "volume_profile": compute_volume_profile(work),
         "returns": {
             "ret_1d": _ret_n(closes, 1),
             "ret_5d": rs.get("ret_5d"),

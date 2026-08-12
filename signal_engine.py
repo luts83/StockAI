@@ -237,6 +237,32 @@ def compute_score(features: dict) -> dict:
             reasons.append("volume_dry")
     parts["volume"] = vol_pts
 
+    # Volume Profile / 매물대 (max ~12)
+    vp_pts = 0.0
+    vp = features.get("volume_profile") or {}
+    if vp.get("ok"):
+        flags = vp.get("flags") or {}
+        if flags.get("breakout_hold"):
+            vp_pts += 8
+            reasons.append("vp_breakout_hold")  # 저항→지지 전환 안착
+        if flags.get("breakdown_hold"):
+            vp_pts -= 10
+            reasons.append("vp_breakdown_hold")  # 지지→저항 전환
+        if flags.get("near_support") and not flags.get("near_resistance"):
+            vp_pts += 5
+            reasons.append("vp_near_support")
+        elif flags.get("near_resistance") and not flags.get("near_support"):
+            vp_pts -= 6
+            reasons.append("vp_near_resistance")
+        elif flags.get("at_hvn"):
+            vp_pts -= 2
+            reasons.append("vp_at_hvn")
+        if vp.get("vs_poc") == "above" and flags.get("breakout_hold"):
+            vp_pts += 2
+        elif vp.get("vs_poc") == "below" and flags.get("breakdown_hold"):
+            vp_pts -= 2
+    parts["volume_profile"] = vp_pts
+
     # Market regime (max ~10)
     reg_pts = 0.0
     if regime == "BULL":

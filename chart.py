@@ -29,6 +29,42 @@ YELLOW   = "#e3b341"
 WHITE    = "#e6edf3"
 GRAY     = "#8b949e"
 ORANGE   = "#f0883e"
+PURPLE   = "#a371f7"
+
+
+def _draw_volume_profile_levels(ax, df: pd.DataFrame, label_size: int = 9) -> None:
+    """POC / 최근접 지지·저항 매물대 수평선."""
+    try:
+        from volume_profile import compute_volume_profile
+        vp = compute_volume_profile(df)
+    except Exception:
+        return
+    if not vp or not vp.get("ok"):
+        return
+
+    def _hline(price, color, label, ls="--", lw=1.1, alpha=0.85):
+        if price is None:
+            return
+        ax.axhline(float(price), color=color, linewidth=lw, linestyle=ls, alpha=alpha)
+        ax.text(
+            0.995, float(price), f" {label} ${float(price):.2f}",
+            transform=ax.get_yaxis_transform(),
+            color=color, fontsize=label_size, va="center", ha="right",
+            fontweight="bold", alpha=0.95,
+        )
+
+    poc = vp.get("poc")
+    _hline(poc, PURPLE, "POC", ls=":", lw=1.3, alpha=0.9)
+
+    ns = vp.get("nearest_support") or {}
+    nr = vp.get("nearest_resistance") or {}
+    if ns.get("price") is not None:
+        tag = "VP-S↑" if ns.get("flipped") else "VP-S"
+        _hline(ns["price"], GREEN, tag, ls="-", lw=1.2 if ns.get("flipped") else 1.0)
+    if nr.get("price") is not None:
+        tag = "VP-R↓" if nr.get("flipped") else "VP-R"
+        _hline(nr["price"], RED, tag, ls="-", lw=1.2 if nr.get("flipped") else 1.0)
+
 
 def generate_chart(df: pd.DataFrame, ticker: str) -> str:
     """웹/모바일 균형 최적화 차트"""
@@ -83,6 +119,8 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
         ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
         ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
         ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+
+    _draw_volume_profile_levels(ax_main, df, label_size=LABEL_SIZE - 1)
 
     ax_main.legend(loc="upper left", fontsize=LABEL_SIZE, facecolor=PANEL_BG,
                    labelcolor=WHITE, framealpha=0.8)
@@ -199,6 +237,8 @@ def generate_chart_for_card(df: pd.DataFrame, ticker: str) -> str:
         ax_main.fill_between(dates, df["BB_Upper"], df["BB_Lower"], alpha=0.06, color=BLUE)
         ax_main.plot(dates, df["BB_Upper"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
         ax_main.plot(dates, df["BB_Lower"], color=BLUE, linewidth=0.6, linestyle="--", alpha=0.45)
+
+    _draw_volume_profile_levels(ax_main, df, label_size=LABEL_SIZE - 1)
 
     ax_main.legend(loc="upper left", fontsize=LABEL_SIZE, facecolor=PANEL_BG,
                    labelcolor=WHITE, framealpha=0.8)
