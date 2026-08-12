@@ -49,6 +49,12 @@ def ensure_indexes():
         expireAfterSeconds=604800,  # 7일
         background=True,
     )
+    # signal_outcomes: Phase 1 Baseline 사후성과
+    db["signal_outcomes"].create_index("ticker", background=True)
+    db["signal_outcomes"].create_index("signal", background=True)
+    db["signal_outcomes"].create_index("entry_date", background=True)
+    db["signal_outcomes"].create_index("engine_version", background=True)
+    db["baseline_reports"].create_index("generated_at", background=True)
 
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
@@ -264,6 +270,76 @@ def get_market_briefs(limit: int = 10) -> list:
     for item in items:
         item["_id"] = str(item["_id"])
     return items
+
+
+# ── Signal outcomes (Phase 1 Baseline) ──────────────────
+def upsert_signal_outcome(outcome: dict) -> str:
+    """analysis_id를 _id로 하는 사후성과 upsert."""
+    analysis_id = outcome.get("analysis_id")
+    if not analysis_id:
+        raise ValueError("analysis_id required")
+    doc = dict(outcome)
+    doc["_id"] = analysis_id
+    doc["updated_at"] = datetime.utcnow().isoformat()
+    get_db()["signal_outcomes"].replace_one({"_id": analysis_id}, doc, upsert=True)
+    return analysis_id
+
+
+def get_signal_outcome(analysis_id: str) -> dict | None:
+    return get_db()["signal_outcomes"].find_one({"_id": analysis_id})
+
+
+def list_signal_outcomes(
+    signal: str | None = None,
+    engine_version: str | None = None,
+    limit: int = 5000,
+) -> list:
+    q: dict = {}
+    if signal:
+        q["signal"] = signal.upper()
+    if engine_version:
+        q["engine_version"] = engine_version
+    cursor = (
+        get_db()["signal_outcomes"]
+        .find(q)
+        .sort("entry_date", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+
+def list_analyses_for_backfill(limit: int = 5000) -> list:
+    """사후성과 백필용 analyses (차트 제외)."""
+    cursor = (
+        get_db()["analyses"]
+        .find({}, {"chart_b64": 0, "chat_history": 0})
+        .sort("created_at", 1)
+        .limit(limit)
+    )
+    return list(cursor)
+
+
+def save_baseline_report(report: dict, source: str = "api") -> str:
+    doc_id = f"baseline_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    doc = {
+        "_id": doc_id,
+        "source": source,
+        "generated_at": datetime.utcnow().isoformat(),
+        "report": _json_safe(report),
+    }
+    get_db()["baseline_reports"].insert_one(doc)
+    return doc_id
+
+
+def get_latest_baseline_report() -> dict | None:
+    doc = get_db()["baseline_reports"].find_one(sort=[("generated_at", -1)])
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return _json_safe(doc)
 
 
 # ── 시황 적중률 ──────────────────────────────────────────

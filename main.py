@@ -35,6 +35,11 @@ from database import (
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
     get_user_analyses,
+    upsert_signal_outcome, list_signal_outcomes, list_analyses_for_backfill,
+    save_baseline_report, get_latest_baseline_report,
+)
+from signal_eval import (
+    outcome_from_analysis_doc, summarize_baseline, ENGINE_VERSION,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -321,6 +326,23 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 valuation=valuation,
                 data_date=analysis_date,
             )
+            # Phase 1: 사후성과 stub (horizon은 스케줄러/백필이 채움)
+            try:
+                from datetime import datetime as _dt
+                stub = {
+                    "analysis_id": doc_id,
+                    "ticker": ticker,
+                    "timestamp": _dt.utcnow().isoformat(),
+                    "data_date": analysis_date,
+                    "entry_price": current_price_val,
+                    "entry_date": analysis_date,
+                    "signal": signal,
+                    "engine_version": ENGINE_VERSION,
+                    "horizons_complete": {"1d": False, "5d": False, "10d": False, "20d": False},
+                }
+                upsert_signal_outcome(stub)
+            except Exception as e:
+                print(f"[baseline] outcome stub 실패: {e}")
         else:
             save_public_analysis(
                 ticker=ticker, period=req.period,
@@ -1108,6 +1130,89 @@ async def get_performance_tracker(
     }
 
 
+# ── Phase 1 Baseline: 고정 horizon 사후성과 ────────────────
+def _run_baseline_backfill(limit: int = 5000, save_report: bool = True) -> dict:
+    """analyses → signal_outcomes 재계산 + 성적표."""
+    docs = list_analyses_for_backfill(limit=limit)
+    outcomes = []
+    for doc in docs:
+        try:
+            o = outcome_from_analysis_doc(doc)
+            if o and o.get("analysis_id"):
+                upsert_signal_outcome(o)
+                outcomes.append(o)
+        except Exception as e:
+            print(f"[baseline] backfill error {doc.get('_id')}: {e}")
+    report = summarize_baseline(outcomes)
+    report_id = None
+    if save_report:
+        report_id = save_baseline_report(report, source="scheduler_or_api")
+    return {
+        "n_docs": len(docs),
+        "n_outcomes": len(outcomes),
+        "report_id": report_id,
+        "report": report,
+        "engine_version": ENGINE_VERSION,
+    }
+
+
+@app.get("/baseline/report")
+async def get_baseline_report(
+    refresh: bool = False,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """Baseline 성적표. refresh=true면 outcomes로 재집계(가격 재다운로드 없음)."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+
+    if not refresh:
+        latest = get_latest_baseline_report()
+        if latest:
+            return latest
+
+    outcomes = list_signal_outcomes(engine_version=ENGINE_VERSION)
+    if not outcomes:
+        raise HTTPException(status_code=404, detail="signal_outcomes 없음 — /baseline/backfill 먼저 실행")
+    report = summarize_baseline(outcomes)
+    rid = save_baseline_report(report, source="api_refresh")
+    return {"_id": rid, "report": report, "engine_version": ENGINE_VERSION}
+
+
+@app.get("/baseline/outcomes")
+async def get_baseline_outcomes(
+    signal: Optional[str] = None,
+    limit: int = 500,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    return {
+        "engine_version": ENGINE_VERSION,
+        "items": list_signal_outcomes(signal=signal, engine_version=ENGINE_VERSION, limit=limit),
+    }
+
+
+@app.post("/baseline/backfill")
+async def post_baseline_backfill(
+    limit: int = 5000,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """전체 analyses 사후성과 재계산 (관리자 권장, 수 분 소요 가능)."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    if ADMIN_EMAIL and user.get("email") != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="관리자만 실행 가능")
+
+    result = await asyncio.to_thread(_run_baseline_backfill, limit, True)
+    return result
+
+
 @app.on_event("startup")
 async def start_scheduler():
     import pytz
@@ -1129,6 +1234,25 @@ async def start_scheduler():
             id=job_id,
             replace_existing=True,
         )
+
+    # Phase 1: US 마감 후 사후성과 백필 (매일 17:30 ET)
+    async def _baseline_job():
+        print("[baseline] daily backfill start")
+        try:
+            result = await asyncio.to_thread(_run_baseline_backfill, 5000, True)
+            print(
+                f"[baseline] done outcomes={result.get('n_outcomes')} "
+                f"report={result.get('report_id')}"
+            )
+        except Exception as e:
+            print(f"[baseline] daily backfill failed: {e}")
+
+    scheduler.add_job(
+        _baseline_job,
+        CronTrigger(hour=17, minute=30, day_of_week="mon-fri", timezone="America/New_York"),
+        id="baseline_backfill",
+        replace_existing=True,
+    )
 
     # 구버전/테스트 job 잔재 제거
     for old in ("premarket_brief", "closing_brief", "korea_close_brief",
