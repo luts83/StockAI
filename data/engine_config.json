@@ -1,0 +1,310 @@
+{
+  "engine_version": "signal_engine_v2",
+  "trained_at": "2026-08-12T14:56:35.472349",
+  "n_rows": 137,
+  "thresholds": {
+    "buy_min": 75,
+    "sell_max": -42,
+    "watch_up_min": 18,
+    "watch_down_max": -18
+  },
+  "deploy_flags": {
+    "buy_enabled": false,
+    "sell_enabled": true,
+    "reason": [
+      "OOS BUY insufficient (prec=25.0, n=8) vs baseline 28.6% → buy_min=75",
+      "OOS SELL precision 68.8% (n=16) kept"
+    ]
+  },
+  "llm_baseline": {
+    "buy_precision_10d": 28.6,
+    "sell_precision_10d": 64.1
+  },
+  "calibration": {
+    "score_to_p_up": [
+      [
+        -75.0,
+        0.2
+      ],
+      [
+        -35.0,
+        0.478
+      ],
+      [
+        -10.0,
+        0.5
+      ],
+      [
+        10.0,
+        0.5
+      ],
+      [
+        35.0,
+        0.548
+      ],
+      [
+        75.0,
+        0.28
+      ]
+    ],
+    "confidence_bins": [
+      {
+        "lo": 0.7,
+        "hi": 0.8,
+        "n": 11,
+        "hit_rate": 0.727
+      },
+      {
+        "lo": 0.8,
+        "hi": 0.9,
+        "n": 4,
+        "hit_rate": 0.75
+      }
+    ],
+    "n_scored": 137
+  },
+  "empirical": {
+    "WATCH_UP": {
+      "n": 62,
+      "expected_return": {
+        "5d": -0.015612,
+        "10d": -0.027035,
+        "20d": 0.030695
+      },
+      "expected_drawdown": {
+        "5d": -0.087133,
+        "10d": -0.117441,
+        "20d": -0.14599
+      },
+      "mfe": {
+        "5d": 0.089716,
+        "10d": 0.10631,
+        "20d": 0.18875
+      }
+    },
+    "WATCH_DOWN": {
+      "n": 15,
+      "expected_return": {
+        "5d": 0.007848,
+        "10d": 0.003156,
+        "20d": 0.040391
+      },
+      "expected_drawdown": {
+        "5d": -0.070416,
+        "10d": -0.08665,
+        "20d": -0.112253
+      },
+      "mfe": {
+        "5d": 0.082266,
+        "10d": 0.104458,
+        "20d": 0.163286
+      }
+    },
+    "WATCH_FLAT": {
+      "n": 15,
+      "expected_return": {
+        "5d": 0.029308,
+        "10d": 0.01102,
+        "20d": 0.030339
+      },
+      "expected_drawdown": {
+        "5d": -0.036991,
+        "10d": -0.061931,
+        "20d": -0.106045
+      },
+      "mfe": {
+        "5d": 0.109516,
+        "10d": 0.124088,
+        "20d": 0.202914
+      }
+    },
+    "WATCH_RISK": {
+      "n": 30,
+      "expected_return": {
+        "5d": 0.008431,
+        "10d": -0.033087,
+        "20d": 0.017028
+      },
+      "expected_drawdown": {
+        "5d": -0.107976,
+        "10d": -0.170508,
+        "20d": -0.215866
+      },
+      "mfe": {
+        "5d": 0.283439,
+        "10d": 0.30265,
+        "20d": 0.404113
+      }
+    },
+    "SELL": {
+      "n": 12,
+      "expected_return": {
+        "5d": -0.003346,
+        "10d": -0.055013,
+        "20d": -0.069156
+      },
+      "expected_drawdown": {
+        "5d": -0.097911,
+        "10d": -0.125971,
+        "20d": -0.214513
+      },
+      "mfe": {
+        "5d": 0.123642,
+        "10d": 0.141822,
+        "20d": 0.16335
+      }
+    },
+    "BUY": {
+      "n": 3,
+      "expected_return": {
+        "5d": 0.048089,
+        "10d": 0.067012,
+        "20d": 0.069896
+      },
+      "expected_drawdown": {
+        "5d": -0.045517,
+        "10d": -0.048402,
+        "20d": -0.056597
+      },
+      "mfe": {
+        "5d": 0.112267,
+        "10d": 0.147977,
+        "20d": 0.186089
+      }
+    }
+  },
+  "walk_forward": {
+    "mode": "expanding_month",
+    "months": [
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07"
+    ],
+    "oos": {
+      "n": 73,
+      "n_buy": 8,
+      "n_sell": 16,
+      "buy_precision_pct": 25.0,
+      "sell_precision_pct": 68.8,
+      "buy_avg_return_pct": -4.41,
+      "sell_avg_return_pct": -4.28
+    },
+    "n_folds": 3,
+    "folds": [
+      {
+        "test_month": "2026-05",
+        "thresholds": {
+          "buy_min": 54,
+          "sell_max": -30,
+          "watch_up_min": 18,
+          "watch_down_max": -18
+        },
+        "test": {
+          "n": 45,
+          "n_buy": 6,
+          "n_sell": 4,
+          "buy_precision_pct": 16.7,
+          "sell_precision_pct": 50.0,
+          "buy_avg_return_pct": -6.18,
+          "sell_avg_return_pct": 0.44,
+          "buy_pf": 0.0016,
+          "sell_pf": 0.8836,
+          "coverage_buy_pct": 13.3,
+          "coverage_sell_pct": 8.9,
+          "mix": {
+            "BUY": 6,
+            "SELL": 4,
+            "WATCH_UP": 18,
+            "WATCH_FLAT": 3,
+            "WATCH_DOWN": 1,
+            "WATCH_RISK": 13
+          }
+        }
+      },
+      {
+        "test_month": "2026-06",
+        "thresholds": {
+          "buy_min": 54,
+          "sell_max": -30,
+          "watch_up_min": 18,
+          "watch_down_max": -18
+        },
+        "test": {
+          "n": 21,
+          "n_buy": 2,
+          "n_sell": 8,
+          "buy_precision_pct": 50.0,
+          "sell_precision_pct": 75.0,
+          "buy_avg_return_pct": 0.9,
+          "sell_avg_return_pct": -2.95,
+          "buy_pf": 1.3553,
+          "sell_pf": 2.2812,
+          "coverage_buy_pct": 9.5,
+          "coverage_sell_pct": 38.1,
+          "mix": {
+            "BUY": 2,
+            "SELL": 8,
+            "WATCH_UP": 2,
+            "WATCH_FLAT": 4,
+            "WATCH_DOWN": 1,
+            "WATCH_RISK": 4
+          }
+        }
+      },
+      {
+        "test_month": "2026-07",
+        "thresholds": {
+          "buy_min": 66,
+          "sell_max": -42,
+          "watch_up_min": 18,
+          "watch_down_max": -18
+        },
+        "test": {
+          "n": 7,
+          "n_buy": 0,
+          "n_sell": 4,
+          "buy_precision_pct": null,
+          "sell_precision_pct": 75.0,
+          "buy_avg_return_pct": null,
+          "sell_avg_return_pct": -11.67,
+          "buy_pf": null,
+          "sell_pf": 15056.9355,
+          "coverage_buy_pct": 0.0,
+          "coverage_sell_pct": 57.1,
+          "mix": {
+            "BUY": 0,
+            "SELL": 4,
+            "WATCH_UP": 0,
+            "WATCH_FLAT": 0,
+            "WATCH_DOWN": 1,
+            "WATCH_RISK": 2
+          }
+        }
+      }
+    ]
+  },
+  "in_sample": {
+    "n": 137,
+    "n_buy": 0,
+    "n_sell": 12,
+    "buy_precision_pct": null,
+    "sell_precision_pct": 75.0,
+    "buy_avg_return_pct": null,
+    "sell_avg_return_pct": -5.5,
+    "buy_pf": null,
+    "sell_pf": 2.6369,
+    "coverage_buy_pct": 0.0,
+    "coverage_sell_pct": 8.8,
+    "mix": {
+      "BUY": 0,
+      "SELL": 12,
+      "WATCH_UP": 65,
+      "WATCH_FLAT": 15,
+      "WATCH_DOWN": 15,
+      "WATCH_RISK": 30
+    }
+  },
+  "baseline_compare_note": "BUY는 Walk-forward OOS가 LLM Baseline을 확실히 이길 때만 활성화. 그렇지 않으면 buy_min을 높여 Abstention(WATCH_UP) 우선.",
+  "parent_score_engine": "signal_engine_v2"
+}

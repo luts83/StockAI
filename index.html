@@ -1271,12 +1271,12 @@ function renderResults(data) {
 
   const analysis = data.analysis || "";
 
-  // ── 1. 시그널 파싱 — DB의 signal 필드 우선 사용 (텍스트 파싱 오류 방지)
+  // ── 1. 시그널 파싱 — DB/엔진 signal 필드 우선
   let signal = (data.signal || "WATCH").toUpperCase();
   let confidence = "";
+  const eng = data.signal_engine || {};
   let sigDisplay = getSignalDisplay(signal, analysis);
   try {
-    // CONFIDENCE 파싱
     const confMatch = analysis.match(/CONFIDENCE:\s*(상|중|하)/);
     confidence = confMatch?.[1] || "";
     sigDisplay = getSignalDisplay(signal, analysis);
@@ -1287,11 +1287,19 @@ function renderResults(data) {
   // ── 2. 시그널 박스 렌더링
   const signalArea = document.getElementById("signal-area");
   if (signalArea) {
-    const confColor = confidence === "상" ? "var(--green)"
-                    : confidence === "중" ? "var(--yellow)"
-                    : "var(--muted)";
-    const confBadge = confidence
-      ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
+    const engConf = (typeof eng.confidence === "number")
+      ? Math.round(eng.confidence * 100)
+      : null;
+    const confColor = engConf != null
+      ? (engConf >= 70 ? "var(--green)" : engConf >= 55 ? "var(--yellow)" : "var(--muted)")
+      : (confidence === "상" ? "var(--green)" : confidence === "중" ? "var(--yellow)" : "var(--muted)");
+    const confBadge = engConf != null
+      ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">엔진 ${engConf}%${eng.confidence_calibrated ? "·보정" : ""}</span>`
+      : (confidence
+        ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
+        : "");
+    const scoreLine = (typeof eng.score === "number")
+      ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">Score ${eng.score} · ${(eng.reason_codes || []).slice(0,4).join(", ")}</div>`
       : "";
     let triggerHtml = "";
     if ((signal === "WATCH" || signal.startsWith("WATCH_")) && (sigDisplay.buyTrigger || sigDisplay.sellTrigger || sigDisplay.duration)) {
@@ -1308,6 +1316,7 @@ function renderResults(data) {
         <div style="flex:1">
           <div class="signal-text">${sigDisplay.text}${confBadge}</div>
           <div class="signal-sub">${sigDisplay.sub}</div>
+          ${scoreLine}
           ${triggerHtml}
         </div>
       </div>`;

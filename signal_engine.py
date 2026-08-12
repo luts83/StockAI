@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-ENGINE_VERSION = "signal_engine_v1"
+ENGINE_VERSION = "signal_engine_v2"
 
 SIGNALS = (
     "BUY",
@@ -21,11 +21,44 @@ SIGNALS = (
     "WATCH_RISK",
 )
 
-# 보수적 임계값 — Baseline BUY가 약했으므로 BUY는 드물게
+# 기본 임계값 — data/engine_config.json 이 있으면 덮어씀
 BUY_SCORE_MIN = 58
 SELL_SCORE_MAX = -38
 WATCH_UP_MIN = 18
 WATCH_DOWN_MAX = -18
+
+_CONFIG_CACHE: dict | None = None
+_CONFIG_MTIME: float | None = None
+
+
+def _load_config() -> dict | None:
+    """data/engine_config.json lazy load (mtime 캐시)."""
+    global _CONFIG_CACHE, _CONFIG_MTIME
+    try:
+        from pathlib import Path
+        path = Path(__file__).resolve().parent / "data" / "engine_config.json"
+        if not path.exists():
+            return None
+        mtime = path.stat().st_mtime
+        if _CONFIG_CACHE is not None and _CONFIG_MTIME == mtime:
+            return _CONFIG_CACHE
+        import json
+        _CONFIG_CACHE = json.loads(path.read_text())
+        _CONFIG_MTIME = mtime
+        return _CONFIG_CACHE
+    except Exception:
+        return None
+
+
+def get_thresholds(config: dict | None = None) -> dict:
+    cfg = config if config is not None else _load_config()
+    thr = (cfg or {}).get("thresholds") or {}
+    return {
+        "buy_min": float(thr.get("buy_min", BUY_SCORE_MIN)),
+        "sell_max": float(thr.get("sell_max", SELL_SCORE_MAX)),
+        "watch_up_min": float(thr.get("watch_up_min", WATCH_UP_MIN)),
+        "watch_down_max": float(thr.get("watch_down_max", WATCH_DOWN_MAX)),
+    }
 
 
 def _g(d: dict | None, *keys, default=None):
@@ -265,54 +298,105 @@ def classify_watch(score: float, features: dict, gates: dict) -> str:
 
 
 def decide_signal(features: dict) -> dict:
-    """최종 시그널 결정."""
+    """최종 시그널 결정 (+ calibration / empirical horizon)."""
+    import math
+    from signal_calibration import calibrated_p_up, calibrated_confidence
+
+    config = _load_config()
+    thr = get_thresholds(config)
+    buy_min = thr["buy_min"]
+    sell_max = thr["sell_max"]
+    watch_up_min = thr["watch_up_min"]
+    watch_down_max = thr["watch_down_max"]
+
     gates = hard_gates(features)
     scored = compute_score(features)
     score = scored["score"]
 
     signal = "WATCH_FLAT"
-    if score >= BUY_SCORE_MIN and gates["buy_allowed"]:
+    if score >= buy_min and gates["buy_allowed"]:
         signal = "BUY"
-    elif score <= SELL_SCORE_MAX:
-        # 보유 가정 매도 vs 미보유 회피 — 엔진은 SELL, UI에서 AVOID 병기 가능
+    elif score <= sell_max:
         signal = "SELL"
     else:
-        signal = classify_watch(score, features, gates)
+        atrp = _g(features, "volatility", "atr_pct")
+        gap = _g(features, "volatility", "gap_risk")
+        if (atrp is not None and atrp > 0.10) or (gap is not None and abs(gap) > 0.05):
+            signal = "WATCH_RISK"
+        elif not gates.get("risk", True) or not gates.get("liquidity", True):
+            signal = "WATCH_RISK"
+        elif score >= watch_up_min:
+            signal = "WATCH_UP"
+        elif score <= watch_down_max:
+            signal = "WATCH_DOWN"
+        else:
+            signal = "WATCH_FLAT"
 
-    # BUY 게이트 실패 시 상향 편향이면 WATCH_UP
-    if score >= BUY_SCORE_MIN and not gates["buy_allowed"]:
+    if score >= buy_min and not gates["buy_allowed"]:
         signal = "WATCH_UP" if gates.get("risk", True) else "WATCH_RISK"
         scored["reason_codes"] = list(scored["reason_codes"]) + ["buy_gate_blocked"]
 
-    # 확률 프록시 (미캘리브레이션 — Phase 7에서 보정)
-    # logistic-ish from score
-    import math
-    p_up = 1 / (1 + math.exp(-score / 25))
+    p_up = calibrated_p_up(score, config)
     p_down = 1 / (1 + math.exp(score / 25))
-    flat = max(0.0, 1 - abs(p_up - p_down))
-    ssum = p_up + p_down + flat * 0.5
+    p_flat = max(0.05, 1.0 - abs(p_up - p_down))
+    ssum = p_up + p_down + p_flat
     prob = {
         "up": round(p_up / ssum, 3),
-        "flat": round((flat * 0.5) / ssum, 3),
+        "flat": round(p_flat / ssum, 3),
         "down": round(p_down / ssum, 3),
     }
+
+    conf = calibrated_confidence(score, signal, config)
+
+    emp = ((config or {}).get("empirical") or {}).get(signal) or {}
+    expected_return = emp.get("expected_return") or {}
+    expected_dd = emp.get("expected_drawdown") or {}
+
+    rs = features.get("relative_strength") or {}
+    regime = _g(features, "market_regime", "regime")
 
     return {
         "signal": signal,
         "signal_strength": int(_clip(abs(score), 0, 100)),
         "score": score,
-        "confidence": round(min(0.95, 0.5 + abs(score) / 200), 3),  # uncalibrated
+        "confidence": conf,
+        "confidence_calibrated": bool(config and (config.get("calibration") or {}).get("confidence_bins")),
         "probability": prob,
+        "expected_return": {
+            "5d": expected_return.get("5d"),
+            "10d": expected_return.get("10d"),
+            "20d": expected_return.get("20d"),
+        },
+        "expected_drawdown": {
+            "5d": expected_dd.get("5d"),
+            "10d": expected_dd.get("10d"),
+            "20d": expected_dd.get("20d"),
+        },
+        "horizon": {
+            "5d": {
+                "expected_return": expected_return.get("5d"),
+                "expected_drawdown": expected_dd.get("5d"),
+            },
+            "10d": {
+                "expected_return": expected_return.get("10d"),
+                "expected_drawdown": expected_dd.get("10d"),
+            },
+            "20d": {
+                "expected_return": expected_return.get("20d"),
+                "expected_drawdown": expected_dd.get("20d"),
+            },
+        },
+        "relative_strength": {
+            "vs_spy_20d": rs.get("vs_spy_20d"),
+            "vs_qqq_20d": rs.get("vs_qqq_20d"),
+            "vs_sector_20d": rs.get("vs_sector_20d"),
+        },
+        "market_regime": regime,
         "components": scored["components"],
         "reason_codes": scored["reason_codes"],
         "gate_status": gates,
-        "engine_version": ENGINE_VERSION,
-        "thresholds": {
-            "buy_min": BUY_SCORE_MIN,
-            "sell_max": SELL_SCORE_MAX,
-            "watch_up_min": WATCH_UP_MIN,
-            "watch_down_max": WATCH_DOWN_MAX,
-        },
+        "engine_version": (config or {}).get("engine_version") or ENGINE_VERSION,
+        "thresholds": thr,
     }
 
 

@@ -14,3 +14,4 @@ data/performance_validation.json
 data/perf_validation_run.log
 data/engine_v1_replay.json
 data/*.cache
+# engine_config.json 은 학습 산출물로 커밋 (프로덕션 threshold)

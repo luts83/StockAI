@@ -1328,6 +1328,82 @@ async def post_features_backfill(
     return await asyncio.to_thread(_job)
 
 
+@app.get("/engine/config")
+async def get_engine_config(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """Walk-forward로 학습된 threshold·calibration 설정."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    from signal_calibration import load_engine_config
+    cfg = load_engine_config()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="engine_config.json 없음 — scripts/train_engine.py 실행")
+    return cfg
+
+
+@app.get("/engine/report")
+async def get_engine_report(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """엔진 vs Baseline 요약 (config에 저장된 walk-forward OOS)."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    from signal_calibration import load_engine_config
+    cfg = load_engine_config()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="engine_config.json 없음")
+    return {
+        "engine_version": cfg.get("engine_version"),
+        "trained_at": cfg.get("trained_at"),
+        "thresholds": cfg.get("thresholds"),
+        "walk_forward_oos": (cfg.get("walk_forward") or {}).get("oos"),
+        "in_sample": cfg.get("in_sample"),
+        "calibration": cfg.get("calibration"),
+        "n_rows": cfg.get("n_rows"),
+    }
+
+
+@app.post("/engine/retrain")
+async def post_engine_retrain(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """Mongo features×outcomes로 Walk-forward 재학습 (관리자)."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    if ADMIN_EMAIL and user.get("email") != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="관리자만 실행 가능")
+
+    def _job():
+        from signal_calibration import train_engine
+        from pathlib import Path
+        features = list_signal_features(features_version=FEATURES_VERSION, limit=5000)
+        outcomes = list_signal_outcomes(limit=5000)
+        if len(features) < 20 or len(outcomes) < 20:
+            return {"ok": False, "error": "features/outcomes 부족", "n_feat": len(features), "n_out": len(outcomes)}
+        path = Path(__file__).resolve().parent / "data" / "engine_config.json"
+        cfg = train_engine(features, outcomes, path)
+        # clear engine config cache
+        import signal_engine as se
+        se._CONFIG_CACHE = None
+        se._CONFIG_MTIME = None
+        return {
+            "ok": True,
+            "engine_version": cfg.get("engine_version"),
+            "thresholds": cfg.get("thresholds"),
+            "oos": (cfg.get("walk_forward") or {}).get("oos"),
+            "path": str(path),
+        }
+
+    return await asyncio.to_thread(_job)
+
+
 @app.on_event("startup")
 async def start_scheduler():
     import pytz
