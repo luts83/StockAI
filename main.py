@@ -38,6 +38,7 @@ from database import (
     upsert_signal_outcome, list_signal_outcomes, list_analyses_for_backfill,
     save_baseline_report, get_latest_baseline_report,
     upsert_signal_features, get_signal_features, list_signal_features,
+    save_engine_training_run, get_latest_engine_training_run,
 )
 from signal_eval import (
     outcome_from_analysis_doc, summarize_baseline, ENGINE_VERSION,
@@ -1389,7 +1390,11 @@ async def post_engine_retrain(
             return {"ok": False, "error": "features/outcomes 부족", "n_feat": len(features), "n_out": len(outcomes)}
         path = Path(__file__).resolve().parent / "data" / "engine_config.json"
         cfg = train_engine(features, outcomes, path)
-        # clear engine config cache
+        run_id = None
+        try:
+            run_id = save_engine_training_run(cfg, source="api_retrain")
+        except Exception as e:
+            print(f"[engine] training history save failed: {e}")
         import signal_engine as se
         se._CONFIG_CACHE = None
         se._CONFIG_MTIME = None
@@ -1397,11 +1402,96 @@ async def post_engine_retrain(
             "ok": True,
             "engine_version": cfg.get("engine_version"),
             "thresholds": cfg.get("thresholds"),
+            "deploy_flags": cfg.get("deploy_flags"),
             "oos": (cfg.get("walk_forward") or {}).get("oos"),
+            "in_sample": cfg.get("in_sample"),
+            "run_id": run_id,
             "path": str(path),
         }
 
     return await asyncio.to_thread(_job)
+
+
+def _run_daily_engine_learn() -> dict:
+    """성과 백필 → feature 보강 → Walk-forward 재학습 (BUY 품질 최우선)."""
+    from pathlib import Path
+    from signal_calibration import train_engine
+    from signal_features import features_from_analysis_doc, clear_feature_cache
+    import signal_engine as se
+
+    print("[engine] daily learn: baseline backfill")
+    base = _run_baseline_backfill(5000, True)
+
+    print("[engine] daily learn: feature backfill")
+    clear_feature_cache()
+    docs = list_analyses_for_backfill(limit=5000)
+    feat_ok = feat_err = 0
+    for doc in docs:
+        try:
+            feat = features_from_analysis_doc(doc)
+            upsert_signal_features(feat)
+            feat_ok += 1
+        except Exception as e:
+            feat_err += 1
+            if feat_err <= 5:
+                print(f"[engine] feature fail {doc.get('ticker')}: {e}")
+
+    features = list_signal_features(limit=5000)
+    outcomes = list_signal_outcomes(limit=5000)
+    if len(features) < 20 or len(outcomes) < 20:
+        return {
+            "ok": False,
+            "error": "insufficient data",
+            "n_feat": len(features),
+            "n_out": len(outcomes),
+            "baseline": base,
+        }
+
+    path = Path(__file__).resolve().parent / "data" / "engine_config.json"
+    cfg = train_engine(features, outcomes, path)
+    run_id = None
+    try:
+        run_id = save_engine_training_run(cfg, source="daily_scheduler")
+    except Exception as e:
+        print(f"[engine] training history save failed: {e}")
+
+    se._CONFIG_CACHE = None
+    se._CONFIG_MTIME = None
+
+    oos = (cfg.get("walk_forward") or {}).get("oos") or {}
+    flags = cfg.get("deploy_flags") or {}
+    print(
+        f"[engine] daily learn done buy_enabled={flags.get('buy_enabled')} "
+        f"buy_min={cfg.get('thresholds', {}).get('buy_min')} "
+        f"oos_buy={oos.get('buy_precision_pct')}% n={oos.get('n_buy')} "
+        f"run={run_id}"
+    )
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "thresholds": cfg.get("thresholds"),
+        "deploy_flags": flags,
+        "oos": oos,
+        "n_feat": len(features),
+        "n_out": len(outcomes),
+        "baseline_outcomes": base.get("n_outcomes"),
+        "features_upserted": feat_ok,
+        "feature_errors": feat_err,
+    }
+
+
+@app.get("/engine/training/latest")
+async def get_engine_training_latest(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    doc = get_latest_engine_training_run()
+    if not doc:
+        raise HTTPException(status_code=404, detail="학습 이력 없음")
+    return doc
 
 
 @app.on_event("startup")
@@ -1442,6 +1532,23 @@ async def start_scheduler():
         _baseline_job,
         CronTrigger(hour=17, minute=30, day_of_week="mon-fri", timezone="America/New_York"),
         id="baseline_backfill",
+        replace_existing=True,
+    )
+
+    # Phase 6–8: 매일 자동 학습 (성과 채운 뒤 BUY 품질 최적화)
+    async def _engine_learn_job():
+        print("[engine] daily auto-learn start")
+        try:
+            result = await asyncio.to_thread(_run_daily_engine_learn)
+            print(f"[engine] daily auto-learn result ok={result.get('ok')} "
+                  f"buy_enabled={(result.get('deploy_flags') or {}).get('buy_enabled')}")
+        except Exception as e:
+            print(f"[engine] daily auto-learn failed: {e}")
+
+    scheduler.add_job(
+        _engine_learn_job,
+        CronTrigger(hour=18, minute=0, day_of_week="mon-fri", timezone="America/New_York"),
+        id="engine_daily_learn",
         replace_existing=True,
     )
 

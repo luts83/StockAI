@@ -351,6 +351,40 @@ def get_latest_baseline_report() -> dict | None:
     return _json_safe(doc)
 
 
+def save_engine_training_run(config: dict, source: str = "scheduler") -> str:
+    """매일 자동학습 이력 저장."""
+    doc_id = f"train_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    summary = {
+        "_id": doc_id,
+        "source": source,
+        "created_at": datetime.utcnow().isoformat(),
+        "engine_version": config.get("engine_version"),
+        "n_rows": config.get("n_rows"),
+        "thresholds": config.get("thresholds"),
+        "deploy_flags": config.get("deploy_flags"),
+        "oos": (config.get("walk_forward") or {}).get("oos"),
+        "in_sample": {
+            k: (config.get("in_sample") or {}).get(k)
+            for k in (
+                "n_buy", "n_sell", "n_paper_buy",
+                "buy_precision_pct", "sell_precision_pct", "paper_buy_precision_pct",
+                "buy_avg_return_pct", "buy_pf",
+            )
+        },
+        "buy_quality_targets": config.get("buy_quality_targets"),
+    }
+    get_db()["engine_training_runs"].insert_one(_json_safe(summary))
+    return doc_id
+
+
+def get_latest_engine_training_run() -> dict | None:
+    doc = get_db()["engine_training_runs"].find_one(sort=[("created_at", -1)])
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return _json_safe(doc)
+
+
 # ── Signal features (Phase 2) ───────────────────────────
 def upsert_signal_features(features: dict) -> str:
     """analysis_id를 _id로 feature 스냅샷 upsert."""

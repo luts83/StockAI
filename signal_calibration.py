@@ -57,7 +57,6 @@ def decide_with_thresholds(features: dict, thr: dict) -> dict:
     elif score <= sell_max:
         signal = "SELL"
     else:
-        # temporary override watch bands
         atrp = (features.get("volatility") or {}).get("atr_pct")
         gap = (features.get("volatility") or {}).get("gap_risk")
         if (atrp is not None and atrp > 0.10) or (gap is not None and abs(gap) > 0.05):
@@ -79,10 +78,28 @@ def decide_with_thresholds(features: dict, thr: dict) -> dict:
 
 def eval_rows(rows: list[dict], thr: dict, horizon: str = "return_10d") -> dict:
     preds = []
+    paper_rets = []
+    paper_min = float(thr.get("paper_buy_min", 55))
+
     for r in rows:
         d = decide_with_thresholds(r["features"], thr)
         ret = r["outcome"].get(horizon)
-        preds.append({**d, "ret": float(ret) if ret is not None else None})
+        excess = r["outcome"].get("excess_return_10d") if horizon == "return_10d" else None
+        mae = r["outcome"].get("mae_10d") if horizon == "return_10d" else None
+        ret_f = float(ret) if ret is not None else None
+        preds.append({
+            **d,
+            "ret": ret_f,
+            "excess": float(excess) if excess is not None else None,
+            "mae": float(mae) if mae is not None else None,
+        })
+        # Paper BUY: Gate 통과 + score≥paper_min (실제 BUY 배출 여부와 무관)
+        if (
+            ret_f is not None
+            and d["score"] >= paper_min
+            and (d.get("gates") or {}).get("buy_allowed")
+        ):
+            paper_rets.append(ret_f)
 
     def subset(sig):
         return [p for p in preds if p["signal"] == sig and p["ret"] is not None]
@@ -91,6 +108,8 @@ def eval_rows(rows: list[dict], thr: dict, horizon: str = "return_10d") -> dict:
     sell = subset("SELL")
     buy_rets = [p["ret"] for p in buy]
     sell_rets = [p["ret"] for p in sell]
+    buy_excess = [p["excess"] for p in buy if p["excess"] is not None]
+    buy_mae = [p["mae"] for p in buy if p["mae"] is not None]
 
     buy_prec = (
         _safe_float(100 * sum(1 for x in buy_rets if x > 0) / len(buy_rets), 1)
@@ -100,17 +119,27 @@ def eval_rows(rows: list[dict], thr: dict, horizon: str = "return_10d") -> dict:
         _safe_float(100 * sum(1 for x in sell_rets if x < 0) / len(sell_rets), 1)
         if sell_rets else None
     )
+    paper_prec = (
+        _safe_float(100 * sum(1 for x in paper_rets if x > 0) / len(paper_rets), 1)
+        if paper_rets else None
+    )
 
     return {
         "n": len(preds),
         "n_buy": len(buy_rets),
         "n_sell": len(sell_rets),
+        "n_paper_buy": len(paper_rets),
         "buy_precision_pct": buy_prec,
         "sell_precision_pct": sell_prec,
+        "paper_buy_precision_pct": paper_prec,
         "buy_avg_return_pct": _safe_float(100 * _mean(buy_rets), 2) if buy_rets else None,
         "sell_avg_return_pct": _safe_float(100 * _mean(sell_rets), 2) if sell_rets else None,
+        "paper_buy_avg_return_pct": _safe_float(100 * _mean(paper_rets), 2) if paper_rets else None,
+        "buy_avg_excess_pct": _safe_float(100 * _mean(buy_excess), 2) if buy_excess else None,
+        "buy_avg_mae_pct": _safe_float(100 * _mean(buy_mae), 2) if buy_mae else None,
         "buy_pf": _profit_factor(buy_rets) if buy_rets else None,
         "sell_pf": _profit_factor([-x for x in sell_rets]) if sell_rets else None,
+        "paper_buy_pf": _profit_factor(paper_rets) if paper_rets else None,
         "coverage_buy_pct": _safe_float(100 * len(buy_rets) / max(1, len(preds)), 1),
         "coverage_sell_pct": _safe_float(100 * len(sell_rets) / max(1, len(preds)), 1),
         "mix": {
@@ -121,35 +150,63 @@ def eval_rows(rows: list[dict], thr: dict, horizon: str = "return_10d") -> dict:
 
 
 def objective(metrics: dict) -> float:
-    """Train 선택 기준: Precision 우선, 극단적 희소화 패널티."""
+    """BUY 품질 최우선: Precision + 위험조정수익 + PF. SELL은 보조."""
     bp = metrics.get("buy_precision_pct")
     sp = metrics.get("sell_precision_pct")
     nb, ns = metrics.get("n_buy", 0), metrics.get("n_sell", 0)
+    br = metrics.get("buy_avg_return_pct") or 0.0
+    bex = metrics.get("buy_avg_excess_pct")
+    bmae = metrics.get("buy_avg_mae_pct")
+    bpf = metrics.get("buy_pf") or 0.0
     score = 0.0
+
     if bp is not None and nb >= 2:
-        score += bp * min(1.0, nb / 4)
+        score += bp * 2.0 * min(1.0, nb / 5)
+        score += max(0.0, br) * 3.0
+        if bex is not None:
+            score += max(0.0, bex) * 2.0
+        if bmae is not None:
+            score += max(-15.0, bmae) * 0.5
+        if bpf:
+            score += min(bpf, 5.0) * 8.0
+        if bp < 45:
+            score -= (45 - bp) * 1.5
     elif bp is not None and nb == 1:
-        score += bp * 0.25
+        score += bp * 0.15
+    else:
+        pp = metrics.get("paper_buy_precision_pct")
+        pn = metrics.get("n_paper_buy") or 0
+        if pp is not None and pn >= 3:
+            score += pp * 0.4 * min(1.0, pn / 8)
+
     if sp is not None and ns >= 3:
-        score += sp * min(1.0, ns / 8) * 0.8
+        score += sp * 0.6 * min(1.0, ns / 8)
     elif sp is not None and ns >= 1:
-        score += sp * 0.3
-    # coverage soft penalty if zero actions
+        score += sp * 0.2
+
     if nb + ns == 0:
-        score -= 20
+        score -= 25
     return score
 
 
 def grid_search_thresholds(train_rows: list[dict]) -> tuple[dict, dict]:
-    buy_grid = [50, 54, 58, 62, 66, 70]
-    sell_grid = [-30, -34, -38, -42, -48, -55]
-    best_thr = {"buy_min": 58, "sell_max": -38, "watch_up_min": 18, "watch_down_max": -18}
+    buy_grid = [52, 55, 58, 60, 62, 65, 68, 72, 75, 78]
+    sell_grid = [-28, -32, -36, -40, -44, -50, -55]
+    best_thr = {
+        "buy_min": 58, "sell_max": -38,
+        "watch_up_min": 18, "watch_down_max": -18,
+        "paper_buy_min": 55,
+    }
     best_m = eval_rows(train_rows, best_thr)
     best_obj = objective(best_m)
 
     for b in buy_grid:
         for s in sell_grid:
-            thr = {"buy_min": b, "sell_max": s, "watch_up_min": 18, "watch_down_max": -18}
+            thr = {
+                "buy_min": b, "sell_max": s,
+                "watch_up_min": 18, "watch_down_max": -18,
+                "paper_buy_min": min(55.0, float(b)),
+            }
             m = eval_rows(train_rows, thr)
             obj = objective(m)
             if obj > best_obj:
@@ -369,7 +426,7 @@ def train_engine(
     thr = wf["chosen_thresholds"]
     cal = calibrate(rows, thr)
     emp = empirical_horizons(rows, thr)
-    # ── Deploy safety: OOS가 LLM Baseline을 못 이기면 BUY 억제
+    # ── Deploy safety (적응형): 데이터 많아질수록 BUY 해제 문턱 완화
     LLM_BUY_PREC = 28.6
     LLM_SELL_PREC = 64.1
     oos = wf.get("oos") or {}
@@ -377,26 +434,59 @@ def train_engine(
         "buy_enabled": False,
         "sell_enabled": True,
         "reason": [],
+        "daily_retrain": True,
     }
     oos_bp = oos.get("buy_precision_pct")
     oos_sp = oos.get("sell_precision_pct")
     oos_nb = oos.get("n_buy") or 0
     oos_ns = oos.get("n_sell") or 0
+    oos_br = oos.get("buy_avg_return_pct")
+    n_rows = len(rows)
 
-    if oos_bp is not None and oos_nb >= 5 and oos_bp >= LLM_BUY_PREC + 5:
+    # 표본 규모에 따라 요구 Precision 상향폭 축소
+    if n_rows >= 400:
+        buy_lift = 2.0
+        min_buy_n = 12
+    elif n_rows >= 200:
+        buy_lift = 3.0
+        min_buy_n = 8
+    else:
+        buy_lift = 5.0
+        min_buy_n = 5
+
+    buy_ok = (
+        oos_bp is not None
+        and oos_nb >= min_buy_n
+        and oos_bp >= LLM_BUY_PREC + buy_lift
+        and (oos_br is None or oos_br > 0)
+    )
+    if buy_ok:
         deploy_flags["buy_enabled"] = True
         deploy_flags["reason"].append(
-            f"OOS BUY precision {oos_bp}% >= baseline {LLM_BUY_PREC}%+5 (n={oos_nb})"
+            f"OOS BUY OK prec={oos_bp}% avgR={oos_br}% n={oos_nb} "
+            f"(need ≥{LLM_BUY_PREC + buy_lift}% , n≥{min_buy_n})"
         )
     else:
-        # BUY 거의 차단 — WATCH_UP으로 유도
-        thr["buy_min"] = max(float(thr.get("buy_min", 58)), 75)
-        deploy_flags["reason"].append(
-            f"OOS BUY insufficient (prec={oos_bp}, n={oos_nb}) vs baseline {LLM_BUY_PREC}% → buy_min={thr['buy_min']}"
+        # Paper BUY 품질이 매우 좋으면 제한적 완화
+        paper_m = eval_rows(rows, thr)
+        pp, pn, pr = (
+            paper_m.get("paper_buy_precision_pct"),
+            paper_m.get("n_paper_buy") or 0,
+            paper_m.get("paper_buy_avg_return_pct"),
         )
+        if pp is not None and pn >= 15 and pp >= 55 and (pr or 0) > 0:
+            thr["buy_min"] = max(62.0, float(thr.get("buy_min", 75)) - 5)
+            deploy_flags["reason"].append(
+                f"Paper BUY strong (prec={pp}% n={pn} avgR={pr}%) → soft buy_min={thr['buy_min']}"
+            )
+        else:
+            thr["buy_min"] = max(float(thr.get("buy_min", 58)), 75)
+            deploy_flags["reason"].append(
+                f"OOS BUY hold (prec={oos_bp}, n={oos_nb}, avgR={oos_br}) "
+                f"need ≥{LLM_BUY_PREC + buy_lift}% n≥{min_buy_n} → buy_min={thr['buy_min']}"
+            )
 
     if oos_sp is not None and oos_ns >= 5 and oos_sp + 3 < LLM_SELL_PREC:
-        # SELL이 명확히 열위면 더 엄격
         thr["sell_max"] = min(float(thr.get("sell_max", -38)), -48)
         deploy_flags["reason"].append(
             f"OOS SELL {oos_sp}% < LLM {LLM_SELL_PREC}% → tighter sell_max={thr['sell_max']}"
@@ -406,6 +496,7 @@ def train_engine(
             f"OOS SELL precision {oos_sp}% (n={oos_ns}) kept"
         )
 
+    thr.setdefault("paper_buy_min", 55)
     in_sample = eval_rows(rows, thr)
 
     config = {
@@ -417,6 +508,11 @@ def train_engine(
         "llm_baseline": {
             "buy_precision_10d": LLM_BUY_PREC,
             "sell_precision_10d": LLM_SELL_PREC,
+        },
+        "buy_quality_targets": {
+            "min_oos_precision_pct": LLM_BUY_PREC + buy_lift,
+            "min_oos_n": min_buy_n,
+            "require_positive_avg_return": True,
         },
         "calibration": cal,
         "empirical": emp,
@@ -436,8 +532,8 @@ def train_engine(
         },
         "in_sample": in_sample,
         "baseline_compare_note": (
-            "BUY는 Walk-forward OOS가 LLM Baseline을 확실히 이길 때만 활성화. "
-            "그렇지 않으면 buy_min을 높여 Abstention(WATCH_UP) 우선."
+            "매일 자동 재학습. BUY는 OOS Precision·양의 평균수익·최소 표본을 충족할 때만 활성화. "
+            "미충족 시 buy_min을 높여 WATCH_UP(Abstention) 우선."
         ),
         "parent_score_engine": DEFAULT_ENGINE_VERSION,
     }

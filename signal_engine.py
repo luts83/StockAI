@@ -223,17 +223,17 @@ def compute_score(features: dict) -> dict:
             rs_pts -= w * 0.3
     parts["relative_strength"] = rs_pts
 
-    # Volume (max ~10)
+    # Volume (max ~14) — BUY 품질에 중요해서 가중
     vol_pts = 0.0
     vr = v.get("volume_ratio")
     if vr is not None:
         if vr >= 1.2:
-            vol_pts += 8
+            vol_pts += 12
             reasons.append("volume_confirm")
         elif vr >= 0.9:
-            vol_pts += 3
+            vol_pts += 5
         elif vr < 0.6:
-            vol_pts -= 5
+            vol_pts -= 8
             reasons.append("volume_dry")
     parts["volume"] = vol_pts
 
