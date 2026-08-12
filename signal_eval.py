@@ -49,10 +49,21 @@ def extract_confidence(analysis: str | None) -> Optional[str]:
 
 
 def normalize_signal(signal: str | None) -> str:
-    s = (signal or "").strip().upper()
-    if s in ("BUY", "SELL", "WATCH"):
+    s = (signal or "").strip().upper().replace(" ", "_")
+    if s in ("BUY", "SELL", "AVOID", "WATCH",
+             "WATCH_UP", "WATCH_FLAT", "WATCH_DOWN", "WATCH_RISK"):
         return s
     return s or "UNKNOWN"
+
+
+def signal_family(signal: str | None) -> str:
+    s = normalize_signal(signal)
+    if s.startswith("WATCH"):
+        return "WATCH"
+    if s == "AVOID":
+        return "SELL"
+    return s
+
 
 
 def parse_timestamp(value: Any) -> Optional[datetime]:
@@ -288,10 +299,10 @@ def summarize_baseline(
       downside_avoid_Hd    = P(R > -5% | WATCH)  # 큰 하락 회피
       opportunity_loss_Hd  = P(R >= +8% | WATCH) # 놓친 강한 상승
     """
-    rows = [o for o in outcomes if o and o.get("signal") in ("BUY", "SELL", "WATCH")]
+    rows = [o for o in outcomes if o and signal_family(o.get("signal")) in ("BUY", "SELL", "WATCH")]
     by_signal: dict[str, list] = defaultdict(list)
     for o in rows:
-        by_signal[o["signal"]].append(o)
+        by_signal[signal_family(o["signal"])].append(o)
 
     report: dict[str, Any] = {
         "engine_version": ENGINE_VERSION,

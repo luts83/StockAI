@@ -66,7 +66,9 @@ def save_analysis(ticker: str, period: str, indicators: dict,
                   analysis: str, signal: str, news: list, chart_b64: str,
                   user_id: str = "", current_price: float = None,
                   change_pct: float = None, valuation: dict = None,
-                  data_date: str = None) -> str:
+                  data_date: str = None,
+                  llm_signal: str = None,
+                  signal_engine: dict = None) -> str:
     db = get_db()
     doc_id = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     doc = {
@@ -81,6 +83,8 @@ def save_analysis(ticker: str, period: str, indicators: dict,
         "valuation":     valuation or {},
         "analysis":      analysis,
         "signal":        signal,
+        "llm_signal":    llm_signal or signal,
+        "signal_engine": signal_engine or {},
         "news":          news,
         "chart_b64":     chart_b64,
         "chat_history":  [],

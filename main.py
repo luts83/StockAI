@@ -45,6 +45,7 @@ from signal_eval import (
 from signal_features import (
     extract_features_from_df, FEATURES_VERSION,
 )
+from signal_engine import decide_signal, ENGINE_VERSION as SIGNAL_ENGINE_VERSION
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -103,8 +104,16 @@ def safe(val, decimals=2):
         return None
 
 def extract_signal(analysis: str) -> str:
-    m = _re.search(r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|WATCH|SELL)", analysis)
-    return m.group(1) if m else "WATCH"
+    """LLM 제안 SIGNAL 파싱. 최종 권한은 signal_engine에 있다."""
+    m = _re.search(
+        r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)",
+        analysis,
+        _re.I,
+    )
+    if not m:
+        return "WATCH_FLAT"
+    from signal_engine import normalize_signal
+    return normalize_signal(m.group(1))
 
 
 def clean_analysis(analysis: str) -> str:
@@ -113,7 +122,12 @@ def clean_analysis(analysis: str) -> str:
     CONFIDENCE / WATCH_* 메타 라인은 프론트에서 배지/편향 표시용으로 파싱한 뒤
     화면 본문에서 제거하므로 여기서는 보존한다.
     """
-    text = _re.sub(r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|WATCH|SELL)[^\n]*\n?", "", analysis)
+    text = _re.sub(
+        r"\*{0,2}SIGNAL:\*{0,2}\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)[^\n]*\n?",
+        "",
+        analysis,
+        flags=_re.I,
+    )
     # 짝이 맞지 않는 홀로 남은 ** 제거 (단어 경계 밖에 있는 것만)
     text = _re.sub(r"\*{2,}(?!\w)", "", text)   # 뒤에 단어 없는 **
     text = _re.sub(r"(?<!\w)\*{2,}", "", text)   # 앞에 단어 없는 **
@@ -297,7 +311,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
             analysis_date=analysis_date,
             earnings_context=earnings_context,
         )
-        signal   = extract_signal(analysis_raw)
+        llm_signal = extract_signal(analysis_raw)
         analysis = clean_analysis(analysis_raw)
         extended = await asyncio.to_thread(get_extended_price, ticker)
 
@@ -318,6 +332,26 @@ async def _run_analysis_job(job_id: str, ticker: str,
             / df["Close"].iloc[-2] * 100
         )
 
+        # Phase 4/5: feature → Score → 최종 signal (LLM은 설명·제안만)
+        signal_meta = {}
+        signal = llm_signal
+        try:
+            feat = extract_features_from_df(
+                df, ticker,
+                asof=analysis_date,
+                sector=(valuation or {}).get("sector"),
+                news=news_items,
+                valuation=valuation,
+                signal=llm_signal,
+            )
+            signal_meta = decide_signal(feat)
+            signal = signal_meta.get("signal") or llm_signal
+            signal_meta["llm_signal"] = llm_signal
+            feat["signal"] = signal
+        except Exception as e:
+            print(f"[signal_engine] decide 실패, LLM 시그널 사용: {e}")
+            feat = None
+
         doc_id = ""
         if user_id:
             doc_id = save_analysis(
@@ -329,6 +363,8 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 change_pct=change_pct_val,
                 valuation=valuation,
                 data_date=analysis_date,
+                llm_signal=llm_signal,
+                signal_engine=signal_meta,
             )
             # Phase 1: 사후성과 stub (horizon은 스케줄러/백필이 채움)
             try:
@@ -341,7 +377,8 @@ async def _run_analysis_job(job_id: str, ticker: str,
                     "entry_price": current_price_val,
                     "entry_date": analysis_date,
                     "signal": signal,
-                    "engine_version": ENGINE_VERSION,
+                    "llm_signal": llm_signal,
+                    "engine_version": SIGNAL_ENGINE_VERSION,
                     "horizons_complete": {"1d": False, "5d": False, "10d": False, "20d": False},
                 }
                 upsert_signal_outcome(stub)
@@ -349,16 +386,10 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 print(f"[baseline] outcome stub 실패: {e}")
             # Phase 2: feature 스냅샷
             try:
-                feat = extract_features_from_df(
-                    df, ticker,
-                    asof=analysis_date,
-                    sector=(valuation or {}).get("sector"),
-                    news=news_items,
-                    valuation=valuation,
-                    analysis_id=doc_id,
-                    signal=signal,
-                )
-                upsert_signal_features(feat)
+                if feat is not None:
+                    feat["analysis_id"] = doc_id
+                    feat["_id"] = doc_id
+                    upsert_signal_features(feat)
             except Exception as e:
                 print(f"[features] snapshot 실패: {e}")
         else:
@@ -387,11 +418,13 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "news":            news_items,
             "analysis":        analysis,
             "signal":          signal,
+            "llm_signal":      llm_signal,
+            "signal_engine":   signal_meta,
             "is_saved":        bool(user_id),
             "data_date":       analysis_date,
         }
         job.status = "done"
-        print(f"[job] {job_id[:8]} 완료: {ticker} {req.period}")
+        print(f"[job] {job_id[:8]} 완료: {ticker} {req.period} engine={signal} llm={llm_signal}")
 
     except Exception as e:
         job.status = "error"

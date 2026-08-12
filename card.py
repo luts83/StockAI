@@ -370,7 +370,8 @@ def _html_analysis(ticker: str, analysis: str, signal: str,
     inds = indicators or {}
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
 
-    clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
+    clean = re.sub(r"\nSIGNAL:(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)\s*$", "", analysis,
+
                    flags=re.MULTILINE).strip()
 
     # ── 전반적 추세 ─────────────────────────────────────
@@ -490,7 +491,8 @@ def _html_scenarios(ticker: str, analysis: str, signal: str,
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
     sig_text, sig_color = _signal_info(signal)
 
-    clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
+    clean = re.sub(r"\nSIGNAL:(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)\s*$", "", analysis,
+
                    flags=re.MULTILINE).strip()
 
     sig = signal.upper() if signal else "WATCH"
@@ -597,7 +599,8 @@ def _html_summary(ticker: str, analysis: str, signal: str,
     date_str = (created_at or "")[:10] or datetime.now().strftime("%Y-%m-%d")
     sig_text, sig_color = _signal_info(signal)
 
-    clean = re.sub(r"\nSIGNAL:(BUY|WATCH|SELL)\s*$", "", analysis,
+    clean = re.sub(r"\nSIGNAL:(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)\s*$", "", analysis,
+
                    flags=re.MULTILINE).strip()
 
     conclusion = _clean(cd.get("conclusion") or "")

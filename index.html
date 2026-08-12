@@ -866,7 +866,7 @@ function parseWatchMeta(analysis = "") {
 }
 
 function getSignalDisplay(signal, analysis = "") {
-  const s = (signal || "WATCH").toUpperCase();
+  const s = (signal || "WATCH_FLAT").toUpperCase();
   const meta = parseWatchMeta(analysis);
 
   if (s === "BUY") {
@@ -878,43 +878,41 @@ function getSignalDisplay(signal, analysis = "") {
       ...meta,
     };
   }
-  if (s === "SELL") {
+  if (s === "SELL" || s === "AVOID") {
     return {
       boxClass: "warn",
       icon: "🔴",
-      text: "매도 / 비중축소",
+      text: s === "AVOID" ? "진입 회피" : "매도 / 비중축소",
       sub: meta.sellTrigger || "하락 압력 우세",
       ...meta,
     };
   }
 
-  let boxClass = "watch";
-  let text = "관망 구간";
-  let sub = "방향성 확인 필요";
-  if (meta.bias) {
-    const isDownBias = meta.bias.includes("하락") || meta.bias.includes("약세") || meta.bias.includes("Bear");
-    const isUpBias = meta.bias.includes("상승") || meta.bias.includes("강세") || meta.bias.includes("Bull");
-    if (isDownBias) {
-      text = "관망 · 하락 편향";
-      boxClass = "watch-bear";
-      sub = `${meta.bias} — BUY: ${meta.buyTrigger || "조건 확인"}`;
-    } else if (isUpBias) {
-      text = "관망 · 상승 편향";
-      boxClass = "watch-bull";
-      sub = `${meta.bias} — SELL: ${meta.sellTrigger || "조건 확인"}`;
-    } else {
-      text = "관망 · 중립";
-      sub = meta.bias;
-    }
+  const watchMap = {
+    WATCH_UP:   { boxClass: "watch-bull", text: "관망 · 상승 편향", sub: "BUY Gate 미충족 — 상승 가능성" },
+    WATCH_FLAT: { boxClass: "watch", text: "관망 · 중립", sub: "방향성 확인 필요" },
+    WATCH_DOWN: { boxClass: "watch-bear", text: "관망 · 하락 편향", sub: "SELL 확신 부족 — 하락 가능성" },
+    WATCH_RISK: { boxClass: "watch-bear", text: "관망 · 위험", sub: "변동성/이벤트 위험 — 진입 자제" },
+    WATCH:      { boxClass: "watch", text: "관망 구간", sub: "방향성 확인 필요" },
+  };
+  const w = watchMap[s] || watchMap.WATCH_FLAT;
+  let { boxClass, text, sub } = w;
+  if (meta.bias) sub = meta.bias;
+  if (meta.buyTrigger || meta.sellTrigger) {
+    sub = `${sub} — BUY: ${meta.buyTrigger || "—"} / SELL: ${meta.sellTrigger || "—"}`;
   }
   return { boxClass, icon: "👀", text, sub, ...meta };
 }
 
 function getSignalBadge(signal, analysis = "") {
-  const s = (signal || "WATCH").toUpperCase();
-  const meta = parseWatchMeta(analysis);
+  const s = (signal || "WATCH_FLAT").toUpperCase();
   if (s === "BUY") return { cls: "sig-buy", text: "🟢 매수" };
   if (s === "SELL") return { cls: "sig-sell", text: "🔴 매도" };
+  if (s === "AVOID") return { cls: "sig-sell", text: "🔴 회피" };
+  if (s === "WATCH_UP") return { cls: "sig-watch-bull", text: "👀 관망↑" };
+  if (s === "WATCH_DOWN" || s === "WATCH_RISK") return { cls: "sig-watch-bear", text: s === "WATCH_RISK" ? "👀 관망⚠" : "👀 관망↓" };
+  if (s === "WATCH_FLAT" || s === "WATCH") return { cls: "sig-watch", text: "👀 관망" };
+  const meta = parseWatchMeta(analysis);
   if (meta.bias.includes("하락") || meta.bias.includes("약세")) {
     return { cls: "sig-watch-bear", text: "👀 관망↓" };
   }
@@ -1296,7 +1294,7 @@ function renderResults(data) {
       ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
       : "";
     let triggerHtml = "";
-    if (signal === "WATCH" && (sigDisplay.buyTrigger || sigDisplay.sellTrigger || sigDisplay.duration)) {
+    if ((signal === "WATCH" || signal.startsWith("WATCH_")) && (sigDisplay.buyTrigger || sigDisplay.sellTrigger || sigDisplay.duration)) {
       triggerHtml = `
         <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
           ${sigDisplay.buyTrigger  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY 전환: ${sigDisplay.buyTrigger}</div>` : ""}
@@ -1319,8 +1317,8 @@ function renderResults(data) {
   const cleanAnalysis = analysis
     .replace(/\nCONFIDENCE:\s*(상|중|하)[^\n]*/gm, "")
     .replace(/CONFIDENCE:\s*(상|중|하)[^\n]*/g, "")
-    .replace(/\nSIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/gm, "")
-    .replace(/SIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/g, "")
+    .replace(/\nSIGNAL:\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)[^\n]*/gm, "")
+    .replace(/SIGNAL:\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)[^\n]*/g, "")
     .replace(/\nWATCH_BIAS:[^\n]*/gm, "")
     .replace(/WATCH_BIAS:[^\n]*/g, "")
     .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
@@ -1872,7 +1870,7 @@ async function loadPerformanceTracker() {
       : results.map(r => {
           const pnlColor = r.pnl_pct >= 0 ? "var(--green)" : "var(--red)";
           const resultIcon = r.is_correct === true ? "✅" : r.is_correct === false ? "❌" : "⏳";
-          const sigClass = r.signal === "BUY" ? "signal-buy" : r.signal === "SELL" ? "signal-sell" : "signal-watch";
+          const sigClass = r.signal === "BUY" ? "signal-buy" : (r.signal === "SELL" || r.signal === "AVOID") ? "signal-sell" : (r.signal === "WATCH_UP") ? "signal-watch-bull" : (r.signal === "WATCH_DOWN" || r.signal === "WATCH_RISK") ? "signal-watch-bear" : "signal-watch";
           return `
             <div class="history-item" onclick="loadSavedAnalysis('${r.doc_id}')">
               <span class="history-ticker">${r.ticker}</span>
@@ -2054,8 +2052,8 @@ async function loadSavedAnalysis(docId) {
     const cleanAnalysis = analysis
       .replace(/\nCONFIDENCE:\s*(상|중|하)[^\n]*/gm, "")
       .replace(/CONFIDENCE:\s*(상|중|하)[^\n]*/g, "")
-      .replace(/\nSIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/gm, "")
-      .replace(/SIGNAL:\s*(BUY|WATCH|SELL)[^\n]*/g, "")
+      .replace(/\nSIGNAL:\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)[^\n]*/gm, "")
+      .replace(/SIGNAL:\s*(BUY|SELL|AVOID|WATCH_UP|WATCH_FLAT|WATCH_DOWN|WATCH_RISK|WATCH)[^\n]*/g, "")
       .replace(/\nWATCH_BIAS:[^\n]*/gm, "")
       .replace(/WATCH_BIAS:[^\n]*/g, "")
       .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
