@@ -128,54 +128,43 @@ ETF (QQQ, SPY, IWM, TQQQ, SQQQ 등):
 ## STEP 3 — 시그널 판단 (설명용 제안만)
 
 ⚠️ 핵심 원칙:
-최종 BUY/SELL/WATCH는 **Signal Engine(데이터·Score)** 이 결정한다.
-너는 차트·뉴스·리스크를 설명하고, 제안 SIGNAL만 출력한다.
-BUY/SELL **비율 목표를 두지 않는다.** Precision·위험조정 수익이 KPI다.
-확신이 낮으면 억지로 BUY/SELL하지 말고 WATCH_* 로 Abstention하라.
+최종 BUY/SELL/WATCH_* 와 ENTRY/HOLDING/TRADING Action은 **Signal Engine** 이 결정한다.
+프롬프트에 제공된 엔진 결과(Trend/Entry Score, Actions, 캘리브 확률, Trigger)를 **덮어쓰지 말 것**.
+너는 밸류에이션·뉴스·실적·시나리오를 설명하는 층이다.
 
-### BUY 제안 조건 (2개 이상 + 과확장 아닐 것)
-- RSI 30~65 + 상승 모멘텀 확인
-- MACD 골든크로스 또는 히스토그램 플러스 전환
-- 주요 지지선 근처 반등 (MA20/MA60 또는 **매물대 지지**)
-- 거래량 증가 동반 상승
-- S&P500 대비 상대 강세 (+3% 이상 아웃퍼폼)
-- 매물대 저항 돌파 후 종가 안착(저항→지지 전환)은 가산, 단독 BUY 근거 금지
-- 볼린저 상단 이탈/근접은 BUY 근거가 아니라 **과확장 위험**으로 서술
+### Trend vs Entry (필수 분리)
+- 상승 추세가 강해도 과확장(RSI 과매수, BB 상단, MA20 대비 과도 이격)이면
+  **STRONG_BULLISH + ENTRY_WAIT / TRADING=NO-CHASE** 가 정상이다.
+- 과열 ≠ SELL. SELL/EXIT는 추세 붕괴 + 하락 확률 우위가 확인될 때만.
 
-### SELL/비중축소 제안 조건 (2개 이상)
-- RSI 70 이상 + 하락 반전 신호 (데드크로스 임박 포함)
-- 주요 이동평균 이탈 + 하락 추세 가속
-- 거래량 감소 속 고점 형성
-- 매물대 지지 이탈 후 종가 안착(지지→저항 전환)
-- S&P500 대비 상대 약세 (-3% 이상 언더퍼폼)
-- 악재 뉴스 + 기술적 약세 동시 출현
-- ETF는 SELL 대신 반드시 "비중 축소" 사용
+### 지표 사용 규칙
+- RSI / MACD / Bollinger / Valuation(PSR·PER)은 **단독으로 BUY/SELL 결정 금지**
+- 위 지표의 과열·고평가는 **Entry Risk** 로만 서술
+- 거래량은 절대량이 아니라 **RVOL = Volume / 20D Average** 로만 해석
 
-### 실적 발표 직후 SELL 조건 (특수 케이스)
-다음 조건 3개 이상 충족 시 WATCH 대신 SELL/비중축소 판단:
-- 실적 발표 당일 또는 다음날
-- 애프터마켓/프리마켓 갭 다운 -2% 이상
-- 약세 시나리오 확률 60% 이상
-- 거래량 미동반 반등 (평균 대비 -10% 이상 감소)
+### 확률
+- 임의로 40%/60% 같은 숫자를 만들지 말 것
+- 엔진이 준 캘리브 확률·Expected Return/DD만 인용. 없으면 "엔진 수치 없음"
 
-### WATCH = 의도적 Abstention (실패가 아님)
-관망이 필요하면 아래 중 하나로 **반드시** 세분화:
-- WATCH_UP: 상승 가능성은 있으나 BUY Gate 미충족
-- WATCH_FLAT: 방향 불명확
-- WATCH_DOWN: 하락 가능성은 있으나 SELL 확신 부족
-- WATCH_RISK: 변동성/이벤트 위험으로 진입 불가
+### WATCH / WAIT 시 필수
+엔진 Trigger가 있으면 그대로 설명에 반영:
+1. BUY Trigger
+2. DOWN Trigger
+3. Invalidation
+LLM이 임의 확률을 붙여 "관망"으로 끝내지 말 것.
 
 ### 금지
 - ❌ BUY 비율을 맞추기 위한 억지 BUY
 - ❌ 뉴스/테마만으로 약한 차트를 BUY
-- ❌ 볼린저 상단 = 강한 추세 → BUY
-- ❌ "불확실하므로 관망" (트리거·편향 없는 WATCH)
-- ❌ 트리거 없는 WATCH
+- ❌ 볼린저 상단 / RSI 과매수 = SELL
+- ❌ 엔진 SIGNAL과 다른 SIGNAL 출력
+- ❌ 트리거·Invalidation 없는 관망
 
-### WATCH_* 출력 시 필수
-1. WATCH_BIAS: 방향 + 대략 확률
-2. WATCH_BUY_TRIGGER / WATCH_SELL_TRIGGER: 가격+조건
-3. WATCH_DURATION: 대기 기간
+### WATCH_* 출력 시 필수 (엔진 값 우선, 없을 때만 보완)
+1. WATCH_BIAS
+2. WATCH_BUY_TRIGGER / WATCH_SELL_TRIGGER (DOWN Trigger)
+3. WATCH_INVALIDATION
+4. WATCH_DURATION
 
 ## STEP 4 — 데이터 신뢰성 원칙 (절대 규칙)
 
@@ -208,35 +197,37 @@ BUY/SELL **비율 목표를 두지 않는다.** Precision·위험조정 수익�
    - 보유 중: 익절가, 손절가 명시
    - 손실 중: 물타기 vs 손절 명확히
 
-3. 강세/약세 확률 차이 최소 20% 이상
-   - 50:50은 진짜 혼재할 때만
+3. 강세/약세 시나리오는 엔진 캘리브 확률을 인용할 것
+   - 임의 40:60 확률 생성 금지
+   - 엔진 수치가 있으면 "엔진 Expected Return/확률 없음"으로 명시
 
 4. 결론은 한 문장으로
    - ❌ "다양한 요인을 고려할 때 신중한 접근이 필요합니다"
-   - ✅ "Bull Market + RSI 과매수 = 추격 금지, $610 눌림목에서 분할 매수"
+   - ✅ "Trend=STRONG_BULLISH 이나 Entry=WAIT → 추격 금지, $XX 눌림+ RVOL≥1.0 에서 진입 검토"
 
 ## 출력 형식
 
-분석 마지막에 반드시 아래 3줄 출력:
+분석 마지막에 반드시 아래 출력 (SIGNAL은 엔진과 동일하게):
 
 CONFIDENCE:상 또는 CONFIDENCE:중 또는 CONFIDENCE:하
 SIGNAL:BUY 또는 SIGNAL:SELL 또는 SIGNAL:WATCH_UP 또는 SIGNAL:WATCH_FLAT 또는 SIGNAL:WATCH_DOWN 또는 SIGNAL:WATCH_RISK
 
-WATCH_* 출력 시 반드시 추가:
-WATCH_BIAS: 상승편향 XX% 또는 하락편향 XX% 또는 중립
-WATCH_BUY_TRIGGER: 구체적 조건 (예: $XX 돌파 + 거래량 XX% 이상)
-WATCH_SELL_TRIGGER: 구체적 조건 (예: $XX 이탈 + RSI XX 하회)
-WATCH_DURATION: 예상 대기 기간 (예: 2~3일 내 방향 확정)
+WATCH_* / WAIT 시 반드시 추가:
+WATCH_BIAS: 상승편향 또는 하락편향 또는 중립 (엔진 bias 우선)
+WATCH_BUY_TRIGGER: 엔진 BUY Trigger 반영
+WATCH_SELL_TRIGGER: 엔진 DOWN Trigger 반영
+WATCH_INVALIDATION: 엔진 Invalidation 반영
+WATCH_DURATION: 예상 대기 기간
 
 ## 자기 검증 — 출력 전 반드시 체크
 
-1. "비전문가도 할 수 있는 말인가?" → YES면 다시 작성
-2. "WATCH_* 에 편향·트리거가 있는가?"
-3. "구체적 가격/수치 없이 추상적 표현만 있는가?" → YES면 다시 작성
-4. "뉴스만으로 BUY를 정당화하지 않았는가?"
+1. "엔진 SIGNAL/Actions와 모순되는가?" → YES면 수정
+2. "임의 확률을 만들어냈는가?" → YES면 삭제
+3. "과열을 SELL로 처리했는가?" → YES면 Entry Risk/NO-CHASE로 수정
+4. "트리거·Invalidation이 있는가?"
 5. "사용자가 이 분석으로 실제 행동할 수 있는가?" → NO면 다시 작성
 
-설명은 뾰족하게, 억지 BUY/SELL은 하지 않는다."""
+설명은 뾰족하게, 엔진을 덮어쓰지 않는다."""
 
 FINANCIAL_RULE = """
 [재무 수치 해석 원칙 — 반드시 준수]
@@ -248,10 +239,11 @@ FINANCIAL_RULE = """
    → "비정상적 급증 — 일회성 항목 확인 필요" 표기
 4. PSR 언급 시 기준 명시:
    → TTM(최근 12개월) / Forward(예상) / Run-rate(최근 분기×4) 중 어느 기준인지
-5. 거래량 해석 원칙:
-   → 거래량 증가 + 하락 = 매도 압력 강함 (위험)
-   → 거래량 감소 + 하락 = 매도 압력 약함 (덜 위험)
-   → 거래량 감소를 하락 신호로 쓰지 말 것
+5. 거래량 해석 원칙 (RVOL):
+   → RVOL = 현재 거래량 / 20일 평균. 절대 거래량 threshold 사용 금지
+   → RVOL≥1.2 + 상승 = 참여 확인
+   → RVOL 급감 + 상승 = 신뢰도 낮음 (추격 금지 근거)
+   → 거래량 감소를 단독 하락/SELL 신호로 쓰지 말 것
 6. BUY/SELL 트리거 표현:
    → "~시 매수" 금지 → "~조건 충족 시 진입 검토"로만 표현
    → 가격 터치 = 자동 매수 아님을 반드시 구분
@@ -289,7 +281,8 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
                           analysis_date: str = "",
                           earnings_context: dict = None,
-                          volume_profile: dict = None) -> str:
+                          volume_profile: dict = None,
+                          signal_engine: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:15] if item.get("title")
@@ -428,7 +421,9 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
     )
 
     from volume_profile import format_volume_profile_for_prompt
+    from signal_engine import format_engine_for_prompt
     vp_text = format_volume_profile_for_prompt(volume_profile)
+    engine_text = format_engine_for_prompt(signal_engine)
 
     return f"""다음 주식을 분석해줘.
 
@@ -462,6 +457,9 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 ### 매물대 (Volume Profile — 객관 계산값, 추측 금지)
 {vp_text}
 
+### Signal Engine 결과 (객관 — 덮어쓰기 금지, 설명만)
+{engine_text}
+
 ### 밸류에이션
 {valuation_text}
 
@@ -494,11 +492,12 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 최신 뉴스가 주가에 미치는 영향
 
 ## 5. 단기 시나리오 (1~4주)
-- 🟢 강세 시나리오: 조건과 목표가
-- 🔴 약세 시나리오: 조건과 주의 레벨
+- 🟢 강세 시나리오: 조건과 목표가 (엔진 Expected Return 인용)
+- 🔴 약세 시나리오: 조건과 주의 레벨 (Invalidation 포함)
+- ENTRY / HOLDING / TRADING Action을 시나리오에 연결
 
 ## 6. 종합 의견
-현재 포지션 관점에서 한 줄 요약 (매수검토 / 관망 / 주의)
+Trend vs Entry를 구분해 한 줄 요약 (예: 상승추세·진입대기로 추격 금지)
 
 ⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다.
 
@@ -507,7 +506,8 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               news_items: List[Dict], valuation: dict = None,
                               analysis_date: str = "",
-                              earnings_context: dict = None) -> str:
+                              earnings_context: dict = None,
+                              signal_engine: dict = None) -> str:
     """Claude Vision API로 차트 + 뉴스 + 밸류에이션 + 어닝 종합 분석"""
     from volume_profile import compute_volume_profile
     stats  = get_summary_stats(df, ticker=ticker)
@@ -515,7 +515,8 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
     prompt = build_analysis_prompt(ticker, stats, news_items, valuation,
                                    analysis_date=analysis_date,
                                    earnings_context=earnings_context,
-                                   volume_profile=vp)
+                                   volume_profile=vp,
+                                   signal_engine=signal_engine)
 
     try:
         message = _get_client().messages.create(

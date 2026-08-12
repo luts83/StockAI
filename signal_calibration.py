@@ -44,36 +44,20 @@ def join_feature_outcomes(features: list, outcomes: list) -> list[dict]:
 
 
 def decide_with_thresholds(features: dict, thr: dict) -> dict:
-    gates = hard_gates(features)
-    scored = compute_score(features)
-    score = scored["score"]
-    buy_min = thr["buy_min"]
-    sell_max = thr["sell_max"]
-    watch_up = thr.get("watch_up_min", 18)
-    watch_down = thr.get("watch_down_max", -18)
-
-    if score >= buy_min and gates["buy_allowed"]:
-        signal = "BUY"
-    elif score <= sell_max:
-        signal = "SELL"
-    else:
-        atrp = (features.get("volatility") or {}).get("atr_pct")
-        gap = (features.get("volatility") or {}).get("gap_risk")
-        if (atrp is not None and atrp > 0.10) or (gap is not None and abs(gap) > 0.05):
-            signal = "WATCH_RISK"
-        elif not gates.get("risk", True) or not gates.get("liquidity", True):
-            signal = "WATCH_RISK"
-        elif score >= watch_up:
-            signal = "WATCH_UP"
-        elif score <= watch_down:
-            signal = "WATCH_DOWN"
-        else:
-            signal = "WATCH_FLAT"
-
-    if score >= buy_min and not gates["buy_allowed"]:
-        signal = "WATCH_UP" if gates.get("risk", True) else "WATCH_RISK"
-
-    return {"signal": signal, "score": score, "gates": gates, **scored}
+    """Walk-forward용 — v3 decide_signal과 동일 규칙 (캘리브 config 없이 threshold만)."""
+    from signal_engine import decide_signal
+    d = decide_signal(features, thr_override=thr, config={})
+    return {
+        "signal": d["signal"],
+        "score": d["score"],
+        "gates": d.get("gate_status") or {},
+        "components": d.get("components") or {},
+        "reason_codes": d.get("reason_codes") or [],
+        "scores": d.get("scores") or {},
+        "trend_label": d.get("trend_label"),
+        "entry_stance": d.get("entry_stance"),
+        "actions": d.get("actions") or {},
+    }
 
 
 def eval_rows(rows: list[dict], thr: dict, horizon: str = "return_10d") -> dict:
@@ -500,7 +484,7 @@ def train_engine(
     in_sample = eval_rows(rows, thr)
 
     config = {
-        "engine_version": "signal_engine_v2",
+        "engine_version": "signal_engine_v3",
         "trained_at": datetime.utcnow().isoformat(),
         "n_rows": len(rows),
         "thresholds": thr,
@@ -513,6 +497,10 @@ def train_engine(
             "min_oos_precision_pct": LLM_BUY_PREC + buy_lift,
             "min_oos_n": min_buy_n,
             "require_positive_avg_return": True,
+            "compare_metrics": [
+                "buy_precision", "sell_precision",
+                "expected_return", "drawdown", "profit_factor",
+            ],
         },
         "calibration": cal,
         "empirical": emp,
@@ -532,8 +520,8 @@ def train_engine(
         },
         "in_sample": in_sample,
         "baseline_compare_note": (
-            "매일 자동 재학습. BUY는 OOS Precision·양의 평균수익·최소 표본을 충족할 때만 활성화. "
-            "미충족 시 buy_min을 높여 WATCH_UP(Abstention) 우선."
+            "v3: Trend/Entry 분리. BUY는 OOS Precision·양의 평균수익·PF가 baseline 대비 "
+            "개선될 때만 활성화. 과확장=ENTRY_WAIT/NO-CHASE, SELL=추세붕괴+하락우위만."
         ),
         "parent_score_engine": DEFAULT_ENGINE_VERSION,
     }

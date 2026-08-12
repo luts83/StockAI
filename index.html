@@ -856,11 +856,13 @@ function parseWatchMeta(analysis = "") {
   const biasMatch = analysis.match(/WATCH_BIAS[:\*\s]+([^\n]+)/);
   const buyTriggerMatch = analysis.match(/WATCH_BUY_TRIGGER[:\*\s]+([^\n]+)/);
   const sellTriggerMatch = analysis.match(/WATCH_SELL_TRIGGER[:\*\s]+([^\n]+)/);
+  const invMatch = analysis.match(/WATCH_INVALIDATION[:\*\s]+([^\n]+)/);
   const durationMatch = analysis.match(/WATCH_DURATION[:\*\s]+([^\n]+)/);
   return {
     bias: _clean(biasMatch?.[1]) || "",
     buyTrigger: _clean(buyTriggerMatch?.[1]) || "",
     sellTrigger: _clean(sellTriggerMatch?.[1]) || "",
+    invalidation: _clean(invMatch?.[1]) || "",
     duration: _clean(durationMatch?.[1]) || "",
   };
 }
@@ -1353,22 +1355,55 @@ function renderResults(data) {
     const scoreLine = (typeof eng.score === "number")
       ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">Score ${eng.score} · ${(eng.reason_codes || []).slice(0,4).join(", ")}</div>`
       : "";
+    const scores = eng.scores || {};
+    const actions = eng.actions || {};
+    const trig = eng.triggers || {};
+    const prob = eng.probability || {};
+    const scoreBreak = (scores.trend != null) ? `
+      <div style="margin-top:8px;display:grid;grid-template-columns:repeat(5,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Trend</div><div style="color:var(--text);font-weight:700">${scores.trend}</div><div style="color:var(--muted);margin-top:2px">${eng.trend_label || ""}</div></div>
+        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Mom</div><div style="color:var(--text);font-weight:700">${scores.momentum ?? "—"}</div></div>
+        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">RVOL</div><div style="color:var(--text);font-weight:700">${scores.participation ?? "—"}</div></div>
+        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Entry</div><div style="color:var(--text);font-weight:700">${scores.entry_quality ?? "—"}</div><div style="color:var(--muted);margin-top:2px">${eng.entry_stance || ""}</div></div>
+        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">R:R</div><div style="color:var(--text);font-weight:700">${scores.risk_reward ?? "—"}</div></div>
+      </div>` : "";
+    const actionLine = (actions.entry) ? `
+      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
+        <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">ENTRY ${actions.entry}</span>
+        <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">HOLDING ${actions.holding}</span>
+        <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">TRADING ${actions.trading}</span>
+        ${prob.up != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">P↑${Math.round(prob.up*100)}% · P↓${Math.round((prob.down||0)*100)}%</span>` : ""}
+        ${eng.rvol != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">RVOL ${eng.rvol}</span>` : ""}
+      </div>` : "";
+    const buyTrig = trig.buy_trigger || sigDisplay.buyTrigger;
+    const downTrig = trig.down_trigger || sigDisplay.sellTrigger;
+    const invTrig = trig.invalidation || sigDisplay.invalidation;
     let triggerHtml = "";
-    if ((signal === "WATCH" || signal.startsWith("WATCH_")) && (sigDisplay.buyTrigger || sigDisplay.sellTrigger || sigDisplay.duration)) {
+    if (signal !== "BUY" && (buyTrig || downTrig || invTrig || sigDisplay.duration)) {
       triggerHtml = `
         <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-          ${sigDisplay.buyTrigger  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY 전환: ${sigDisplay.buyTrigger}</div>` : ""}
-          ${sigDisplay.sellTrigger ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 SELL 전환: ${sigDisplay.sellTrigger}</div>` : ""}
-          ${sigDisplay.duration    ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay.duration}</div>` : ""}
+          ${buyTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY Trigger: ${buyTrig}</div>` : ""}
+          ${downTrig ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 DOWN Trigger: ${downTrig}</div>` : ""}
+          ${invTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(248,113,113,0.08);border-left:3px solid var(--orange, #f0883e);border-radius:4px;color:var(--orange, #f0883e)">⛔ Invalidation: ${invTrig}</div>` : ""}
+          ${sigDisplay.duration || trig.duration ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay.duration || trig.duration}</div>` : ""}
         </div>`;
     }
+    const er = eng.expected_return || {};
+    const horizonLine = (er["5d"] != null || er["10d"] != null) ? `
+      <div style="margin-top:6px;font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">
+        ExpR 5/10/20d: ${er["5d"] ?? "—"} / ${er["10d"] ?? "—"} / ${er["20d"] ?? "—"}
+        ${eng.expected_drawdown ? ` · ExpDD 10d: ${(eng.expected_drawdown || {})["10d"] ?? "—"}` : ""}
+      </div>` : "";
     signalArea.innerHTML = `
       <div class="signal-box ${sigDisplay.boxClass}">
         <div class="signal-icon">${sigDisplay.icon}</div>
         <div style="flex:1">
           <div class="signal-text">${sigDisplay.text}${confBadge}</div>
-          <div class="signal-sub">${sigDisplay.sub}</div>
+          <div class="signal-sub">${eng.trend_label && eng.entry_stance ? `${eng.trend_label} · ${eng.entry_stance}` : sigDisplay.sub}</div>
           ${scoreLine}
+          ${scoreBreak}
+          ${actionLine}
+          ${horizonLine}
           ${triggerHtml}
         </div>
       </div>`;
@@ -1384,6 +1419,8 @@ function renderResults(data) {
     .replace(/WATCH_BIAS:[^\n]*/g, "")
     .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
     .replace(/\nWATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
+    .replace(/\nWATCH_INVALIDATION:[^\n]*/gm, "")
+    .replace(/WATCH_INVALIDATION:[^\n]*/g, "")
     .replace(/\nWATCH_DURATION:[^\n]*/gm, "")
     .replace(/WATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
     .replace(/WATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
@@ -2119,6 +2156,8 @@ async function loadSavedAnalysis(docId) {
       .replace(/WATCH_BIAS:[^\n]*/g, "")
       .replace(/\nWATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
       .replace(/\nWATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
+      .replace(/\nWATCH_INVALIDATION:[^\n]*/gm, "")
+      .replace(/WATCH_INVALIDATION:[^\n]*/g, "")
       .replace(/\nWATCH_DURATION:[^\n]*/gm, "")
       .replace(/WATCH_BUY_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")
       .replace(/WATCH_SELL_TRIGGER:[^\n]*(\n[^\n#*]+)?/gm, "")

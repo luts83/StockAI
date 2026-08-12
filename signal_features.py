@@ -350,6 +350,7 @@ def extract_features_from_df(
             "volume": _safe(volume, 0),
             "avg_volume_20": _safe(avg_vol_20, 0) if avg_vol_20 is not None else None,
             "volume_ratio": vol_ratio,
+            "rvol": vol_ratio,  # Volume / 20D avg — 절대 거래량 threshold 대체
         },
         "volume_profile": compute_volume_profile(work),
         "returns": {

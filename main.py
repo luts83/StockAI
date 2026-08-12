@@ -311,13 +311,41 @@ async def _run_analysis_job(job_id: str, ticker: str,
         valuation        = await asyncio.to_thread(get_valuation_data, ticker)
         earnings_context = await asyncio.to_thread(get_earnings_context, ticker)
         analysis_date    = df.index[-1].strftime("%Y-%m-%d")
-        analysis_raw     = await analyze_with_claude(
+
+        # Engine first → LLM explains (cannot override)
+        signal_meta = {}
+        feat = None
+        signal = "WATCH_FLAT"
+        try:
+            feat = extract_features_from_df(
+                df, ticker,
+                asof=analysis_date,
+                sector=(valuation or {}).get("sector"),
+                news=news_items,
+                valuation=valuation,
+            )
+            signal_meta = decide_signal(feat)
+            signal = signal_meta.get("signal") or "WATCH_FLAT"
+            feat["signal"] = signal
+        except Exception as e:
+            print(f"[signal_engine] decide 실패: {e}")
+            signal_meta = {}
+
+        analysis_raw = await analyze_with_claude(
             chart_b64, df, ticker, news_items, valuation,
             analysis_date=analysis_date,
             earnings_context=earnings_context,
+            signal_engine=signal_meta or None,
         )
         llm_signal = extract_signal(analysis_raw)
         analysis = clean_analysis(analysis_raw)
+        if signal_meta:
+            signal_meta["llm_signal"] = llm_signal
+        else:
+            # 엔진 실패 시에만 LLM 시그널 fallback
+            signal = llm_signal
+            signal_meta = {"signal": signal, "llm_signal": llm_signal, "engine_failed": True}
+
         extended = await asyncio.to_thread(get_extended_price, ticker)
 
         indicators = {
@@ -336,27 +364,6 @@ async def _run_analysis_job(job_id: str, ticker: str,
             (df["Close"].iloc[-1] - df["Close"].iloc[-2])
             / df["Close"].iloc[-2] * 100
         )
-
-        # Phase 4/5: feature → Score → 최종 signal (LLM은 설명·제안만)
-        signal_meta = {}
-        signal = llm_signal
-        try:
-            feat = extract_features_from_df(
-                df, ticker,
-                asof=analysis_date,
-                sector=(valuation or {}).get("sector"),
-                news=news_items,
-                valuation=valuation,
-                signal=llm_signal,
-            )
-            signal_meta = decide_signal(feat)
-            signal = signal_meta.get("signal") or llm_signal
-            signal_meta["llm_signal"] = llm_signal
-            feat["signal"] = signal
-        except Exception as e:
-            print(f"[signal_engine] decide 실패, LLM 시그널 사용: {e}")
-            feat = None
-
         doc_id = ""
         if user_id:
             doc_id = save_analysis(
