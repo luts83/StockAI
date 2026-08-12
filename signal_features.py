@@ -337,7 +337,7 @@ def extract_features_from_df(
         },
         "volatility": {
             "atr": _safe(atr, 4),
-            "atr_pct": _pct(atr, close) if atr else None,
+            "atr_pct": _safe(atr / close, 6) if atr and close else None,
             "vol_20d": _safe(vol_20, 6),
             "vol_60d": _safe(vol_60, 6),
             "bb_width": bb_width,
