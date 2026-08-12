@@ -1239,7 +1239,10 @@ function renderResults(data) {
     const newsInfo = data.has_new_news
       ? `<span style="color:var(--green)">🆕 새 뉴스 ${data.new_news_count}건 추가됨</span>`
       : `<span>뉴스 최신 상태</span>`;
-    notice.innerHTML = `<span>ℹ️ 오늘 분석한 데이터 · ${newsInfo}</span><span style="color:var(--blue);cursor:pointer;text-decoration:underline;" onclick="forceAnalyze()">새로 분석하기 →</span>`;
+    const ageHint = data.cache_reason
+      ? `<span style="color:var(--dim);margin-left:6px">(${data.cache_reason})</span>`
+      : "";
+    notice.innerHTML = `<span>ℹ️ 최근 분석 재사용 · 장중엔 45분 또는 가격 ±1.5% 변동 시 자동 재분석${ageHint} · ${newsInfo}</span><span style="color:var(--blue);cursor:pointer;text-decoration:underline;" onclick="forceAnalyze()">지금 새로 분석 →</span>`;
     const signalArea = document.getElementById("signal-area");
     if (signalArea) signalArea.before(notice);
   }

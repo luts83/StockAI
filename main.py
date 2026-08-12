@@ -84,6 +84,113 @@ class AnalyzeRequest(BaseModel):
     interval: Optional[str] = "1d"
     force: Optional[bool] = False
 
+
+# ── 분석 캐시 신선도 (장중 가격·시간 반영) ──────────────
+CACHE_INTRADAY_TTL_MIN = 45     # 정규장 중 최대 수명
+CACHE_PRICE_MOVE_PCT = 0.015    # 1.5% 이상 변동 시 재분석
+CACHE_PREPOST_TTL_MIN = 90      # 프리/애프터 TTL
+
+
+def _parse_created_at(raw):
+    from datetime import datetime as _dt
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, _dt):
+            return raw.replace(tzinfo=None)
+        return _dt.fromisoformat(str(raw).replace("Z", "")[:26])
+    except Exception:
+        return None
+
+
+def _is_regular_session(ticker: str) -> bool:
+    try:
+        import pytz
+        from datetime import datetime as _dt, timezone as _tz
+    except ImportError:
+        return False
+    now = _dt.now(_tz.utc)
+    t = (ticker or "").upper()
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        local = now.astimezone(pytz.timezone("Asia/Seoul"))
+        if local.weekday() >= 5:
+            return False
+        mins = local.hour * 60 + local.minute
+        return 9 * 60 <= mins < 15 * 60 + 30
+    local = now.astimezone(pytz.timezone("America/New_York"))
+    if local.weekday() >= 5:
+        return False
+    mins = local.hour * 60 + local.minute
+    return 9 * 60 + 30 <= mins < 16 * 60
+
+
+def _is_extended_session(ticker: str) -> bool:
+    try:
+        import pytz
+        from datetime import datetime as _dt, timezone as _tz
+    except ImportError:
+        return False
+    t = (ticker or "").upper()
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        return False
+    local = _dt.now(_tz.utc).astimezone(pytz.timezone("America/New_York"))
+    if local.weekday() >= 5:
+        return False
+    mins = local.hour * 60 + local.minute
+    return (4 * 60 <= mins < 9 * 60 + 30) or (16 * 60 <= mins < 20 * 60)
+
+
+def cache_is_fresh(doc: dict, ticker: str, live_price: Optional[float] = None):
+    """당일 캐시 재사용 가능 여부 → (ok, reason)."""
+    from datetime import datetime as _dt
+    created = _parse_created_at(doc.get("created_at"))
+    if not created:
+        return False, "no_created_at"
+
+    age_min = max(0.0, (_dt.utcnow() - created).total_seconds() / 60.0)
+
+    try:
+        cached_px = float(doc["current_price"]) if doc.get("current_price") is not None else None
+    except (TypeError, ValueError):
+        cached_px = None
+    try:
+        live_price = float(live_price) if live_price is not None else None
+    except (TypeError, ValueError):
+        live_price = None
+
+    move_pct = None
+    if cached_px and live_price and cached_px > 0:
+        move_pct = abs(live_price - cached_px) / cached_px
+
+    if _is_regular_session(ticker):
+        if age_min > CACHE_INTRADAY_TTL_MIN:
+            return False, f"intraday_ttl:{age_min:.0f}m"
+        if move_pct is not None and move_pct >= CACHE_PRICE_MOVE_PCT:
+            return False, f"price_move:{move_pct * 100:.2f}%"
+        return True, f"intraday_ok:{age_min:.0f}m"
+
+    if _is_extended_session(ticker):
+        if age_min > CACHE_PREPOST_TTL_MIN:
+            return False, f"extended_ttl:{age_min:.0f}m"
+        if move_pct is not None and move_pct >= CACHE_PRICE_MOVE_PCT:
+            return False, f"price_move:{move_pct * 100:.2f}%"
+        return True, f"extended_ok:{age_min:.0f}m"
+
+    return True, f"after_hours_ok:{age_min:.0f}m"
+
+
+async def _live_price_for_cache(ticker: str) -> Optional[float]:
+    try:
+        ext = await asyncio.to_thread(get_extended_price, ticker)
+        px = ext.get("extended_price") or ext.get("regular_price") or ext.get("price")
+        if px is None and ext.get("last_price") is not None:
+            px = ext["last_price"]
+        return float(px) if px is not None else None
+    except Exception as e:
+        print(f"[cache] live price fail {ticker}: {e}")
+        return None
+
+
 class NewsSummaryRequest(BaseModel):
     title: str
     summary: str
@@ -234,58 +341,70 @@ async def analyze(
     user    = get_current_user(token=stockai_token, authorization=authorization)
     user_id = user.get("sub", "") if user else ""
 
-    # 비로그인 유저 — 당일 공용 캐시 조회 (force=False일 때)
+    # 비로그인 유저 — 당일 공용 캐시 (장중 TTL·가격변동 시 무효)
     if not user_id and not req.force:
         pub = get_today_public_analysis(ticker, req.period)
         if pub:
-            print(f"[PUBLIC CACHE] hit: {ticker} {req.period}")
-            return {
-                "doc_id":         "",
-                "ticker":         pub["ticker"],
-                "current_price":  pub.get("current_price"),
-                "change_pct":     pub.get("change_pct", 0),
-                "indicators":     pub.get("indicators", {}),
-                "valuation":      pub.get("valuation", {}),
-                "chart_image":    pub.get("chart_b64", ""),
-                "news":           pub.get("news", []),
-                "analysis":       pub["analysis"],
-                "signal":         pub.get("signal", "WATCH"),
-                "is_saved":       False,
-                "cached":         True,
-                "has_new_news":   False,
-                "new_news_count": 0,
-                "data_date":      pub.get("data_date", pub.get("created_at", "")[:10]),
-            }
+            live_px = await _live_price_for_cache(ticker)
+            ok, reason = cache_is_fresh(pub, ticker, live_px)
+            if ok:
+                print(f"[PUBLIC CACHE] hit: {ticker} {req.period} ({reason})")
+                return {
+                    "doc_id":         "",
+                    "ticker":         pub["ticker"],
+                    "current_price":  pub.get("current_price"),
+                    "change_pct":     pub.get("change_pct", 0),
+                    "indicators":     pub.get("indicators", {}),
+                    "valuation":      pub.get("valuation", {}),
+                    "chart_image":    pub.get("chart_b64", ""),
+                    "news":           pub.get("news", []),
+                    "analysis":       pub["analysis"],
+                    "signal":         pub.get("signal", "WATCH"),
+                    "is_saved":       False,
+                    "cached":         True,
+                    "cache_reason":   reason,
+                    "has_new_news":   False,
+                    "new_news_count": 0,
+                    "data_date":      pub.get("data_date", pub.get("created_at", "")[:10]),
+                }
+            print(f"[PUBLIC CACHE] stale: {ticker} ({reason}) → reanalyze")
 
-    # 로그인 유저이고 force=False면 당일 동일 종목+기간 캐시 반환 (뉴스만 실시간 갱신)
+    # 로그인 유저 — 당일 캐시, 장중엔 신선도 검사
     if user_id and not req.force:
         existing = get_today_analysis(ticker, req.period, user_id)
         print(f"[CACHE] ticker={ticker} period={req.period} user={user_id[:8]}... hit={existing is not None}")
         if existing:
-            fresh_news = await asyncio.to_thread(fetch_news, ticker)
-            existing_urls = {n.get("url", "") for n in existing.get("news", [])}
-            new_news = [n for n in fresh_news if n.get("url", "") not in existing_urls]
-            if new_news:
-                updated_news = (new_news + existing.get("news", []))[:15]
-                update_analysis_news(existing["_id"], updated_news)
-                existing["news"] = updated_news
-            return {
-                "doc_id":          existing["_id"],
-                "ticker":          existing["ticker"],
-                "current_price":   existing.get("current_price"),
-                "change_pct":      existing.get("change_pct", 0),
-                "indicators":      existing.get("indicators", {}),
-                "valuation":       existing.get("valuation", {}),
-                "chart_image":     existing.get("chart_b64", ""),
-                "news":            existing["news"],
-                "analysis":        existing["analysis"],
-                "signal":          existing.get("signal", "WATCH"),
-                "is_saved":        True,
-                "cached":          True,
-                "has_new_news":    bool(new_news),
-                "new_news_count":  len(new_news),
-                "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
-            }
+            live_px = await _live_price_for_cache(ticker)
+            ok, reason = cache_is_fresh(existing, ticker, live_px)
+            if not ok:
+                print(f"[CACHE] stale: {ticker} ({reason}) → reanalyze")
+            else:
+                fresh_news = await asyncio.to_thread(fetch_news, ticker)
+                existing_urls = {n.get("url", "") for n in existing.get("news", [])}
+                new_news = [n for n in fresh_news if n.get("url", "") not in existing_urls]
+                if new_news:
+                    updated_news = (new_news + existing.get("news", []))[:15]
+                    update_analysis_news(existing["_id"], updated_news)
+                    existing["news"] = updated_news
+                return {
+                    "doc_id":          existing["_id"],
+                    "ticker":          existing["ticker"],
+                    "current_price":   existing.get("current_price"),
+                    "change_pct":      existing.get("change_pct", 0),
+                    "indicators":      existing.get("indicators", {}),
+                    "valuation":       existing.get("valuation", {}),
+                    "chart_image":     existing.get("chart_b64", ""),
+                    "news":            existing["news"],
+                    "analysis":        existing["analysis"],
+                    "signal":          existing.get("signal", "WATCH"),
+                    "signal_engine":   existing.get("signal_engine") or {},
+                    "is_saved":        True,
+                    "cached":          True,
+                    "cache_reason":    reason,
+                    "has_new_news":    bool(new_news),
+                    "new_news_count":  len(new_news),
+                    "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
+                }
 
     # 신규 분석 — 백그라운드 job 생성 후 job_id 즉시 반환
     job_id = str(_uuid.uuid4())
