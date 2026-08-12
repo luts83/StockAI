@@ -9,5 +9,7 @@ __pycache__/
 .vscode/
 serve.py
 data/baseline_*.json
-data/signal_features.json
+data/signal_features*.json
+data/performance_validation.json
+data/perf_validation_run.log
 data/*.cache
