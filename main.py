@@ -37,9 +37,13 @@ from database import (
     get_user_analyses,
     upsert_signal_outcome, list_signal_outcomes, list_analyses_for_backfill,
     save_baseline_report, get_latest_baseline_report,
+    upsert_signal_features, get_signal_features, list_signal_features,
 )
 from signal_eval import (
     outcome_from_analysis_doc, summarize_baseline, ENGINE_VERSION,
+)
+from signal_features import (
+    extract_features_from_df, FEATURES_VERSION,
 )
 from market_brief import generate_market_brief
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -343,6 +347,20 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 upsert_signal_outcome(stub)
             except Exception as e:
                 print(f"[baseline] outcome stub 실패: {e}")
+            # Phase 2: feature 스냅샷
+            try:
+                feat = extract_features_from_df(
+                    df, ticker,
+                    asof=analysis_date,
+                    sector=(valuation or {}).get("sector"),
+                    news=news_items,
+                    valuation=valuation,
+                    analysis_id=doc_id,
+                    signal=signal,
+                )
+                upsert_signal_features(feat)
+            except Exception as e:
+                print(f"[features] snapshot 실패: {e}")
         else:
             save_public_analysis(
                 ticker=ticker, period=req.period,
@@ -1211,6 +1229,70 @@ async def post_baseline_backfill(
 
     result = await asyncio.to_thread(_run_baseline_backfill, limit, True)
     return result
+
+
+@app.get("/features/{analysis_id}")
+async def get_features_by_id(
+    analysis_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    doc = get_signal_features(analysis_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="features 없음")
+    return doc
+
+
+@app.get("/features")
+async def list_features(
+    ticker: Optional[str] = None,
+    limit: int = 100,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    return {
+        "features_version": FEATURES_VERSION,
+        "items": list_signal_features(
+            ticker=ticker, features_version=FEATURES_VERSION, limit=limit
+        ),
+    }
+
+
+@app.post("/features/backfill")
+async def post_features_backfill(
+    limit: int = 5000,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """analyses → signal_features 백필 (관리자)."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    if ADMIN_EMAIL and user.get("email") != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="관리자만 실행 가능")
+
+    def _job():
+        from signal_features import features_from_analysis_doc, clear_feature_cache
+        clear_feature_cache()
+        docs = list_analyses_for_backfill(limit=limit)
+        ok, err = 0, 0
+        for doc in docs:
+            try:
+                feat = features_from_analysis_doc(doc)
+                upsert_signal_features(feat)
+                ok += 1
+            except Exception as e:
+                err += 1
+                print(f"[features] backfill fail {doc.get('ticker')}: {e}")
+        return {"n_docs": len(docs), "ok": ok, "errors": err, "features_version": FEATURES_VERSION}
+
+    return await asyncio.to_thread(_job)
 
 
 @app.on_event("startup")

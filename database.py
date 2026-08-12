@@ -55,6 +55,11 @@ def ensure_indexes():
     db["signal_outcomes"].create_index("entry_date", background=True)
     db["signal_outcomes"].create_index("engine_version", background=True)
     db["baseline_reports"].create_index("generated_at", background=True)
+    # signal_features: Phase 2 feature store
+    db["signal_features"].create_index("ticker", background=True)
+    db["signal_features"].create_index("asof", background=True)
+    db["signal_features"].create_index("features_version", background=True)
+    db["signal_features"].create_index([("ticker", 1), ("asof", 1)], background=True)
 
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
@@ -340,6 +345,47 @@ def get_latest_baseline_report() -> dict | None:
         return None
     doc["_id"] = str(doc["_id"])
     return _json_safe(doc)
+
+
+# ── Signal features (Phase 2) ───────────────────────────
+def upsert_signal_features(features: dict) -> str:
+    """analysis_id를 _id로 feature 스냅샷 upsert."""
+    analysis_id = features.get("analysis_id") or features.get("_id")
+    if not analysis_id:
+        raise ValueError("analysis_id required")
+    doc = dict(features)
+    doc["_id"] = analysis_id
+    doc["analysis_id"] = analysis_id
+    doc["updated_at"] = datetime.utcnow().isoformat()
+    get_db()["signal_features"].replace_one({"_id": analysis_id}, _json_safe(doc), upsert=True)
+    return str(analysis_id)
+
+
+def get_signal_features(analysis_id: str) -> dict | None:
+    doc = get_db()["signal_features"].find_one({"_id": analysis_id})
+    return _json_safe(doc) if doc else None
+
+
+def list_signal_features(
+    ticker: str | None = None,
+    features_version: str | None = None,
+    limit: int = 5000,
+) -> list:
+    q: dict = {}
+    if ticker:
+        q["ticker"] = ticker.upper()
+    if features_version:
+        q["features_version"] = features_version
+    cursor = (
+        get_db()["signal_features"]
+        .find(q)
+        .sort("asof", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return _json_safe(items)
 
 
 # ── 시황 적중률 ──────────────────────────────────────────
