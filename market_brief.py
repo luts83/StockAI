@@ -88,15 +88,26 @@ def _is_after_close(region: str, now_local) -> bool:
     return now_min >= close_min
 
 
-def _has_today_session_data(region_data: dict, today: str) -> bool:
+def _has_today_session_data(
+    region_data: dict,
+    today: str,
+    keys: tuple | list | None = None,
+) -> bool:
     """해당 시장 데이터에 오늘(현지) 거래일 봉 + 유효 price가 있는지"""
     if not region_data:
         return False
-    if _latest_data_date(region_data) != today:
+    subset = (
+        {k: region_data[k] for k in keys if k in region_data}
+        if keys is not None
+        else region_data
+    )
+    if not subset:
+        return False
+    if _latest_data_date(subset) != today:
         return False
     return any(
         (d.get("last_date") or "").startswith(today) and d.get("price") is not None
-        for d in region_data.values()
+        for d in subset.values()
     )
 
 
@@ -218,8 +229,10 @@ TICKERS = {
         "XLV": "헬스케어",
     },
     "한국": {
-        "^KS11": "KOSPI",
-        "^KQ11": "KOSDAQ",
+        "^KS11":     "KOSPI",
+        "^KQ11":     "KOSDAQ",
+        "005930.KS": "삼성전자",
+        "000660.KS": "SK하이닉스",
     },
     "심리지표": {
         "^VIX":      "VIX 공포지수",
@@ -228,17 +241,27 @@ TICKERS = {
     },
 }
 
+KR_INDEX_TICKERS = ("^KS11", "^KQ11")
+KR_MEGA_TICKERS = ("005930.KS", "000660.KS")
+
+
+def _is_kr_symbol(ticker: str) -> bool:
+    t = (ticker or "").upper()
+    return t.startswith("^K") or t.endswith(".KS") or t.endswith(".KQ")
+
+
 STRICT_RULE = """
 [절대 원칙]
 1. 제공된 데이터에 없는 내용 언급 금지
 2. 뉴스/실적/경제지표 일정은 데이터로 주어지지 않으면 언급 금지
-3. 근거 없는 표현 ("외국인 매수세", "AI 관련주 재조명" 등) 금지
+3. 근거 없는 표현 ("외국인 매수세", "AI 관련주 재조명" 등) 금지 — 단, 제공된 수급·특징주 수치 인용은 허용
 4. 데이터로 설명 불가하면 "데이터상 원인 불명확"으로 표기
-5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수명 + % 포함
+5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수/종목명 + % 포함
 6. 전망은 현재 데이터 패턴에서만 도출, 외부 변수 추측 금지
 7. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
 8. 신뢰도는 반드시 상/중/하 세 단계 중 하나만 사용. '중상', '중하' 등 중간 단계 표현 금지
 9. 추측성 표현 금지 — "~로 추정", "~가능성" 대신 데이터가 없으면 "데이터 없음"으로 명시
+10. Fear & Greed / 삼성·하이닉스 / 섹터 ETF는 제공된 경우에만 언급
 """
 
 NEWS_RULE = """
@@ -368,8 +391,8 @@ def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dic
 
     for attempt in range(3):
         try:
-            # 한국 지수는 period를 더 넉넉하게 (거래일 확보)
-            period = "15d" if ticker.startswith("^K") else "10d"
+            # 한국 지수·종목은 period를 더 넉넉하게 (거래일 확보)
+            period = "15d" if _is_kr_symbol(ticker) else "10d"
             hist = yf.Ticker(ticker).history(period=period)
 
             if hist is None or hist.empty:
@@ -378,7 +401,7 @@ def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dic
 
             # 타임존 정규화 — 거래소 현지 기준으로 날짜를 산출해야 하루 밀림 방지
             #   (한국 지수는 KST 자정 인덱스를 UTC로 바꾸면 전날로 밀려 off-by-one 발생)
-            ex_tz = "Asia/Seoul" if ticker.startswith("^K") else "America/New_York"
+            ex_tz = "Asia/Seoul" if _is_kr_symbol(ticker) else "America/New_York"
             tz = pytz.timezone(ex_tz)
             if hist.index.tz is None:
                 # naive 일봉은 거래소 현지 거래일로 간주
@@ -402,7 +425,7 @@ def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dic
                 continue
 
             # 마감 확정 = 스케줄/상태판정과 동일 (_is_after_close: 마감+30분)
-            region = "한국" if ticker.startswith("^K") else "미국"
+            region = "한국" if _is_kr_symbol(ticker) else "미국"
             market_closed = _is_after_close(region, now_ex_local)
 
             last_dt = hist.index[-1].date()
@@ -474,6 +497,135 @@ def get_market_data(
     total = sum(len(v) for v in result.values())
     print(f"[market_brief] 총 {total}개 지수 수집 완료")
     return result
+
+
+def fetch_fear_greed() -> dict | None:
+    """CNN Fear & Greed (주식). 실패 시 None — 시황은 계속 생성."""
+    import httpx
+    from datetime import date as _date
+
+    start = (_date.today().replace(year=_date.today().year - 1)).isoformat()
+    url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{start}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://edition.cnn.com/markets/fear-and-greed",
+        "Origin": "https://edition.cnn.com",
+    }
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.get(url, headers=headers)
+            r.raise_for_status()
+            payload = r.json()
+        fg = payload.get("fear_and_greed") or {}
+        score = fg.get("score")
+        rating = fg.get("rating") or fg.get("description")
+        if score is None:
+            # fallback: last historical point
+            hist = (payload.get("fear_and_greed_historical") or {}).get("data") or []
+            if hist:
+                last = hist[-1]
+                score = last.get("y")
+                rating = last.get("rating") or rating
+        if score is None:
+            print("[market_brief] Fear&Greed 점수 없음")
+            return None
+        score_f = round(float(score), 1)
+        rating_s = str(rating or "").strip().lower().replace("_", " ")
+        label_map = {
+            "extreme fear": "Extreme Fear",
+            "fear": "Fear",
+            "neutral": "Neutral",
+            "greed": "Greed",
+            "extreme greed": "Extreme Greed",
+        }
+        label = label_map.get(rating_s, rating_s.title() if rating_s else "—")
+        out = {"score": score_f, "rating": label, "source": "CNN Fear & Greed"}
+        print(f"[market_brief] ✅ Fear&Greed {score_f} ({label})")
+        return out
+    except Exception as e:
+        print(f"[market_brief] ⚠️ Fear&Greed 수집 실패: {e}")
+        return None
+
+
+def _fmt_chg(d: dict | None) -> str:
+    if not d or d.get("change_pct") is None:
+        return "데이터 없음"
+    chg = d["change_pct"]
+    arrow = "▲" if chg > 0 else "▼"
+    stale = " (전일/지연)" if d.get("stale") else ""
+    return f"{d.get('price')} {arrow}{abs(chg)}%{stale} · RVOL {d.get('volume_ratio', '—')}%"
+
+
+def build_featured_context(
+    market_data: dict,
+    *,
+    brief_type: str,
+    fear_greed: dict | None = None,
+) -> str:
+    """섹터·국장 대형주·F&G를 프롬프트용 텍스트로 정리."""
+    lines = ["[업종·특징주·심리 — 아래 수치만 인용, 없는 종목 창작 금지]"]
+
+    sectors = market_data.get("섹터") or {}
+    ranked = []
+    for t, d in sectors.items():
+        if d.get("change_pct") is None or d.get("stale"):
+            continue
+        ranked.append((t, d))
+    ranked.sort(key=lambda x: x[1]["change_pct"], reverse=True)
+    if ranked:
+        lines.append("섹터 ETF (당일/직전세션):")
+        ups = [x for x in ranked if x[1]["change_pct"] > 0][:2]
+        downs = sorted(
+            [x for x in ranked if x[1]["change_pct"] < 0],
+            key=lambda x: x[1]["change_pct"],
+        )[:2]
+        if not ups:
+            ups = ranked[:1]
+        if not downs and len(ranked) > 1:
+            downs = [ranked[-1]]
+        up_keys = {t for t, _ in ups}
+        for t, d in ups:
+            lines.append(f"  · 강세 {d['name']}({t}): {_fmt_chg(d)}")
+        for t, d in downs:
+            if t in up_keys:
+                continue
+            lines.append(f"  · 약세/상대약세 {d['name']}({t}): {_fmt_chg(d)}")
+        top, bot = ranked[0][1], ranked[-1][1]
+        spread = abs(top["change_pct"] - bot["change_pct"])
+        lines.append(
+            f"  · 섹터 스프레드: {top['name']} vs {bot['name']} = {spread:.2f}%p"
+        )
+    else:
+        lines.append("섹터 ETF: 데이터 없음")
+
+    kr = market_data.get("한국") or {}
+    lines.append("국장 대형주 (기본 편입):")
+    for t in KR_MEGA_TICKERS:
+        d = kr.get(t)
+        name = (d or {}).get("name") or TICKERS["한국"].get(t, t)
+        if d and d.get("change_pct") is not None:
+            lines.append(f"  · {name}({t}): {_fmt_chg(d)}")
+        else:
+            lines.append(f"  · {name}({t}): 데이터 없음")
+
+    if brief_type.startswith("us"):
+        if fear_greed and fear_greed.get("score") is not None:
+            lines.append(
+                f"Fear & Greed: {fear_greed['score']} ({fear_greed.get('rating', '—')}) "
+                f"— source={fear_greed.get('source', 'CNN')}"
+            )
+        else:
+            lines.append("Fear & Greed: 데이터 없음 (언급 금지)")
+
+    lines.append(
+        "작성 규칙: 위 항목으로 '업종·특징주' 섹션을 3~5줄로만 작성. "
+        "제공되지 않은 개별 특징주 이름을 만들지 말 것."
+    )
+    return "\n".join(lines)
 
 
 # 백필 시 각 시황 타입의 정규 생성 시각 (현지)
@@ -610,6 +762,10 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     macro_news = fetch_macro_news(max_per_source=3)
     news_text = format_macro_news_for_brief(macro_news)
 
+    fear_greed = None
+    if brief_type.startswith("us"):
+        fear_greed = await asyncio.to_thread(fetch_fear_greed)
+
     if not _has_minimum_data(market_data):
         raise RuntimeError("핵심 지수 데이터 수집 실패")
 
@@ -622,7 +778,11 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     # (전날 데이터로 "수집 실패" 리포트를 쓰는 사고 방지)
     if brief_type in ("us_close", "kr_close") and _is_after_close(region_key, now_target):
         for attempt in range(3):
-            if _has_today_session_data(market_data.get(region_key, {}), today):
+            if _has_today_session_data(
+                market_data.get(region_key, {}),
+                today,
+                keys=KR_INDEX_TICKERS if region_key == "한국" else None,
+            ):
                 break
             if attempt < 2:
                 print(
@@ -653,27 +813,36 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
     recent = get_recent_market_briefs(limit=6)
 
-    # 한국 지수 stale 여부 확인 → kr_close 브리프 데이터로 대체
+    # 한국 지수 stale 여부 확인 → kr_close 브리프의 지수만 대체 (삼성·하이닉스는 유지)
     kr_data = market_data.get("한국", {})
-    kr_stale = not kr_data or any(
-        v.get("stale") or not v.get("price") for v in kr_data.values()
+    kr_indices = {k: kr_data[k] for k in KR_INDEX_TICKERS if k in kr_data}
+    kr_stale = (not kr_indices) or any(
+        v.get("stale") or not v.get("price") for v in kr_indices.values()
     )
     if kr_stale:
         korea_brief = next(
             (b for b in recent if b.get("type") == "kr_close"),
             None
         )
-        if korea_brief and korea_brief.get("market_data", {}).get("한국"):
-            market_data["한국"] = korea_brief["market_data"]["한국"]
+        old_kr = (korea_brief or {}).get("market_data", {}).get("한국") or {}
+        if old_kr:
+            market_data.setdefault("한국", {})
+            for k in KR_INDEX_TICKERS:
+                if k in old_kr:
+                    market_data["한국"][k] = old_kr[k]
             print(
-                f"[market_brief] 한국 지수 stale → kr_close 브리프 데이터로 대체 "
+                f"[market_brief] 한국 지수 stale → kr_close 지수만 대체 "
                 f"({korea_brief['date']})"
             )
         else:
-            print("[market_brief] 한국 지수 stale + kr_close 브리프 없음 → 데이터 없음 처리")
-            market_data["한국"] = {}
+            print("[market_brief] 한국 지수 stale + kr_close 브리프 없음 → 지수 데이터 없음")
+            for k in KR_INDEX_TICKERS:
+                market_data.get("한국", {}).pop(k, None)
 
     data_text = _build_data_text(market_data)
+    featured_text = build_featured_context(
+        market_data, brief_type=brief_type, fear_greed=fear_greed
+    )
     prev_context = _build_prev_context(brief_type)
 
     try:
@@ -815,6 +984,8 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
 [제공 데이터]
 {data_text}
+
+{featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
 
@@ -840,6 +1011,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
 KOSPI  ▲/▼X.XX%  거래량 XXX%
 KOSDAQ ▲/▼X.XX%  거래량 XXX%
+삼성전자 / SK하이닉스 (제공 시)
 (데이터 없으면 "오늘 한국 시장 데이터 없음 — 전날 결과 기준 참고"로만 표기)
 
 ---
@@ -850,20 +1022,27 @@ KOSDAQ ▲/▼X.XX%  거래량 XXX%
 S&P500 ▲/▼X.XX%  거래량 XXX%
 NASDAQ ▲/▼X.XX%  거래량 XXX%
 DOW    ▲/▼X.XX%  거래량 XXX%
+Fear & Greed: XX (라벨) — 제공된 경우만
 📰 관련 뉴스: (있을 때만 1줄)
 
 ---
 
-### 3. 📊 시장 심리 한 눈에
+### 3. 업종·특징주 (3~5줄)
+제공된 섹터 ETF·국장 대형주(삼성·하이닉스)·Fear&Greed만 사용. 없는 종목 창작 금지.
+
+---
+
+### 4. 📊 시장 심리 한 눈에
 | 지표 | 수치 | 방향 | 오늘 영향 |
 |------|------|------|-----------|
 | VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
+| Fear&Greed | XX | 라벨 | 탐욕/공포 |
 | 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
 | 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
 
 ---
 
-### 4. 🔮 오늘 미국 장 전망
+### 5. 🔮 오늘 미국 장 전망
 결론을 먼저 한 문장으로:
 
 **결론: 강세 우위 / 약세 우위 / 중립**
@@ -876,7 +1055,7 @@ DOW    ▲/▼X.XX%  거래량 XXX%
 
 ---
 
-### 5. 💡 한 줄 요약
+### 6. 💡 한 줄 요약
 [가장 중요한 수치 1개] 때문에 오늘 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
@@ -890,6 +1069,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [제공 데이터]
 {data_text}
+
+{featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
 
@@ -909,23 +1090,30 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 ### 1. 🇰🇷 한국 시장 마감 결과
 오늘 한국 증시 흐름을 자연스러운 문장으로 먼저 서술한 뒤 수치 정리.
 stale 데이터가 있으면 절대 서술하지 말고 "오늘 데이터 미수집" 명시.
+삼성전자·SK하이닉스 제공 시 반드시 한 줄 포함.
 
 KOSPI  X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
 KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
+삼성전자 / SK하이닉스 (제공 수치)
 
 뉴스 연결 (데이터 방향과 일치할 때만):
 "[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."
 
 ---
 
-### 2. 📊 시장 심리
+### 2. 업종·특징주 (3~5줄)
+제공된 섹터 ETF·삼성·하이닉스만으로 주도/소외를 짧게. 없는 종목 창작 금지.
+
+---
+
+### 3. 📊 시장 심리
 - 달러/원 환율 동향 → 외국인 수급 영향 한 줄
 - 글로벌 선물 동향 (있을 때만) → 내일 방향성 힌트 한 줄
 - 섹터별 특이사항 (있을 때만) → 수치 포함
 
 ---
 
-### 3. 🔮 내일 한국 시장 전망
+### 4. 🔮 내일 한국 시장 전망
 결론을 먼저 한 문장으로.
 
 **결론: 강세 우위 / 약세 우위 / 중립**
@@ -936,7 +1124,7 @@ KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
 
 ---
 
-### 4. 💡 한 줄 요약
+### 5. 💡 한 줄 요약
 한 문장, 30자 이내:
 "XXX 때문에 내일 한국장은 XXX 예상."
 
@@ -952,6 +1140,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [제공 데이터]
 {data_text}
+
+{featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
 
@@ -988,7 +1178,13 @@ DOW         ▲/▼X.XX%  거래량 XXX%
 섹터 (상위 2개만):
 반도체(SMH)  ▲/▼X.XX%
 금융(XLF)    ▲/▼X.XX%
+Fear & Greed: XX (라벨) — 제공된 경우만
 📰 관련 뉴스: (데이터 방향과 일치할 때만 1줄)
+
+---
+
+### 1.5 업종·특징주 (3~5줄)
+제공된 섹터 ETF·국장 대형주·Fear&Greed만 사용. 없는 종목 창작 금지.
 
 ---
 
@@ -1028,6 +1224,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [제공 데이터]
 {data_text}
+
+{featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
 
@@ -1068,6 +1266,12 @@ DOW         ▲/▼X.XX%
 | VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
 | 달러 | XXX.XX | ▲/▼ | 원화 강세/약세, 외국인 수급 |
 | 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
+
+---
+
+### 2.5 업종·특징주 (3~5줄)
+간밤 미장 섹터 ETF + 국장 삼성·하이닉스(전일/제공값)만으로 짧게.
+없는 종목 창작 금지. 반도체 관전 포인트 1줄.
 
 ---
 
@@ -1119,6 +1323,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         "type":        brief_type,
         "date":        today,
         "market_data": market_data,
+        "fear_greed":  fear_greed,
         "analysis":    analysis_clean,
         "signal":      signal,
         "created_at":  created,
