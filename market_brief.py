@@ -285,7 +285,8 @@ BRIEF_STYLE_RULE = """
 2. [뉴스] 태그를 서술 문장 중간에 삽입 금지
    → 서술이 끝난 뒤 별도 줄로만: "📰 관련 뉴스: XXX"
 3. "다음 거래일 (07/06 월요일)" 같은 긴 표현은 처음 한 번만,
-   이후에는 "내일" 또는 "월요일"로만 축약
+   이후에는 "다음 거래일" 또는 "월요일"로만 축약.
+   실제 다음 거래일이 달력상 내일이 아니면 "내일" 사용 금지 (주말·휴장 혼동 방지)
 4. 강세/약세 조건은 각 2개 이내, 불릿 최대 3개
 5. 전체 분석이 완결되어야 함 — 중간에 끊기지 말 것
 """
@@ -332,7 +333,7 @@ BRIEF_TYPES = {
         "label":   "🇺🇸 미국장 마감 시황",
         "market":  "미국",
         "verify":  "us_premarket",   # 오늘 미국 장전 전망을 검증
-        "predict": "내일 한국장",
+        "predict": "다음 거래일 한국장",
     },
 }
 
@@ -368,20 +369,20 @@ def _get_tomorrow_events(now) -> str:
     return "\n".join(lines)
 
 
-def _get_next_trading_day(now: datetime) -> str:
-    """오늘 기준 다음 거래일 (토→월, 일→월, 평일→내일) 반환"""
-    weekday = now.weekday()  # 0=월 ... 4=금, 5=토, 6=일
-    if weekday == 4:    # 금요일
-        delta = 3
-    elif weekday == 5:  # 토요일
-        delta = 2
-    elif weekday == 6:  # 일요일
-        delta = 1
-    else:
-        delta = 1
-    next_day = now + timedelta(days=delta)
-    next_weekday = WEEKDAY_KR[next_day.weekday()]
-    return f"{next_day.strftime('%m/%d')} {next_weekday}요일"
+def _next_kr_trading_label(now_kst: datetime) -> tuple[str, str]:
+    """한국 다음 거래일 라벨.
+    - 달력상 내일이 거래일이면 '내일'
+    - 주말·휴장이면 '다음 거래일 (MM/DD 요일)'
+    반환: (prompt_label, short_mmdd_weekday)
+    """
+    next_kr = get_next_trading_day("한국", now_kst)
+    next_d = next_kr.date() if hasattr(next_kr, "date") else next_kr
+    wd = WEEKDAY_KR[next_kr.weekday()]
+    short = f"{next_kr.strftime('%m/%d')}({wd})"
+    tomorrow = (now_kst + timedelta(days=1)).date()
+    if next_d == tomorrow:
+        return "내일", short
+    return f"다음 거래일 ({next_kr.strftime('%m/%d')} {wd}요일)", short
 
 
 def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dict | None:
@@ -891,12 +892,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
                 except Exception as e:
                     print(f"[market_brief] 적중률 저장 실패: {e}")
 
-    next_trading_day = _get_next_trading_day(now)
-    next_trading_label = (
-        f"다음 거래일 ({next_trading_day})"
-        if now.weekday() == 4   # 금요일에만
-        else "내일"
-    )
+    next_trading_label, next_kr_str = _next_kr_trading_label(now_kst)
 
     # 미국 마감 시황일 때 kr_close 브리프 한 줄 요약을 별도 컨텍스트로 추출
     kr_close_context = ""
@@ -937,10 +933,6 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 - BEAR 전망이 반복 빗나갔으면 → 이번엔 BULL 또는 NEUTRAL 검토
 """
 
-    # 다음 한국 거래일 (캘린더 반영)
-    next_kr     = get_next_trading_day("한국", now_kst)
-    next_kr_str = f"{next_kr.strftime('%m/%d')}({WEEKDAY_KR[next_kr.weekday()]})"
-
     def _status_line(s: dict) -> str:
         r = f" ({s['reason']})" if s.get("reason") else ""
         return f"{s['status']}{r}\n  마지막 거래일: {s['last_trading_day']} / 판정 신뢰도: {s['confidence']}"
@@ -966,7 +958,8 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 4. 신뢰도=추정/불일치이면 "휴장으로 추정됩니다 (확인 필요)"로 표기
 5. 데이터의 [데이터일]이 오늘이 아니면 반드시 "N월 N일 마감 기준"으로 명시
    절대 과거 거래일을 "오늘 마감"으로 표현하지 말 것
-6. "다음 거래일 (MM/DD 요일)" 반복 표기 금지 — 처음 1회만, 이후 "다음 거래일"로만
+6. "다음 거래일 (MM/DD 요일)" 반복 표기 금지 — 처음 1회만, 이후 "다음 거래일"로만.
+   다음 거래일이 달력상 내일이 아니면 "내일"이라고 쓰지 말 것 (주말·공휴일)
 7. status=PRE_OPEN → "장 시작 전"으로 서술. 직전 거래일 마감 데이터가 있으면 그걸 정상 기준으로 쓸 것.
    ✅ "미국은 아직 개장 전입니다. 아래는 직전 거래일(금) 마감 기준입니다."
    ❌ "미국 데이터 없음" / "미국 데이터 미수집" / "미국 데이터 부재"
@@ -1108,25 +1101,26 @@ KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
 
 ### 3. 📊 시장 심리
 - 달러/원 환율 동향 → 외국인 수급 영향 한 줄
-- 글로벌 선물 동향 (있을 때만) → 내일 방향성 힌트 한 줄
+- 글로벌 선물 동향 (있을 때만) → {next_trading_label} 방향성 힌트 한 줄
 - 섹터별 특이사항 (있을 때만) → 수치 포함
 
 ---
 
-### 4. 🔮 내일 한국 시장 전망
+### 4. 🔮 {next_trading_label} 한국 시장 전망
 결론을 먼저 한 문장으로.
+(섹션 제목·본문에서 달력상 비거래일을 "내일"로 쓰지 말 것. 기준일: {next_kr_str})
 
 **결론: 강세 우위 / 약세 우위 / 중립**
 강세 조건: 구체적 수치 조건
 약세 조건: 구체적 수치 조건
 신뢰도: 상 / 중 / 하 (세 가지 중 하나만 사용)
-핵심 체크: 내일 한국장에서 봐야 할 것 1개
+핵심 체크: {next_trading_label} 한국장에서 봐야 할 것 1개
 
 ---
 
 ### 5. 💡 한 줄 요약
 한 문장, 30자 이내:
-"XXX 때문에 내일 한국장은 XXX 예상."
+"XXX 때문에 {next_trading_label} 한국장은 XXX 예상."
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
@@ -1201,7 +1195,7 @@ Fear & Greed: XX (라벨) — 제공된 경우만
 ---
 
 ### 3. 📊 시장 심리 한 눈에
-| 지표 | 수치 | 방향 | 내일 영향 |
+| 지표 | 수치 | 방향 | {next_trading_label} 영향 |
 |------|------|------|-----------|
 | VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
 | 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
