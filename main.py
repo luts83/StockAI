@@ -419,29 +419,33 @@ async def _run_analysis_job(job_id: str, ticker: str,
     if not job:
         return
     job.status = "running"
+    t0 = asyncio.get_event_loop().time()
     try:
-        df = get_stock_data(ticker, req.period, req.interval)
+        # 동기 I/O·차트는 스레드로 — 이벤트 루프 막아 status 폴링이 멈추는 것 방지
+        df = await asyncio.to_thread(get_stock_data, ticker, req.period, req.interval)
         if df is None or df.empty:
             raise Exception(f"티커 '{ticker}' 데이터를 찾을 수 없습니다.")
 
-        df            = calculate_indicators(df)
-        chart_b64     = generate_chart(df, ticker)
-        news_items    = fetch_news(ticker)
-        valuation        = await asyncio.to_thread(get_valuation_data, ticker)
+        df = await asyncio.to_thread(calculate_indicators, df)
+        chart_b64 = await asyncio.to_thread(generate_chart, df, ticker)
+        news_items = await asyncio.to_thread(fetch_news, ticker)
+        valuation = await asyncio.to_thread(get_valuation_data, ticker)
         earnings_context = await asyncio.to_thread(get_earnings_context, ticker)
-        analysis_date    = df.index[-1].strftime("%Y-%m-%d")
+        analysis_date = df.index[-1].strftime("%Y-%m-%d")
 
         # Engine first → LLM explains (cannot override)
         signal_meta = {}
         feat = None
         signal = "WATCH_FLAT"
         try:
-            feat = extract_features_from_df(
-                df, ticker,
-                asof=analysis_date,
-                sector=(valuation or {}).get("sector"),
-                news=news_items,
-                valuation=valuation,
+            feat = await asyncio.to_thread(
+                lambda: extract_features_from_df(
+                    df, ticker,
+                    asof=analysis_date,
+                    sector=(valuation or {}).get("sector"),
+                    news=news_items,
+                    valuation=valuation,
+                )
             )
             signal_meta = decide_signal(feat)
             signal = signal_meta.get("signal") or "WATCH_FLAT"
@@ -555,12 +559,17 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "data_date":       analysis_date,
         }
         job.status = "done"
-        print(f"[job] {job_id[:8]} 완료: {ticker} {req.period} engine={signal} llm={llm_signal}")
+        elapsed = asyncio.get_event_loop().time() - t0
+        print(
+            f"[job] {job_id[:8]} 완료: {ticker} {req.period} "
+            f"engine={signal} llm={llm_signal} elapsed={elapsed:.1f}s"
+        )
 
     except Exception as e:
         job.status = "error"
         job.error  = str(e)
-        print(f"[job] {job_id[:8]} 오류: {e}")
+        elapsed = asyncio.get_event_loop().time() - t0
+        print(f"[job] {job_id[:8]} 오류 ({elapsed:.1f}s): {e}")
     finally:
         # 1시간 후 메모리에서 자동 제거
         await asyncio.sleep(3600)
