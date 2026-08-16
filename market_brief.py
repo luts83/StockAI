@@ -236,13 +236,47 @@ TICKERS = {
     },
     "심리지표": {
         "^VIX":      "VIX 공포지수",
+        "DX-Y.NYB":  "달러 인덱스(DXY)",
+        "KRW=X":     "원/달러(USD/KRW)",
+        "2YY=F":     "미국 2년물 금리",
         "^TNX":      "미국 10년물 금리",
-        "DX-Y.NYB":  "달러 인덱스",
     },
 }
 
 KR_INDEX_TICKERS = ("^KS11", "^KQ11")
 KR_MEGA_TICKERS = ("005930.KS", "000660.KS")
+
+# 종가 표기: 금리·환율은 $ 접두 없이
+_RATE_TICKERS = frozenset({"^TNX", "^IRX", "^FVX", "^TYX", "2YY=F"})
+_FX_TICKERS = frozenset({"KRW=X", "USDKRW=X"})
+
+
+def _format_level(ticker: str, price) -> str:
+    if price is None:
+        return "—"
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return str(price)
+    if ticker in _RATE_TICKERS:
+        return f"{p:.3f}%"
+    if ticker in _FX_TICKERS:
+        return f"{p:,.2f}"
+    if ticker in ("DX-Y.NYB", "^VIX"):
+        return f"{p:.2f}"
+    return f"{p:,.2f}"
+
+
+def _format_quote_line(ticker: str, d: dict) -> str:
+    """종가 / 등락률 / 거래량 한 줄."""
+    chg = d.get("change_pct")
+    if chg is None:
+        return f"{d.get('name', ticker)}({ticker}) — 가격 없음"
+    arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "→")
+    level = _format_level(ticker, d.get("price"))
+    vol = d.get("volume_ratio")
+    vol_s = f"거래량 {vol}%" if vol not in (None, 0, 0.0) else "거래량 —"
+    return f"{d.get('name', ticker)}({ticker}) {level} / {arrow}{abs(chg)}% / {vol_s}"
 
 
 def _is_kr_symbol(ticker: str) -> bool:
@@ -276,36 +310,93 @@ NEWS_RULE = """
 
 BRIEF_STYLE_RULE = """
 [시황 작성 스타일 원칙]
-1. 각 섹션은 '서술 먼저, 수치는 아래 줄로 분리'
-   ✅ 올바른 방식:
-      "오늘 미국 증시는 기술주 중심으로 하락했습니다."
-      NASDAQ ▼1.73%  거래량 105%
-      S&P500 ▼0.13%  거래량 80%
-   ❌ 잘못된 방식: "NASDAQ ▼1.73% 급락하며 [뉴스] 칩 매도로..."
-2. [뉴스] 태그를 서술 문장 중간에 삽입 금지
-   → 서술이 끝난 뒤 별도 줄로만: "📰 관련 뉴스: XXX"
-3. "다음 거래일 (07/06 월요일)" 같은 긴 표현은 처음 한 번만,
-   이후에는 "다음 거래일" 또는 "월요일"로만 축약.
-   실제 다음 거래일이 달력상 내일이 아니면 "내일" 사용 금지 (주말·휴장 혼동 방지)
-4. 강세/약세 조건은 각 2개 이내, 불릿 최대 3개
+1. 서술(짧게) → 수치는 아래 항목으로 분리. 숫자는 "종가 / 등락률 / 거래량" 형식
+2. [뉴스] 태그를 서술 문장 중간에 삽입 금지 → 별도 줄: "📰 [제목] → [연결 지표]"
+3. "다음 거래일 (MM/DD 요일)" 긴 표현은 처음 1회만, 이후 "다음 거래일"/요일로 축약.
+   달력상 내일이 거래일이 아니면 "내일" 금지
+4. 강세/약세 조건은 각 2개 이내, 지표명+임계치 필수
 5. 전체 분석이 완결되어야 함 — 중간에 끊기지 말 것
 """
 
+ENGINE_STRUCTURE_RULE = """
+[시황 엔진 공통 구조 — 장전/마감·한/미 모두 동일]
+0. 직전 전망 검증
+1. 핵심 시장 스냅샷 — 무엇이 움직였는가 (짧은 한줄 + 구조화 수치)
+2. 업종·특징주 — 왜/의미 (앞 섹션 등락률·종가 재나열 금지)
+3. 시장 심리 한 눈에 — 지표명 명확히 (VIX, DXY, USD/KRW, 2Y, 10Y, 금리차)
+4. 전망 — 데이터→분석→결론 + 검증 가능한 수치 조건
+5. 한 줄 요약 — 짧게 (불필요하게 늘리지 말 것)
+
+[가독성]
+- 30초~1분 스캔용. 긴 줄글 단락 금지. 항목·표·짧은 문장
+- 제공된 심리지표만 표에 넣고, 없는 행은 생략
+- "달러"/"금리"처럼 모호한 표기 금지
+"""
+
 BREADTH_RULE = """
-[시장 폭(Breadth) 해석 — 반드시 적용]
+[시장 폭(Breadth) 해석 — 미국 지수/섹터 언급 시 반드시 적용]
 1. SPY vs RSP 갭이 오늘의 진짜 스토리다
    - RSP > SPY (갭 0.5%p 이상): 대형주만 약세, 시장 전반은 견조
      → "지수 하락 = 시장 붕괴"로 서술 금지. "대형 기술주에 국한된 조정"으로 서술
    - RSP < SPY (갭 0.5%p 이상): 소수 대형주가 지수를 떠받침 = 실제론 더 약한 장
-   - 갭이 0.5%p 이상이면 1번 섹션에서 반드시 언급
+   - 갭이 0.5%p 이상이면 스냅샷에서 반드시 언급
 2. 섹터 ETF로 원인을 특정할 것
    - 특정 섹터만 급락이면 "시장 전체"가 아니라 "XX 섹터 조정"으로 서술
-   - 예: SMH ▼3% + XLF ▲1% → "반도체 조정, 금융은 강세"
    - 낙폭/상승폭 상위 2개 섹터만 언급 (5개 전부 나열 금지)
 3. IWM(러셀2000)으로 로테이션 확인
    - 대형주 하락 + IWM 보합/상승 = 섹터 로테이션 (약세장 아님)
 4. 섹터 데이터가 없으면 언급하지 말 것 (추측 금지)
 """
+
+
+def _verify_block(*, bench: str, result_metrics: str) -> str:
+    """공통 직전 전망 검증 섹션."""
+    return f"""### 0. 직전 전망 검증
+(직전 시황 없으면 생략)
+반드시 아래 순서로:
+
+- 전망: [SIGNAL:BULL/NEUTRAL/BEAR] + 핵심 근거 한 줄
+  (모호 표현 금지. 전망 대상 시장·조건을 명확히)
+- 실제 결과: {result_metrics}
+- 판정: 적중 / 부분 적중 / 빗나감 / 검증 보류 중 하나
+- 판정 이유: 왜 그 판정인지 1~2문장
+  [판정 기준 — 벤치마크 {bench}, 중립 밴드 ±0.3%]
+  · BULL → {bench} ≥ +0.3% 적중, |Δ|<0.3% 부분 적중, ≤ −0.3% 빗나감
+  · BEAR → {bench} ≤ −0.3% 적중, |Δ|<0.3% 부분 적중, ≥ +0.3% 빗나감
+  · NEUTRAL → |Δ|<0.3% 적중, 그 외 부분 적중. NEUTRAL을 상승/하락 전망으로 해석해 빗나감 금지
+  · 전망 대상이 아직 개장·마감 전이면 **검증 보류** (억지 판정 금지)
+- 다음 전망 반영: 다음 시황 생성에 바로 쓸 규칙 1줄 (추상적 감상 금지)
+"""
+
+
+def _psych_block(*, impact_header: str) -> str:
+    return f"""### 📊 시장 심리 한 눈에
+제공된 심리지표만 사용. 없는 행 생략.
+| 지표 | 현재값 | 전일 대비 | {impact_header} |
+|------|--------|-----------|------------------|
+| VIX | | | |
+| 달러 인덱스(DXY) | | | |
+| 원/달러(USD/KRW) | | | |
+| 미국 2년물 금리 | | | |
+| 미국 10년물 금리 | | | |
+| 10년-2년 금리차 | | | |
+"""
+
+
+def _outlook_block(*, title: str, condition_examples: str) -> str:
+    return f"""### 🔮 {title}
+서술 2~3문장: 앞 데이터 → 분석 → 결론이 한 줄기로 연결되게.
+
+**결론: 강세 우위 / 약세 우위 / 중립**
+- 강세 조건: 검증 가능한 수치 조건
+- 약세 조건: 검증 가능한 수치 조건
+{condition_examples}
+※ 모호한 조건 금지 — 지표명 + 임계치 필수
+
+신뢰도: 상/중/하
+핵심 체크: 이번에 볼 것 1개
+"""
+
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -552,9 +643,11 @@ def fetch_fear_greed() -> dict | None:
         return None
 
 
-def _fmt_chg(d: dict | None) -> str:
+def _fmt_chg(d: dict | None, ticker: str = "") -> str:
     if not d or d.get("change_pct") is None:
         return "데이터 없음"
+    if ticker:
+        return _format_quote_line(ticker, d)
     chg = d["change_pct"]
     arrow = "▲" if chg > 0 else "▼"
     stale = " (전일/지연)" if d.get("stale") else ""
@@ -590,11 +683,11 @@ def build_featured_context(
             downs = [ranked[-1]]
         up_keys = {t for t, _ in ups}
         for t, d in ups:
-            lines.append(f"  · 강세 {d['name']}({t}): {_fmt_chg(d)}")
+            lines.append(f"  · 강세 {_fmt_chg(d, t)}")
         for t, d in downs:
             if t in up_keys:
                 continue
-            lines.append(f"  · 약세/상대약세 {d['name']}({t}): {_fmt_chg(d)}")
+            lines.append(f"  · 약세/상대약세 {_fmt_chg(d, t)}")
         top, bot = ranked[0][1], ranked[-1][1]
         spread = abs(top["change_pct"] - bot["change_pct"])
         lines.append(
@@ -609,7 +702,7 @@ def build_featured_context(
         d = kr.get(t)
         name = (d or {}).get("name") or TICKERS["한국"].get(t, t)
         if d and d.get("change_pct") is not None:
-            lines.append(f"  · {name}({t}): {_fmt_chg(d)}")
+            lines.append(f"  · {_fmt_chg(d, t)}")
         else:
             lines.append(f"  · {name}({t}): 데이터 없음")
 
@@ -624,6 +717,7 @@ def build_featured_context(
 
     lines.append(
         "작성 규칙: 위 항목으로 '업종·특징주' 섹션을 3~5줄로만 작성. "
+        "앞에서 쓴 등락률 재나열 금지 — 의미·함의 중심. "
         "제공되지 않은 개별 특징주 이름을 만들지 말 것."
     )
     return "\n".join(lines)
@@ -672,21 +766,27 @@ def _build_data_text(market_data: dict) -> str:
                     f"- {d['name']}({ticker}) [데이터일: {d.get('last_date')}] — 가격 없음"
                 )
                 continue
-            arrow = "▲" if chg > 0 else "▼"
+            quote = _format_quote_line(ticker, d)
             if d.get("stale"):
                 lines.append(
-                    f"- {d['name']}({ticker}) "
-                    f"[⚠️ {d['last_date']} 데이터 — 기대 거래일 대비 지연, 전망 활용 금지]: "
-                    f"${d['price']} {arrow}{abs(chg)}% "
-                    f"(※ 최신 세션 아님)"
+                    f"- {quote} "
+                    f"[⚠️ {d['last_date']} — 기대 거래일 대비 지연, 전망 활용 금지]"
                 )
             else:
-                # 직전 거래일 데이터여도 (월요일이 금요일 미국 마감 등) 정상 활용
+                lines.append(f"- {quote} [데이터일: {d['last_date']}]")
+
+        if region == "심리지표":
+            tnx = tickers.get("^TNX")
+            y2 = tickers.get("2YY=F")
+            if (
+                tnx and y2
+                and tnx.get("price") is not None
+                and y2.get("price") is not None
+            ):
+                spread = round(float(tnx["price"]) - float(y2["price"]), 3)
                 lines.append(
-                    f"- {d['name']}({ticker}) [데이터일: {d['last_date']}]: "
-                    f"${d['price']} "
-                    f"{arrow}{abs(chg)}% "
-                    f"(거래량 평균 대비 {d['volume_ratio']}%)"
+                    f"- 10년-2년 금리차: {spread:+.3f}%p "
+                    f"(10Y {tnx['price']}% − 2Y {y2['price']}%)"
                 )
     return "\n".join(lines)
 
@@ -729,7 +829,12 @@ def _build_prev_context(brief_type: str) -> str:
         f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
         f"{forecast_text}\n"
         f"[이 전망({predict} 예측)을 오늘 실제 결과와 비교해 "
-        f"### 0. 직전 전망 검증에서 한 줄 인용하고 ✅/❌ 판정할 것]\n"
+        f"### 0. 직전 전망 검증에서 아래 구조로 작성할 것]\n"
+        f"- 전망: SIGNAL + 핵심 근거를 짧고 명확히 (모호한 '미수집 데이터' 표현 금지)\n"
+        f"- 실제 결과: SPY/QQQ(또는 KOSPI) 등락률 수치\n"
+        f"- 판정: 적중 / 부분 적중 / 빗나감\n"
+        f"- 판정 이유: 왜 그 판정인지 (전망 방향 vs 실제, ±0.3% 중립 밴드 기준)\n"
+        f"- 다음 전망 반영: 다음 리포트 전망에 실제로 적용할 규칙 1줄\n"
     )
 
 
@@ -968,12 +1073,31 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
     timing_context += accuracy_context
 
     if brief_type == "us_premarket":
+        verify0 = _verify_block(
+            bench="SPY",
+            result_metrics="직전 마감 기준 SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% "
+            "(직전 시황이 한국장을 예측했고 아직 미개장이면 검증 보류)",
+        )
+        psych = _psych_block(impact_header="오늘 미국장 영향")
+        outlook = _outlook_block(
+            title="오늘 미국 장 전망",
+            condition_examples=(
+                '  예: 강세 "RSP≥SPY 및 QQQ ▲0.5%+" / '
+                '약세 "VIX ▲10%+ 또는 SPY ▼0.5%+"'
+            ),
+        )
         prompt = f"""오늘 {today}({weekday_today}) 미국장 전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
+{NEWS_RULE}
 {timing_context}
+
+[이 리포트 특성 — 미국 장전]
+- 이미 끝난 한국 마감 + 직전 미국 세션을 스냅샷으로 정리한 뒤, 오늘 미국장 전망
+- 장중 미확정 봉을 오늘 마감처럼 쓰지 말 것
 
 [제공 데이터]
 {data_text}
@@ -989,76 +1113,82 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
 ## 📊 장전 시황 · {today} {weekday_today}요일
 
-### 0. 직전 전망 검증
-반드시 직전 시황의 전망을 **한 줄 인용**하고 결과를 비교할 것.
-- 전망: "[직전 시황에서 예측한 방향과 근거 인용]"
-- 결과: ✅ 적중 또는 ❌ 빗나감 — 실제 수치로 판단
-- 원인: 데이터로 읽히는 원인 1개 (수치 포함)
-- 교훈: 다음 분석에 반영할 점 한 줄
-(직전 시황 없으면 이 섹션 생략)
+{verify0}
 
 ---
 
 ### 1. 🇰🇷 한국 시장 마감 결과
-서술 (2~3문장): [데이터일] 기준 한국 증시가 어떻게 마감했는지, 이유와 함께 자연스럽게 서술.
+한 문장 핵심 (최대 2문장). 숫자는 아래에.
 
-KOSPI  ▲/▼X.XX%  거래량 XXX%
-KOSDAQ ▲/▼X.XX%  거래량 XXX%
-삼성전자 / SK하이닉스 (제공 시)
-(데이터 없으면 "오늘 한국 시장 데이터 없음 — 전날 결과 기준 참고"로만 표기)
+**주요 지수** (종가 / 등락률 / 거래량)
+- KOSPI …
+- KOSDAQ …
+- 삼성전자 / SK하이닉스 (제공 시)
 
----
-
-### 2. 🇺🇸 미국 장전 상황
-서술 (2~3문장): 전일 미국 마감 결과와 장 시작 전 분위기를 서술.
-
-S&P500 ▲/▼X.XX%  거래량 XXX%
-NASDAQ ▲/▼X.XX%  거래량 XXX%
-DOW    ▲/▼X.XX%  거래량 XXX%
-Fear & Greed: XX (라벨) — 제공된 경우만
-📰 관련 뉴스: (있을 때만 1줄)
+(데이터 없으면 "한국 시장 데이터 없음 — 전일 참고"만)
 
 ---
 
-### 3. 업종·특징주 (3~5줄)
-제공된 섹터 ETF·국장 대형주(삼성·하이닉스)·Fear&Greed만 사용. 없는 종목 창작 금지.
+### 2. 🇺🇸 미국 장전·직전세션 스냅샷
+한 문장 핵심. 숫자는 아래에.
+
+**주요 지수** (종가 / 등락률 / 거래량)
+- S&P500 (SPY) …
+- S&P 동일가중 (RSP) …
+- NASDAQ (QQQ) …
+- DOW (DIA) …
+- 러셀2000 (IWM) …
+
+**시장 폭**: SPY vs RSP 갭 — 한 줄
+**강세/약세 섹터** (각 1~2개, 종가/등락률/거래량)
+**시장 심리**: VIX · Fear & Greed(제공 시)
+📰 관련 뉴스: (데이터 방향과 일치할 때만) [제목] → [연결 지표]
 
 ---
 
-### 4. 📊 시장 심리 한 눈에
-| 지표 | 수치 | 방향 | 오늘 영향 |
-|------|------|------|-----------|
-| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
-| Fear&Greed | XX | 라벨 | 탐욕/공포 |
-| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
-| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
+### 3. 업종·특징주
+3~5줄. 수치 재나열 금지. 왜/의미·오늘 미국장 함의. 없는 종목 창작 금지.
 
 ---
 
-### 5. 🔮 오늘 미국 장 전망
-결론을 먼저 한 문장으로:
-
-**결론: 강세 우위 / 약세 우위 / 중립**
-
-- 강세: [데이터 기반 근거 1줄]
-- 약세: [데이터 기반 근거 1줄]
-
-신뢰도: 상/중/하
-핵심 체크: [오늘 장에서 봐야 할 것 1개]
+{psych}
 
 ---
 
-### 6. 💡 한 줄 요약
-[가장 중요한 수치 1개] 때문에 오늘 [핵심 포인트] 주목.
+{outlook}
+
+---
+
+### 💡 한 줄 요약
+[가장 중요한 수치] 때문에 오늘 미국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "kr_close":
+        verify0 = _verify_block(
+            bench="KOSPI",
+            result_metrics="KOSPI ▲/▼X.XX%, KOSDAQ ▲/▼X.XX% (제공 수치)",
+        )
+        psych = _psych_block(impact_header=f"{next_trading_label} 영향")
+        outlook = _outlook_block(
+            title=f"{next_trading_label} 한국 시장 전망 (기준일 {next_kr_str})",
+            condition_examples=(
+                '  예: 강세 "미국 QQQ 선물 ▲0.8%+ 및 SMH ▲1%+" / '
+                '약세 "QQQ 선물 ▼0.5%+ 또는 VIX ▲10%+"'
+            ),
+        )
         prompt = f"""오늘 {today}({weekday_today}) 한국 장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{ENGINE_STRUCTURE_RULE}
+{BRIEF_STYLE_RULE}
 {NEWS_RULE}
 {timing_context}
+
+[이 리포트 특성 — 한국 마감]
+- 오늘 한국 마감 스냅샷 → 의미 → {next_trading_label} 전망
+- stale 데이터는 전망에 쓰지 말고 명시
+- 비거래일을 "내일"로 쓰지 말 것
 
 [제공 데이터]
 {data_text}
@@ -1072,65 +1202,69 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 {prev_context}
 
-### 0. 직전 전망 검증
-(직전 시황 전망 있을 때만. 없으면 생략)
-- ✅ 적중 또는 ❌ 빗나감 — 전망 vs 실제 결과 한 줄
-- 원인: 데이터 기반 원인 수치 포함
-- 교훈: 다음 분석에 반영할 점 한 줄
+## 📈 🇰🇷 마감 시황 · {today} {weekday_today}요일
+
+{verify0}
 
 ---
 
 ### 1. 🇰🇷 한국 시장 마감 결과
-오늘 한국 증시 흐름을 자연스러운 문장으로 먼저 서술한 뒤 수치 정리.
-stale 데이터가 있으면 절대 서술하지 말고 "오늘 데이터 미수집" 명시.
-삼성전자·SK하이닉스 제공 시 반드시 한 줄 포함.
+한 문장 핵심 (최대 2문장). 숫자는 아래에.
 
-KOSPI  X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-KOSDAQ X,XXX.XX  ▲/▼X.XX%  거래량 XXX%
-삼성전자 / SK하이닉스 (제공 수치)
+**주요 지수** (종가 / 등락률 / 거래량)
+- KOSPI …
+- KOSDAQ …
+- 삼성전자 …
+- SK하이닉스 …
 
-뉴스 연결 (데이터 방향과 일치할 때만):
-"[뉴스] XX 이슈가 위 흐름의 배경으로 보입니다."
-
----
-
-### 2. 업종·특징주 (3~5줄)
-제공된 섹터 ETF·삼성·하이닉스만으로 주도/소외를 짧게. 없는 종목 창작 금지.
+**강세/약세 포인트** (제공 섹터·대형주만, 각 1~2개)
+📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
 
 ---
 
-### 3. 📊 시장 심리
-- 달러/원 환율 동향 → 외국인 수급 영향 한 줄
-- 글로벌 선물 동향 (있을 때만) → {next_trading_label} 방향성 힌트 한 줄
-- 섹터별 특이사항 (있을 때만) → 수치 포함
+### 2. 업종·특징주
+3~5줄. 수치 재나열 금지. 왜/의미·수급 함의. 없는 종목 창작 금지.
 
 ---
 
-### 4. 🔮 {next_trading_label} 한국 시장 전망
-결론을 먼저 한 문장으로.
-(섹션 제목·본문에서 달력상 비거래일을 "내일"로 쓰지 말 것. 기준일: {next_kr_str})
-
-**결론: 강세 우위 / 약세 우위 / 중립**
-강세 조건: 구체적 수치 조건
-약세 조건: 구체적 수치 조건
-신뢰도: 상 / 중 / 하 (세 가지 중 하나만 사용)
-핵심 체크: {next_trading_label} 한국장에서 봐야 할 것 1개
+{psych}
 
 ---
 
-### 5. 💡 한 줄 요약
-한 문장, 30자 이내:
-"XXX 때문에 {next_trading_label} 한국장은 XXX 예상."
+{outlook}
+
+---
+
+### 💡 한 줄 요약
+[가장 중요한 수치] 때문에 {next_trading_label} 한국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "us_close":
+        verify0 = _verify_block(
+            bench="SPY",
+            result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
+        )
+        psych = _psych_block(impact_header=f"{next_trading_label} 한국 영향")
+        outlook = _outlook_block(
+            title=f"{next_trading_label} 한국 시장 전망",
+            condition_examples=(
+                '  예: 강세 "다음 세션 QQQ ▲0.8%+ + SMH ▲1%+" / '
+                '약세 "QQQ ▼0.5%+ 또는 VIX ▲10%+"'
+            ),
+        )
         prompt = f"""오늘 {today}({weekday_today}) 미국장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
+{NEWS_RULE}
 {timing_context}
+
+[이 리포트 특성 — 미국 마감]
+- 오늘 미국 마감 스냅샷 → 의미 → {next_trading_label} 한국 전망
+- SPY vs RSP 시장 폭 해석 필수(갭 있을 때)
 
 [제공 데이터]
 {data_text}
@@ -1146,75 +1280,73 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {kr_close_context}
 ## 📈 마감 시황 · {today} {weekday_today}요일
 
-### 0. 직전 전망 검증
-반드시 오늘 장전 시황의 전망을 **한 줄 인용**하고 결과를 비교할 것.
-- 전망: "[장전 시황에서 예측한 방향과 근거 인용]"
-- 결과: ✅ 적중 또는 ❌ 빗나감 — 실제 마감 수치로 판단
-- 원인: 예상과 달랐던 이유 1개 (수치 포함)
-- 교훈: 다음 분석에 반영할 점 한 줄
-(장전 시황 없으면 이 섹션 생략)
+{verify0}
 
 ---
 
 ### 1. 🇺🇸 미국 시장 마감 결과
-서술 (2~4문장): [데이터일] 기준으로 오늘 미국 증시가 어떻게 마감했는지 서술.
-반드시 포함:
-- SPY vs RSP 갭이 0.5%p 이상이면 시장 폭 해석을 첫 문장에 배치
-- 섹터 중 낙폭/상승폭 상위 2개만 원인으로 지목
-- "지수만 보면 X, 실제로는 Y" 구조로 서술
+한 문장 핵심 (최대 2문장). 숫자는 아래에.
 
-S&P500      ▲/▼X.XX%  거래량 XXX%
-S&P 동일가중  ▲/▼X.XX%   ← SPY와 갭 있으면 강조
-NASDAQ      ▲/▼X.XX%  거래량 XXX%
-DOW         ▲/▼X.XX%  거래량 XXX%
-러셀2000     ▲/▼X.XX%
+**주요 지수** (종가 / 등락률 / 거래량)
+- S&P500 (SPY) …
+- S&P 동일가중 (RSP) …
+- NASDAQ (QQQ) …
+- DOW (DIA) …
+- 러셀2000 (IWM) …
 
-섹터 (상위 2개만):
-반도체(SMH)  ▲/▼X.XX%
-금융(XLF)    ▲/▼X.XX%
-Fear & Greed: XX (라벨) — 제공된 경우만
-📰 관련 뉴스: (데이터 방향과 일치할 때만 1줄)
+**시장 폭**: SPY vs RSP 갭 X.XXp — 한 줄
+**강세 섹터** (1~2개, 종가/등락률/거래량)
+**약세 섹터** (1~2개, 종가/등락률/거래량)
+**시장 심리**: VIX · Fear & Greed(제공 시)
+📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
 
 ---
 
-### 1.5 업종·특징주 (3~5줄)
-제공된 섹터 ETF·국장 대형주·Fear&Greed만 사용. 없는 종목 창작 금지.
+### 2. 업종·특징주
+3~5줄. 수치 재나열 금지. 왜/의미·한국(삼성·하이닉스·반도체) 함의. 없는 종목 창작 금지.
 
 ---
 
-### 2. 🇰🇷 {next_trading_label} 한국 시장 전망
-서술 (2~3문장): 오늘 미국 결과가 {next_trading_label} 한국장에 미칠 영향을 미국→한국 경로로 설명.
-
-**결론: 강세 우위 / 약세 우위 / 중립**
-- 강세 조건: [구체적 수치 조건]
-- 약세 조건: [구체적 수치 조건]
-
-신뢰도: 상/중/하
-핵심 체크: [{next_trading_label} 개장 후 봐야 할 것 1개]
+{psych}
 
 ---
 
-### 3. 📊 시장 심리 한 눈에
-| 지표 | 수치 | 방향 | {next_trading_label} 영향 |
-|------|------|------|-----------|
-| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
-| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세 |
-| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
+{outlook}
 
 ---
 
-### 4. 💡 한 줄 요약
+### 💡 한 줄 요약
 오늘 [가장 중요한 수치] 때문에 {next_trading_label} 한국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # kr_premarket
+        verify0 = _verify_block(
+            bench="SPY(간밤 미국) 또는 직전 전망 대상 지수",
+            result_metrics="간밤 SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% "
+            "(직전 kr_close가 미국 관전을 예측한 경우). "
+            "직전 전망이 오늘 한국장이면 검증 보류",
+        )
+        psych = _psych_block(impact_header="오늘 한국장 영향")
+        outlook = _outlook_block(
+            title="오늘 한국 장 전망",
+            condition_examples=(
+                '  예: 강세 "SMH 간밤 ▲1%+ 및 원/달러 안정" / '
+                '약세 "SMH ▼1%+ 또는 VIX ▲10%+"'
+            ),
+        )
         prompt = f"""오늘 {today}({weekday_today}) 한국장 전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
+{NEWS_RULE}
 {timing_context}
+
+[이 리포트 특성 — 한국 장전]
+- 간밤 미국 마감이 오늘 한국장 입력 변수. 미국→한국 경로로 전망
+- 삼성·하이닉스·SMH 연결을 우선
 
 [제공 데이터]
 {data_text}
@@ -1230,62 +1362,45 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 ## 📊 🇰🇷 한국장 전 시황 · {today} {weekday_today}요일
 
-### 0. 직전 전망 검증
-직전 한국장 마감 시황의 전망을 **한 줄 인용**하고 간밤 미국장 결과로 검증할 것.
-- 전망: "[직전 한국 마감 시황의 관전 포인트 인용]"
-- 결과: ✅ 적중 또는 ❌ 빗나감 — 간밤 미국 실제 수치로 판단
-- 원인: 데이터로 읽히는 원인 1개 (수치 포함)
-- 교훈: 다음 분석에 반영할 점 한 줄
-(직전 시황 없으면 이 섹션 생략)
+{verify0}
 
 ---
 
 ### 1. 🌙 간밤 미국 시장 결과
-서술 (2~3문장): 간밤 미국 증시 마감 흐름과 오늘 한국장에 줄 영향을 서술.
-- SPY vs RSP 갭이 0.5%p 이상이면 시장 폭 해석을 배치
-- 섹터 중 낙폭/상승폭 상위 2개만 지목 (특히 반도체는 삼성/하이닉스와 직결)
+한 문장 핵심 (최대 2문장). 숫자는 아래에.
 
-S&P500      ▲/▼X.XX%  거래량 XXX%
-NASDAQ      ▲/▼X.XX%  거래량 XXX%
-DOW         ▲/▼X.XX%
-러셀2000     ▲/▼X.XX%
-반도체(SMH)  ▲/▼X.XX%
-📰 관련 뉴스: (데이터 방향과 일치할 때만 1줄)
+**주요 지수** (종가 / 등락률 / 거래량)
+- S&P500 (SPY) …
+- S&P 동일가중 (RSP) …
+- NASDAQ (QQQ) …
+- DOW (DIA) …
+- 러셀2000 (IWM) …
+- 반도체 (SMH) …
 
----
-
-### 2. 📊 시장 심리 한 눈에
-| 지표 | 수치 | 방향 | 오늘 한국장 영향 |
-|------|------|------|-----------------|
-| VIX | XX.XX | ▲/▼ | 공포/중립/탐욕 |
-| 달러 | XXX.XX | ▲/▼ | 원화 강세/약세, 외국인 수급 |
-| 금리 | X.XX% | ▲/▼ | 성장주 부담/완화 |
+**시장 폭**: SPY vs RSP — 한 줄
+**강세/약세 섹터** (각 1~2개)
+📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
 
 ---
 
-### 2.5 업종·특징주 (3~5줄)
-간밤 미장 섹터 ETF + 국장 삼성·하이닉스(전일/제공값)만으로 짧게.
-없는 종목 창작 금지. 반도체 관전 포인트 1줄.
+### 2. 업종·특징주
+3~5줄. 수치 재나열 금지. 왜/의미·오늘 한국(삼성·하이닉스) 함의. 없는 종목 창작 금지.
 
 ---
 
-### 3. 🔮 오늘 한국 장 전망
-결론을 먼저 한 문장으로:
-
-**결론: 강세 우위 / 약세 우위 / 중립**
-
-- 강세: [데이터 기반 근거 1줄]
-- 약세: [데이터 기반 근거 1줄]
-
-신뢰도: 상/중/하
-핵심 체크: [오늘 한국장에서 봐야 할 것 1개]
+{psych}
 
 ---
 
-### 4. 💡 한 줄 요약
+{outlook}
+
+---
+
+### 💡 한 줄 요약
 간밤 [가장 중요한 수치] 때문에 오늘 한국장은 [핵심 포인트] 주목.
 
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
+
 
     client = anthropic.Anthropic()
     message = client.messages.create(
