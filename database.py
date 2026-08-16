@@ -60,6 +60,13 @@ def ensure_indexes():
     db["signal_features"].create_index("asof", background=True)
     db["signal_features"].create_index("features_version", background=True)
     db["signal_features"].create_index([("ticker", 1), ("asof", 1)], background=True)
+    # analyses: 백필/히스토리 sort 메모리 한도 방지
+    db["analyses"].create_index("created_at", background=True)
+    db["analyses"].create_index([("user_id", 1), ("created_at", -1)], background=True)
+    db["analyses"].create_index(
+        [("ticker", 1), ("period", 1), ("user_id", 1), ("created_at", -1)],
+        background=True,
+    )
 
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
@@ -313,6 +320,7 @@ def list_signal_outcomes(
         .find(q)
         .sort("entry_date", -1)
         .limit(limit)
+        .allow_disk_use(True)
     )
     items = list(cursor)
     for item in items:
@@ -321,12 +329,28 @@ def list_signal_outcomes(
 
 
 def list_analyses_for_backfill(limit: int = 5000) -> list:
-    """사후성과 백필용 analyses (차트 제외)."""
+    """사후성과·feature 백필용 analyses.
+    대용량 필드 제외 + allowDiskUse로 Atlas sort 32MB 한도 회피."""
     cursor = (
         get_db()["analyses"]
-        .find({}, {"chart_b64": 0, "chat_history": 0})
+        .find(
+            {},
+            {
+                "ticker": 1,
+                "period": 1,
+                "created_at": 1,
+                "data_date": 1,
+                "signal": 1,
+                "analysis": 1,
+                "current_price": 1,
+                "entry_price": 1,
+                "valuation": 1,
+                "news": 1,
+            },
+        )
         .sort("created_at", 1)
         .limit(limit)
+        .allow_disk_use(True)
     )
     return list(cursor)
 
@@ -419,6 +443,7 @@ def list_signal_features(
         .find(q)
         .sort("asof", -1)
         .limit(limit)
+        .allow_disk_use(True)
     )
     items = list(cursor)
     for item in items:
