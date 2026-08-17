@@ -117,10 +117,12 @@ header {
 #loading-notify-btn {
   display: none; margin-top: 10px; width: 100%;
   font-size: 12px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
-  background: transparent; color: var(--blue);
-  border: 1px dashed rgba(77,159,255,0.45);
+  background: rgba(77,159,255,0.08); color: var(--blue);
+  border: 1px solid rgba(77,159,255,0.45);
 }
-#loading-notify-btn:hover { background: rgba(77,159,255,0.08); }
+#loading-notify-btn:hover { background: rgba(77,159,255,0.14); }
+#loading-notify-btn:disabled { opacity: 0.65; cursor: default; }
+#loading-notify-status { display:none; margin-top:8px; font-size:11.5px; color:var(--muted); line-height:1.45; }
 .loading-steps { display:flex; gap:8px; justify-content:center; margin-top:20px; flex-wrap:wrap; }
 .step-pill { font-size:11px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; border:1px solid var(--border2); color:var(--dim); transition:all 0.3s; }
 .step-pill.active { border-color:var(--blue); color:var(--blue); background:rgba(77,159,255,0.08); }
@@ -697,7 +699,8 @@ header {
     <div id="loading-hint">
       <strong>창을 닫아도 괜찮아요.</strong>
       <span id="loading-hint-body"> 서버에서 분석이 이어지며, 로그인 상태라면 완료 후 히스토리에서 확인할 수 있습니다.</span>
-      <button type="button" id="loading-notify-btn" onclick="enableAnalysisNotify()">완료 시 브라우저 알림 받기</button>
+      <button type="button" id="loading-notify-btn">완료 시 브라우저 알림 받기</button>
+      <div id="loading-notify-status"></div>
     </div>
   </div>
 
@@ -1215,53 +1218,129 @@ async function runAnalysis(force = false) {
 function updateLoadingHint() {
   const body = document.getElementById("loading-hint-body");
   const btn = document.getElementById("loading-notify-btn");
+  const status = document.getElementById("loading-notify-status");
   if (body) {
     body.textContent = currentUser
       ? " 서버에서 분석이 이어지며, 완료되면 히스토리에 저장됩니다. 이 화면을 닫아도 나중에 히스토리에서 확인할 수 있어요."
       : " 서버에서 분석이 이어집니다. 로그인하면 완료 결과가 히스토리에 저장되어 나중에 다시 볼 수 있어요.";
   }
-  if (!btn || !("Notification" in window)) {
-    if (btn) btn.style.display = "none";
+  if (!btn) return;
+
+  const setStatus = (msg, showBtn) => {
+    if (status) {
+      status.style.display = msg ? "block" : "none";
+      status.textContent = msg || "";
+    }
+    btn.style.display = showBtn ? "block" : "none";
+    btn.disabled = !showBtn;
+  };
+
+  if (!window.isSecureContext) {
+    setStatus("알림은 HTTPS(또는 localhost)에서만 사용할 수 있습니다.", false);
     return;
   }
-  if (Notification.permission === "granted" || Notification.permission === "denied") {
-    btn.style.display = "none";
+  if (!("Notification" in window)) {
+    setStatus("이 브라우저는 웹 알림을 지원하지 않습니다. 완료 후 히스토리에서 확인해 주세요.", false);
+    return;
+  }
+  const perm = Notification.permission;
+  if (perm === "granted") {
+    setStatus("브라우저 알림이 켜져 있습니다. 다른 탭에 있을 때 완료를 알려드립니다.", false);
+  } else if (perm === "denied") {
+    setStatus("알림이 차단되어 있습니다. 브라우저 사이트 설정에서 알림을 허용해 주세요.", false);
   } else {
-    btn.style.display = "block";
+    setStatus("선택: 다른 탭을 보는 동안 분석이 끝나면 알림을 받습니다. (창을 완전히 닫으면 알림은 오지 않고 히스토리에만 저장됩니다)", true);
     btn.textContent = "완료 시 브라우저 알림 받기";
-    btn.disabled = false;
   }
 }
 
-async function enableAnalysisNotify() {
+function enableAnalysisNotify(ev) {
+  if (ev) ev.preventDefault();
   const btn = document.getElementById("loading-notify-btn");
-  if (!("Notification" in window)) return;
-  try {
-    const perm = await Notification.requestPermission();
-    if (btn) {
-      if (perm === "granted") {
-        btn.style.display = "none";
-      } else {
-        btn.textContent = "알림이 허용되지 않았습니다";
-        btn.disabled = true;
+  const status = document.getElementById("loading-notify-status");
+  if (!window.isSecureContext) {
+    if (status) { status.style.display = "block"; status.textContent = "HTTPS에서만 알림을 켤 수 있습니다."; }
+    return;
+  }
+  if (!("Notification" in window)) {
+    if (status) { status.style.display = "block"; status.textContent = "이 브라우저는 웹 알림을 지원하지 않습니다."; }
+    return;
+  }
+  const finish = (perm) => {
+    if (perm === "granted") {
+      try {
+        new Notification("StockAI 알림 테스트", {
+          body: "알림이 켜졌습니다. 분석 완료 시(다른 탭에 있을 때) 알려드립니다.",
+          tag: "stockai-notify-test",
+        });
+      } catch (e) {
+        console.warn("[notify] test failed", e);
+      }
+      if (btn) btn.style.display = "none";
+      if (status) {
+        status.style.display = "block";
+        status.textContent = "알림이 허용되었습니다. 테스트 알림을 보냈습니다.";
+      }
+    } else {
+      if (btn) { btn.disabled = true; btn.textContent = "알림이 허용되지 않았습니다"; }
+      if (status) {
+        status.style.display = "block";
+        status.textContent = "브라우저에서 알림을 차단했습니다. 사이트 설정에서 허용으로 바꿔 주세요.";
       }
     }
-  } catch (_) {
-    if (btn) btn.style.display = "none";
+  };
+  try {
+    const ret = Notification.requestPermission();
+    if (ret && typeof ret.then === "function") {
+      ret.then(finish).catch((e) => {
+        console.warn("[notify] permission error", e);
+        if (status) { status.style.display = "block"; status.textContent = "알림 권한 요청에 실패했습니다."; }
+      });
+    } else {
+      // Safari legacy callback style
+      Notification.requestPermission(finish);
+    }
+  } catch (e) {
+    console.warn("[notify] requestPermission error", e);
+    if (status) { status.style.display = "block"; status.textContent = "알림 권한 요청에 실패했습니다."; }
   }
 }
+window.enableAnalysisNotify = enableAnalysisNotify;
+(function bindNotifyBtn() {
+  const bind = () => {
+    const b = document.getElementById("loading-notify-btn");
+    if (b && !b.dataset.bound) {
+      b.dataset.bound = "1";
+      b.addEventListener("click", enableAnalysisNotify);
+    }
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bind);
+  } else {
+    bind();
+  }
+})();
+
 
 function notifyAnalysisDone(ticker) {
   try {
     if (!("Notification" in window)) return;
     if (Notification.permission !== "granted") return;
-    if (document.visibilityState === "visible") return;
+    if (document.visibilityState === "visible") {
+      // 보고 있는 탭이면 OS 알림 대신 타이틀만 잠깐 표시
+      const prev = document.title;
+      document.title = `✅ ${ticker} 분석 완료`;
+      setTimeout(() => { document.title = prev; }, 4000);
+      return;
+    }
     const n = new Notification("StockAI 분석 완료", {
-      body: `${ticker} 분석이 완료되었습니다. 앱에서 결과를 확인하세요.`,
+      body: `${ticker} 분석이 완료되었습니다.`,
       tag: `stockai-analyze-${ticker}`,
     });
-    n.onclick = () => { window.focus(); n.close(); };
-  } catch (_) { /* ignore */ }
+    n.onclick = () => { try { window.focus(); } catch (_) {} n.close(); };
+  } catch (e) {
+    console.warn("[notify] done failed", e);
+  }
 }
 
 async function pollAnalysis(jobId, maxWait = 240000) {

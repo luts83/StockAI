@@ -349,23 +349,44 @@ BREADTH_RULE = """
 """
 
 
-def _verify_block(*, bench: str, result_metrics: str) -> str:
-    """공통 직전 전망 검증 섹션."""
+def _verify_block(
+    *,
+    bench: str,
+    result_metrics: str,
+    mode: str = "score",
+    extra: str = "",
+) -> str:
+    """공통 직전 전망 검증 섹션.
+    mode=score: 벤치마크로 적중 판정
+    mode=defer: 전망 대상이 아직이라 검증 보류 (SPY로 한국전망 채점 금지 등)
+    """
+    if mode == "defer":
+        return f"""### 0. 직전 전망 검증
+(직전 시황 없으면 생략)
+이 시점에서는 **판정하지 말고 검증 보류**만 한다.
+
+- 전망: [직전 SIGNAL] + 전망 대상·핵심 근거를 명확히 한 줄 인용
+- 실제 결과: {result_metrics}
+- 판정: **검증 보류**
+- 판정 이유: {extra or "전망 대상 시장이 아직 확정되지 않았거나, 이 리포트의 채점 대상이 아님"}
+- 다음 전망 반영: 직전 요지를 참고만 하고, 억지로 적중/빗나감 쓰지 말 것
+※ 미국 SPY로 한국장 전망을 채점하거나, 한국 KOSPI로 미국장 전망을 채점하는 것 금지
+"""
     return f"""### 0. 직전 전망 검증
 (직전 시황 없으면 생략)
 반드시 아래 순서로:
 
 - 전망: [SIGNAL:BULL/NEUTRAL/BEAR] + 핵심 근거 한 줄
-  (모호 표현 금지. 전망 대상 시장·조건을 명확히)
+  (모호 표현 금지. 전망 대상 시장·조건을 명시)
 - 실제 결과: {result_metrics}
-- 판정: 적중 / 부분 적중 / 빗나감 / 검증 보류 중 하나
+- 판정: 적중 / 부분 적중 / 빗나감 중 하나
 - 판정 이유: 왜 그 판정인지 1~2문장
   [판정 기준 — 벤치마크 {bench}, 중립 밴드 ±0.3%]
   · BULL → {bench} ≥ +0.3% 적중, |Δ|<0.3% 부분 적중, ≤ −0.3% 빗나감
   · BEAR → {bench} ≤ −0.3% 적중, |Δ|<0.3% 부분 적중, ≥ +0.3% 빗나감
   · NEUTRAL → |Δ|<0.3% 적중, 그 외 부분 적중. NEUTRAL을 상승/하락 전망으로 해석해 빗나감 금지
-  · 전망 대상이 아직 개장·마감 전이면 **검증 보류** (억지 판정 금지)
 - 다음 전망 반영: 다음 시황 생성에 바로 쓸 규칙 1줄 (추상적 감상 금지)
+{extra}
 """
 
 
@@ -400,31 +421,41 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
-# 시황 4종 — 시장별 장전/마감이 서로를 검증하는 짝 구조
+# 시황 4종 서큘레이션
+# - 마감 리포트만 "같은 날 장전 전망"을 수치로 채점
+# - 장전 리포트는 직전 마감의 교차시장 전망을 인용하되 대개 검증 보류
 BRIEF_TYPES = {
     "kr_premarket": {
         "label":   "🇰🇷 한국장 전 시황",
         "market":  "한국",
-        "verify":  "kr_close",       # 직전 한국 마감 시황을 검증
+        # 직전 미국 마감의 "다음 한국장" 전망을 인용 (장전이라 수치 채점 보류)
+        "verify":  "us_close",
         "predict": "오늘 한국장",
+        "verify_mode": "defer",
     },
     "kr_close": {
         "label":   "🇰🇷 한국장 마감 시황",
         "market":  "한국",
-        "verify":  "kr_premarket",   # 오늘 한국 장전 전망을 검증
-        "predict": "오늘 밤 미국장 관전 포인트",
+        # 오늘 한국 장전 전망을 KOSPI로 채점
+        "verify":  "kr_premarket",
+        "predict": "다음 거래일 한국장",
+        "verify_mode": "score",
     },
     "us_premarket": {
         "label":   "🇺🇸 미국장 전 시황",
         "market":  "미국",
-        "verify":  "us_close",       # 직전 미국 마감 시황을 검증
+        # 직전 미국 마감은 한국장 전망 → 미국 장전에서 SPY 채점 금지, 보류
+        "verify":  "us_close",
         "predict": "오늘 미국장",
+        "verify_mode": "defer",
     },
     "us_close": {
         "label":   "🇺🇸 미국장 마감 시황",
         "market":  "미국",
-        "verify":  "us_premarket",   # 오늘 미국 장전 전망을 검증
+        # 오늘 미국 장전 전망을 SPY로 채점
+        "verify":  "us_premarket",
         "predict": "다음 거래일 한국장",
+        "verify_mode": "score",
     },
 }
 
@@ -809,12 +840,16 @@ def _extract_forecast(analysis: str) -> str:
 
 
 def _build_prev_context(brief_type: str) -> str:
-    """같은 시장의 검증 짝(verify) 시황만 가져와 직전 전망 검증에 사용"""
+    """검증 짝 시황을 가져와 직전 전망 검증에 사용.
+    verify_mode=defer → 인용만, 수치 채점 금지
+    verify_mode=score → 같은 세션 장전 전망을 마감 수치로 채점
+    """
     from database import get_recent_market_briefs
     cfg = BRIEF_TYPES.get(brief_type)
     if not cfg:
         return ""
     verify_type = cfg["verify"]
+    mode = cfg.get("verify_mode", "score")
 
     prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
     if not prev_list:
@@ -825,16 +860,26 @@ def _build_prev_context(brief_type: str) -> str:
     predict = BRIEF_TYPES.get(verify_type, {}).get("predict", "")
     forecast_text = _extract_forecast(prev.get("analysis", ""))
 
+    if mode == "defer":
+        return (
+            f"\n[검증 대상(보류) — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
+            f"직전 전망 대상: {predict}\n"
+            f"{forecast_text}\n"
+            f"[중요] 이 리포트({brief_type})에서는 위 전망을 **검증 보류**로만 작성할 것.\n"
+            f"- 전망 문장을 SIGNAL과 함께 명확히 인용\n"
+            f"- 적중/부분 적중/빗나감 판정 금지 (판정=검증 보류)\n"
+            f"- 미국 지수로 한국 전망을 채점하거나 그 반대 금지\n"
+        )
+
     return (
         f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
+        f"직전 전망 대상: {predict}\n"
         f"{forecast_text}\n"
-        f"[이 전망({predict} 예측)을 오늘 실제 결과와 비교해 "
-        f"### 0. 직전 전망 검증에서 아래 구조로 작성할 것]\n"
-        f"- 전망: SIGNAL + 핵심 근거를 짧고 명확히 (모호한 '미수집 데이터' 표현 금지)\n"
-        f"- 실제 결과: SPY/QQQ(또는 KOSPI) 등락률 수치\n"
-        f"- 판정: 적중 / 부분 적중 / 빗나감\n"
-        f"- 판정 이유: 왜 그 판정인지 (전망 방향 vs 실제, ±0.3% 중립 밴드 기준)\n"
-        f"- 다음 전망 반영: 다음 리포트 전망에 실제로 적용할 규칙 1줄\n"
+        f"[이 전망({predict})을 오늘 실제 마감 수치와 비교해 "
+        f"### 0. 직전 전망 검증에서 적중/부분 적중/빗나감으로 판정할 것]\n"
+        f"- 전망: SIGNAL + 핵심 근거를 짧고 명확히\n"
+        f"- 실제 결과: 벤치마크 등락률\n"
+        f"- 판정 이유 + 다음 전망 반영 규칙 1줄\n"
     )
 
 
@@ -957,45 +1002,57 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         print(f"[market_brief] 내일 일정 수집 실패: {e}")
         tomorrow_events = ""
 
-    # 적중률 저장 — 마감 시황일 때 같은 시장의 당일 장전 전망을 검증
+    # 적중률 저장 — 마감 시황이 같은 날 장전 전망을 채점
+    # (+ 한국 마감 시 직전 us_close의 "다음 한국장" 전망도 KOSPI로 채점)
+    def _score_brief_vs_index(prev_doc: dict, chg: float, label: str):
+        prev_signal = prev_doc.get("signal", "")
+        if not prev_signal:
+            return
+        if abs(chg) < 0.3:
+            actual_signal = "NEUTRAL"
+        elif chg > 0:
+            actual_signal = "BULL"
+        else:
+            actual_signal = "BEAR"
+        is_correct = (prev_signal == actual_signal)
+        try:
+            from database import save_brief_performance
+            save_brief_performance(
+                brief_id=str(prev_doc.get("_id", "")),
+                predicted=prev_signal,
+                actual=actual_signal,
+                is_correct=is_correct,
+                brief_type=prev_doc.get("type", ""),
+            )
+            print(
+                f"[market_brief] 적중률 저장({label}): {prev_doc.get('type')} "
+                f"{prev_signal}→{actual_signal} {'✅' if is_correct else '❌'}"
+            )
+        except Exception as e:
+            print(f"[market_brief] 적중률 저장 실패: {e}")
+
     if brief_type in ("kr_close", "us_close"):
         verify_type = cfg["verify"]   # kr_premarket / us_premarket
         prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
         if prev_list:
-            prev = prev_list[0]
-            prev_signal = prev.get("signal", "")
             if target_market == "한국":
                 idx = market_data.get("한국", {}).get("^KS11", {})
             else:
                 idx = market_data.get("미국", {}).get("SPY", {})
-            actual_signal = ""
-            if idx and not idx.get("stale"):
-                chg = idx.get("change_pct", 0) or 0
-                # 중립 밴드 ±0.3%: 보합은 NEUTRAL로 판정 → NEUTRAL 전망도 정당하게 채점
-                if abs(chg) < 0.3:
-                    actual_signal = "NEUTRAL"
-                elif chg > 0:
-                    actual_signal = "BULL"
-                else:
-                    actual_signal = "BEAR"
+            if idx and not idx.get("stale") and idx.get("change_pct") is not None:
+                _score_brief_vs_index(prev_list[0], float(idx["change_pct"]), "same-day")
 
-            if actual_signal and prev_signal:
-                is_correct = (prev_signal == actual_signal)
-                try:
-                    from database import save_brief_performance
-                    save_brief_performance(
-                        brief_id=str(prev.get("_id", "")),
-                        predicted=prev_signal,
-                        actual=actual_signal,
-                        is_correct=is_correct,
-                        brief_type=prev.get("type", ""),
-                    )
-                    print(
-                        f"[market_brief] 적중률 저장: {prev.get('type')} "
-                        f"{prev_signal}→{actual_signal} {'✅' if is_correct else '❌'}"
-                    )
-                except Exception as e:
-                    print(f"[market_brief] 적중률 저장 실패: {e}")
+        # 한국 마감: 직전 미국 마감의 한국장 전망도 오늘 KOSPI로 채점
+        if brief_type == "kr_close":
+            us_prev = get_recent_market_briefs(limit=1, brief_type="us_close")
+            idx = market_data.get("한국", {}).get("^KS11", {})
+            if (
+                us_prev
+                and idx
+                and not idx.get("stale")
+                and idx.get("change_pct") is not None
+            ):
+                _score_brief_vs_index(us_prev[0], float(idx["change_pct"]), "us→kr")
 
     next_trading_label, next_kr_str = _next_kr_trading_label(now_kst)
 
@@ -1074,9 +1131,10 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
     if brief_type == "us_premarket":
         verify0 = _verify_block(
-            bench="SPY",
-            result_metrics="직전 마감 기준 SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% "
-            "(직전 시황이 한국장을 예측했고 아직 미개장이면 검증 보류)",
+            bench="—",
+            result_metrics="해당 없음 (직전 us_close 전망 대상=다음 한국 거래일)",
+            mode="defer",
+            extra="직전 미국 마감 SIGNAL은 한국장 전망이다. 미국 SPY/QQQ로 채점하지 말 것.",
         )
         psych = _psych_block(impact_header="오늘 미국장 영향")
         outlook = _outlook_block(
@@ -1098,6 +1156,7 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 [이 리포트 특성 — 미국 장전]
 - 이미 끝난 한국 마감 + 직전 미국 세션을 스냅샷으로 정리한 뒤, 오늘 미국장 전망
 - 장중 미확정 봉을 오늘 마감처럼 쓰지 말 것
+- 직전 us_close는 '다음 한국장' 전망 → ###0은 검증 보류 (SPY로 채점 금지)
 
 [제공 데이터]
 {data_text}
@@ -1168,6 +1227,11 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         verify0 = _verify_block(
             bench="KOSPI",
             result_metrics="KOSPI ▲/▼X.XX%, KOSDAQ ▲/▼X.XX% (제공 수치)",
+            mode="score",
+            extra=(
+                "\n추가로 직전 us_close의 '다음 한국장' 전망이 있으면 "
+                "같은 KOSPI 수치로 한 줄 더 판정해도 됨 (없으면 생략)."
+            ),
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 영향")
         outlook = _outlook_block(
@@ -1244,6 +1308,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         verify0 = _verify_block(
             bench="SPY",
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
+            mode="score",
+            extra="검증 대상은 오늘 us_premarket의 '오늘 미국장' 전망이다.",
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 한국 영향")
         outlook = _outlook_block(
@@ -1322,10 +1388,14 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # kr_premarket
         verify0 = _verify_block(
-            bench="SPY(간밤 미국) 또는 직전 전망 대상 지수",
-            result_metrics="간밤 SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% "
-            "(직전 kr_close가 미국 관전을 예측한 경우). "
-            "직전 전망이 오늘 한국장이면 검증 보류",
+            bench="—",
+            result_metrics="해당 없음 (직전 us_close 전망 대상=다음/오늘 한국장, 아직 장전)",
+            mode="defer",
+            extra=(
+                "직전 미국 마감의 한국장 전망을 인용만 하고 판정은 보류. "
+                "실제 채점은 오늘 kr_close에서 KOSPI로 한다. "
+                "간밤 미국 수치는 스냅샷 섹션에서 다룰 것."
+            ),
         )
         psych = _psych_block(impact_header="오늘 한국장 영향")
         outlook = _outlook_block(
@@ -1347,6 +1417,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 [이 리포트 특성 — 한국 장전]
 - 간밤 미국 마감이 오늘 한국장 입력 변수. 미국→한국 경로로 전망
 - 삼성·하이닉스·SMH 연결을 우선
+- 직전 us_close의 한국장 전망은 ###0에서 검증 보류 (채점은 오늘 kr_close)
 
 [제공 데이터]
 {data_text}
