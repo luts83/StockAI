@@ -108,12 +108,29 @@ header {
 #loading-ticker { font-size:30px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--blue); margin-bottom:6px; }
 #loading-status { font-size:13px; color:var(--muted); }
 #loading-hint {
-  max-width: 360px; margin: 18px auto 0; padding: 12px 14px;
+  max-width: 380px; margin: 18px auto 0; padding: 12px 14px;
   font-size: 12.5px; line-height: 1.55; color: var(--muted);
   background: rgba(77,159,255,0.06); border: 1px solid rgba(77,159,255,0.18);
   border-radius: 10px; text-align: left;
 }
 #loading-hint strong { color: var(--text); font-weight: 600; }
+#loading-hint-body { display: block; margin-top: 4px; }
+#loading-guest-perks {
+  display: none; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid rgba(77,159,255,0.15);
+}
+#loading-guest-perks .perk-label {
+  font-size: 11.5px; color: var(--text); font-weight: 600; margin-bottom: 6px;
+}
+#loading-guest-perks ul {
+  margin: 0; padding: 0 0 0 16px; font-size: 11.5px; line-height: 1.6; color: var(--muted);
+}
+#loading-login-btn {
+  display: none; margin-top: 10px; width: 100%;
+  font-size: 12.5px; font-weight: 600; padding: 9px 10px; border-radius: 8px; cursor: pointer;
+  background: var(--blue); color: #0b1220; border: none;
+}
+#loading-login-btn:hover { filter: brightness(1.08); }
 #loading-notify-btn {
   display: none; margin-top: 10px; width: 100%;
   font-size: 12px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
@@ -697,8 +714,18 @@ header {
       <div class="step-pill" id="step4">AI 분석</div>
     </div>
     <div id="loading-hint">
-      <strong>창을 닫아도 괜찮아요.</strong>
-      <span id="loading-hint-body"> 서버에서 분석이 이어지며, 로그인 상태라면 완료 후 히스토리에서 확인할 수 있습니다.</span>
+      <strong id="loading-hint-title">분석을 준비하고 있어요.</strong>
+      <span id="loading-hint-body"></span>
+      <div id="loading-guest-perks">
+        <div class="perk-label">로그인하면 이런 점이 좋아요</div>
+        <ul>
+          <li>분석마다 <b>히스토리 자동 저장</b> · 언제든 다시 보기</li>
+          <li>비회원은 12시간·3회 한도 — 회원은 무제한·히스토리 저장</li>
+          <li>분석에 대해 <b>추가 질문</b> · 시점별 <b>비교 분석</b></li>
+          <li>뉴스 <b>AI 번역 요약</b></li>
+        </ul>
+        <button type="button" id="loading-login-btn" onclick="showLoginModal()">Google로 로그인하고 히스토리 저장</button>
+      </div>
       <button type="button" id="loading-notify-btn">완료 시 브라우저 알림 받기</button>
       <div id="loading-notify-status"></div>
     </div>
@@ -1002,6 +1029,193 @@ function getSignalBadge(signal, analysis = "") {
 function getToken() { return localStorage.getItem("stockai_token") || null; }
 function setToken(t) { localStorage.setItem("stockai_token", t); }
 function clearToken() { localStorage.removeItem("stockai_token"); }
+
+// 비회원: 12시간 내 최대 3건 요청, 마지막 결과 1건 보관 (히스토리 아님)
+const GUEST_SESSION_HOURS = 12;
+const GUEST_MAX_REPORTS = 3;
+const GUEST_LAST_KEY = "stockai_guest_last_report";
+const GUEST_PENDING_KEY = "stockai_guest_pending";
+const GUEST_QUOTA_KEY = "stockai_guest_quota";
+
+function guestSessionMs() { return GUEST_SESSION_HOURS * 60 * 60 * 1000; }
+
+function getGuestQuota() {
+  try {
+    const raw = localStorage.getItem(GUEST_QUOTA_KEY);
+    const now = Date.now();
+    let q = raw ? JSON.parse(raw) : null;
+    if (!q || !Array.isArray(q.requests)) q = { requests: [] };
+    q.requests = q.requests.filter((t) => typeof t === "number" && now - t < guestSessionMs());
+    localStorage.setItem(GUEST_QUOTA_KEY, JSON.stringify(q));
+    return q;
+  } catch (_) {
+    return { requests: [] };
+  }
+}
+
+function guestQuotaUsed() {
+  return getGuestQuota().requests.length;
+}
+
+function guestQuotaRemaining() {
+  return Math.max(0, GUEST_MAX_REPORTS - guestQuotaUsed());
+}
+
+function recordGuestRequest() {
+  if (currentUser) return;
+  const q = getGuestQuota();
+  q.requests.push(Date.now());
+  try { localStorage.setItem(GUEST_QUOTA_KEY, JSON.stringify(q)); } catch (_) {}
+}
+
+function guestCanRequest() {
+  return currentUser || guestQuotaRemaining() > 0;
+}
+
+function showGuestQuotaExceeded() {
+  const used = guestQuotaUsed();
+  const el = document.getElementById("error-msg");
+  if (el) {
+    el.innerHTML =
+      `<strong>비회원 이용 한도 도달</strong><br>` +
+      `${GUEST_SESSION_HOURS}시간 동안 분석 ${GUEST_MAX_REPORTS}회까지 이용할 수 있어요. (현재 ${used}/${GUEST_MAX_REPORTS})<br>` +
+      `<small style="color:var(--dim);margin-top:8px;display:block">` +
+      `로그인·회원가입하면 히스토리 저장과 추가 분석을 제한 없이 이용할 수 있습니다.</small>` +
+      `<div style="margin-top:14px"><button type="button" class="login-btn" onclick="showLoginModal()" ` +
+      `style="padding:10px 16px;border-radius:8px;border:none;background:var(--blue);color:#0b1220;font-weight:600;cursor:pointer">` +
+      `Google로 로그인 / 회원가입</button></div>`;
+    el.style.display = "block";
+  }
+  try { showLoginModal(); } catch (_) {}
+}
+
+function saveGuestLastReport(data) {
+  if (!data || currentUser) return;
+  try {
+    const payload = {
+      savedAt: Date.now(),
+      expiresAt: Date.now() + guestSessionMs(),
+      result: data,
+    };
+    localStorage.setItem(GUEST_LAST_KEY, JSON.stringify(payload));
+    localStorage.removeItem(GUEST_PENDING_KEY);
+  } catch (e) {
+    try {
+      const slim = { ...data, chart_image: "" };
+      localStorage.setItem(GUEST_LAST_KEY, JSON.stringify({
+        savedAt: Date.now(),
+        expiresAt: Date.now() + guestSessionMs(),
+        result: slim,
+        chart_omitted: true,
+      }));
+      localStorage.removeItem(GUEST_PENDING_KEY);
+    } catch (e2) {
+      console.warn("[guest] last report save failed", e2);
+    }
+  }
+}
+
+function loadGuestLastReport() {
+  try {
+    const raw = localStorage.getItem(GUEST_LAST_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    if (!payload?.expiresAt || Date.now() > payload.expiresAt) {
+      localStorage.removeItem(GUEST_LAST_KEY);
+      return null;
+    }
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveGuestPending(jobId, ticker, periodVal) {
+  if (currentUser) return;
+  try {
+    localStorage.setItem(GUEST_PENDING_KEY, JSON.stringify({
+      jobId, ticker, period: periodVal, startedAt: Date.now(),
+      expiresAt: Date.now() + guestSessionMs(),
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function loadGuestPending() {
+  try {
+    const raw = localStorage.getItem(GUEST_PENDING_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!p?.expiresAt || Date.now() > p.expiresAt) {
+      localStorage.removeItem(GUEST_PENDING_KEY);
+      return null;
+    }
+    return p;
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearGuestPending() {
+  try { localStorage.removeItem(GUEST_PENDING_KEY); } catch (_) {}
+}
+
+async function restoreGuestSession() {
+  if (currentUser) return;
+  const pending = loadGuestPending();
+  if (pending?.jobId) {
+    try {
+      document.getElementById("ticker-input").value = pending.ticker || "";
+      document.getElementById("loading").style.display = "block";
+      document.getElementById("loading-ticker").textContent = pending.ticker || "";
+      document.getElementById("analyze-btn").disabled = true;
+      updateLoadingHint();
+      const data = await pollAnalysis(pending.jobId);
+      clearGuestPending();
+      saveGuestLastReport(data);
+      document.querySelectorAll(".step-pill").forEach(p => p.className = "step-pill done");
+      document.getElementById("analyze-btn").disabled = false;
+      renderResults(data);
+      return;
+    } catch (e) {
+      clearGuestPending();
+      document.getElementById("loading").style.display = "none";
+      document.getElementById("analyze-btn").disabled = false;
+      console.warn("[guest] pending restore failed", e);
+      // job 만료 시 공용 캐시로 재시도
+      if (pending.ticker) {
+        try {
+          const res = await fetch(`${API}/analyze`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+              ticker: pending.ticker,
+              period: pending.period || "6mo",
+              interval: "1d",
+              force: false,
+            }),
+          });
+          if (res.ok) {
+            const initData = await res.json();
+            if (!initData.job_id) {
+              saveGuestLastReport(initData);
+              renderResults(initData);
+              return;
+            }
+          }
+        } catch (_) { /* ignore */ }
+      }
+    }
+  }
+  const last = loadGuestLastReport();
+  if (last?.result) {
+    try {
+      document.getElementById("ticker-input").value = last.result.ticker || "";
+      renderResults(last.result);
+    } catch (e) {
+      console.warn("[guest] last report restore failed", e);
+    }
+  }
+}
 function authHeaders() {
   const t = getToken();
   return t ? { "Authorization": `Bearer ${t}` } : {};
@@ -1036,6 +1250,7 @@ async function initAuth() {
   updateLockUI();
   goHome();
   if (currentUser) loadHomeHistory(true);  // 홈 히스토리 초기 로드
+  else await restoreGuestSession();
 }
 
 // 비로그인 상태에서 이전 사용자의 데이터를 DOM에서 완전히 제거
@@ -1167,6 +1382,11 @@ async function runAnalysis(force = false) {
   const ticker = document.getElementById("ticker-input").value.trim().toUpperCase();
   if (!ticker) return;
 
+  if (!currentUser && !guestCanRequest()) {
+    showGuestQuotaExceeded();
+    return;
+  }
+
   document.getElementById("results").style.display = "none";
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("loading").style.display = "block";
@@ -1188,10 +1408,13 @@ async function runAnalysis(force = false) {
     });
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "분석 실패"); }
     const initData = await res.json();
+    if (!currentUser) recordGuestRequest();
+
 
     let data;
     if (initData.job_id) {
-      // 신규 분석 — 서버 백그라운드에서 실행 중, 폴링으로 결과 수신
+      // 신규 분석 — 서버 백그라운드에서 실행 중, 폴링으로 결과 대기
+      saveGuestPending(initData.job_id, ticker, period);
       data = await pollAnalysis(initData.job_id);
     } else {
       // 캐시 히트 — 즉시 결과 반환
@@ -1201,6 +1424,7 @@ async function runAnalysis(force = false) {
     clearInterval(stepTimer);
     document.querySelectorAll(".step-pill").forEach(p => p.className = "step-pill done");
     notifyAnalysisDone(ticker);
+    saveGuestLastReport(data);
     setTimeout(() => renderResults(data), 200);
 
   } catch (err) {
@@ -1216,13 +1440,21 @@ async function runAnalysis(force = false) {
 
 
 function updateLoadingHint() {
+  const title = document.getElementById("loading-hint-title");
   const body = document.getElementById("loading-hint-body");
+  const perks = document.getElementById("loading-guest-perks");
   const btn = document.getElementById("loading-notify-btn");
   const status = document.getElementById("loading-notify-status");
-  if (body) {
-    body.textContent = currentUser
-      ? " 서버에서 분석이 이어지며, 완료되면 히스토리에 저장됩니다. 이 화면을 닫아도 나중에 히스토리에서 확인할 수 있어요."
-      : " 서버에서 분석이 이어집니다. 로그인하면 완료 결과가 히스토리에 저장되어 나중에 다시 볼 수 있어요.";
+  if (title && body) {
+    if (currentUser) {
+      title.textContent = "창을 닫아도 괜찮아요.";
+      body.textContent = "서버에서 분석이 이어지며, 완료되면 히스토리에 저장됩니다. 나중에 히스토리에서 다시 확인할 수 있어요.";
+      if (perks) perks.style.display = "none";
+    } else {
+      title.textContent = "창을 닫아도 최근 분석은 다시 볼 수 있어요.";
+      body.textContent = `비회원은 ${GUEST_SESSION_HOURS}시간 동안 분석 ${GUEST_MAX_REPORTS}회까지 이용 가능합니다. (남은 횟수 ${guestQuotaRemaining()}회) 마지막 결과는 같은 기간 동안 이 브라우저에 보관되며, 히스토리 저장·추가 이용은 로그인이 필요합니다.`;
+      if (perks) perks.style.display = "block";
+    }
   }
   if (!btn) return;
 
@@ -1240,16 +1472,31 @@ function updateLoadingHint() {
     return;
   }
   if (!("Notification" in window)) {
-    setStatus("이 브라우저는 웹 알림을 지원하지 않습니다. 완료 후 히스토리에서 확인해 주세요.", false);
+    setStatus(
+      currentUser
+        ? "이 브라우저는 웹 알림을 지원하지 않습니다. 완료 후 히스토리에서 확인해 주세요."
+        : "이 브라우저는 웹 알림을 지원하지 않습니다. 결과가 이 화면에 나타날 때까지 기다려 주세요.",
+      false,
+    );
     return;
   }
   const perm = Notification.permission;
   if (perm === "granted") {
-    setStatus("브라우저 알림이 켜져 있습니다. 다른 탭에 있을 때 완료를 알려드립니다.", false);
+    setStatus(
+      currentUser
+        ? "브라우저 알림이 켜져 있습니다. 다른 탭에 있을 때 완료를 알려드립니다."
+        : `브라우저 알림이 켜져 있습니다. 창을 닫았다가 다시 와도 최근 결과를 ${GUEST_SESSION_HOURS}시간 동안 볼 수 있어요.`,
+      false,
+    );
   } else if (perm === "denied") {
     setStatus("알림이 차단되어 있습니다. 브라우저 사이트 설정에서 알림을 허용해 주세요.", false);
   } else {
-    setStatus("선택: 다른 탭을 보는 동안 분석이 끝나면 알림을 받습니다. (창을 완전히 닫으면 알림은 오지 않고 히스토리에만 저장됩니다)", true);
+    setStatus(
+      currentUser
+        ? "선택: 다른 탭을 보는 동안 분석이 끝나면 알림을 받습니다. (창을 완전히 닫아도 히스토리에는 저장됩니다)"
+        : `선택: 완료 알림을 받을 수 있습니다. 비회원은 ${GUEST_SESSION_HOURS}시간·${GUEST_MAX_REPORTS}회 한도가 있습니다.`,
+      true,
+    );
     btn.textContent = "완료 시 브라우저 알림 받기";
   }
 }
@@ -1625,6 +1872,7 @@ function renderResults(data) {
 
   // 분석 저장 완료 후 히스토리 동기화 (1초 딜레이로 DB 저장 대기)
   if (currentUser) setTimeout(() => loadHistory(), 1000);
+  else saveGuestLastReport(data);
 }
 
 // ── 밸류에이션 렌더링 ──
