@@ -1,9 +1,40 @@
+import math
 import re
 import anthropic
 import yfinance as yf
 from datetime import datetime, timedelta
 import pytz
 from news import fetch_macro_news, format_macro_news_for_brief
+
+
+def _is_finite(x) -> bool:
+    try:
+        return x is not None and math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fast_info_session_close(ticker: str, *, prefer_previous: bool) -> float | None:
+    """Yahoo history 봉이 NaN/누락일 때 fast_info로 직전 세션 종가 보완.
+    prefer_previous=True (장전·장중): previous_close = 직전 확정 세션
+    prefer_previous=False (마감 후): last_price 우선
+    """
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        last_p = getattr(fi, "last_price", None)
+        prev_p = getattr(fi, "previous_close", None)
+        # SPY 등: regular_market_previous_close가 더 오래된 봉을 가리키는 경우 있음 → 1순위 제외
+        if prefer_previous:
+            for cand in (prev_p, last_p):
+                if _is_finite(cand):
+                    return float(cand)
+        else:
+            for cand in (last_p, prev_p):
+                if _is_finite(cand):
+                    return float(cand)
+    except Exception as e:
+        print(f"[market_brief] fast_info 보완 실패 {ticker}: {e}")
+    return None
 
 # ── 휴장 판정 (하드코딩 X — 데이터 추론 + 라이브러리 교차검증) ──
 # 보정 레이어: exchange_calendars가 session=True로 '잘못' 보고하는 실제 휴장일만 교정.
@@ -252,7 +283,7 @@ _FX_TICKERS = frozenset({"KRW=X", "USDKRW=X"})
 
 
 def _format_level(ticker: str, price) -> str:
-    if price is None:
+    if not _is_finite(price):
         return "—"
     try:
         p = float(price)
@@ -270,8 +301,9 @@ def _format_level(ticker: str, price) -> str:
 def _format_quote_line(ticker: str, d: dict) -> str:
     """종가 / 등락률 / 거래량 한 줄."""
     chg = d.get("change_pct")
-    if chg is None:
-        return f"{d.get('name', ticker)}({ticker}) — 가격 없음"
+    if not _is_finite(chg) or not _is_finite(d.get("price")):
+        return f"{d.get('name', ticker)}({ticker}) — 가격/등락률 없음"
+    chg = float(chg)
     arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "→")
     level = _format_level(ticker, d.get("price"))
     vol = d.get("volume_ratio")
@@ -363,14 +395,16 @@ def _verify_block(
     if mode == "defer":
         return f"""### 0. 직전 전망 검증
 (직전 시황 없으면 생략)
-이 시점에서는 **판정하지 말고 검증 보류**만 한다.
+이 시점에서는 **SIGNAL 채점만 하지 말고 검증 보류**한다. 교차시장 숫자는 전망에 쓴다.
 
 - 전망: [직전 SIGNAL] + 전망 대상·핵심 근거를 명확히 한 줄 인용
 - 실제 결과: {result_metrics}
 - 판정: **검증 보류**
-- 판정 이유: {extra or "전망 대상 시장이 아직 확정되지 않았거나, 이 리포트의 채점 대상이 아님"}
-- 다음 전망 반영: 직전 요지를 참고만 하고, 억지로 적중/빗나감 쓰지 말 것
-※ 미국 SPY로 한국장 전망을 채점하거나, 한국 KOSPI로 미국장 전망을 채점하는 것 금지
+- 판정 이유: {extra or "전망 대상 시장 채점 시점이 아님 (교차시장 입력 활용과 무관)"}
+- 다음 전망 반영: 직전 요지 + 오늘 확정된 교차시장 마감을 오늘 전망 입력으로 연결
+※ 미국 SPY로 한국장 전망을 채점하거나, 한국 KOSPI로 미국장 전망을 **채점**하는 것만 금지
+※ 한국 급락/급등·거래량·뉴스를 미국 장전 전망 근거로 쓰는 것은 필수 (유기적 연결)
+※ '검증 보류'·일부 지표 지연만으로 "스냅샷 작성 불가/리포트 불가" 금지 — 있는 수치로 작성
 """
     return f"""### 0. 직전 전망 검증
 (직전 시황 없으면 생략)
@@ -424,6 +458,7 @@ WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 # 시황 4종 서큘레이션
 # - 마감 리포트만 "같은 날 장전 전망"을 수치로 채점
 # - 장전 리포트는 직전 마감의 교차시장 전망을 인용하되 대개 검증 보류
+# - CIRCULATION_FEED: Mongo 직전 시황의 SIGNAL·핵심 수치를 다음 시황에 명시 주입
 BRIEF_TYPES = {
     "kr_premarket": {
         "label":   "🇰🇷 한국장 전 시황",
@@ -457,6 +492,54 @@ BRIEF_TYPES = {
         "predict": "다음 거래일 한국장",
         "verify_mode": "score",
     },
+}
+
+# us_close → kr_premarket → kr_close → us_premarket → us_close …
+# 각 시황이 Mongo에서 읽을 "직전 교차시장 리포트" (검증 짝과 별도, 분석 입력용)
+CIRCULATION_FEED = {
+    "kr_premarket": [
+        {
+            "type": "us_close",
+            "role": "직전 미국 마감 → 오늘 한국장 선행 입력",
+            "tickers": ("SPY", "RSP", "QQQ", "IWM", "SMH", "XLF", "^VIX"),
+        },
+    ],
+    "kr_close": [
+        {
+            "type": "kr_premarket",
+            "role": "오늘 한국 장전 전망 (마감으로 채점)",
+            "tickers": ("^KS11", "^KQ11", "005930.KS", "000660.KS"),
+        },
+        {
+            "type": "us_close",
+            "role": "간밤 미국→한국 전망 맥락",
+            "tickers": ("SPY", "QQQ", "SMH", "XLF"),
+        },
+    ],
+    "us_premarket": [
+        {
+            "type": "kr_close",
+            "role": "오늘 한국 마감 → 오늘 미국장 선행 입력 (핵심)",
+            "tickers": ("^KS11", "^KQ11", "005930.KS", "000660.KS"),
+        },
+        {
+            "type": "us_close",
+            "role": "직전 미국 세션 마감 맥락",
+            "tickers": ("SPY", "RSP", "QQQ", "SMH", "XLF", "^VIX"),
+        },
+    ],
+    "us_close": [
+        {
+            "type": "us_premarket",
+            "role": "오늘 미국 장전 전망 (마감으로 채점)",
+            "tickers": ("SPY", "QQQ", "XLF", "SMH"),
+        },
+        {
+            "type": "kr_close",
+            "role": "한국 마감이 미국장에 미친 흐름",
+            "tickers": ("^KS11", "^KQ11", "005930.KS", "000660.KS"),
+        },
+    ],
 }
 
 
@@ -554,35 +637,106 @@ def _fetch_ticker(ticker: str, name: str, now_ex: datetime | None = None) -> dic
             last_dt = hist.index[-1].date()
             if last_dt == today_ex and not market_closed:
                 hist = hist.iloc[:-1]  # 오늘 장중 불완전 데이터 제외
-                if len(hist) < 2:
+                if hist.empty:
                     time.sleep(2 ** attempt)
                     continue
 
-            if len(hist) < 2:
+            expected = _expected_session_date(region, now_ex_local)
+
+            # NaN Close + 거래량만 있는 스텁 봉의 볼륨 보존 (drop 전에 기록)
+            stub_volumes: dict = {}
+            for idx, row in hist.iterrows():
+                if not _is_finite(row["Close"]) and _is_finite(row.get("Volume")):
+                    try:
+                        stub_volumes[idx.date()] = int(row["Volume"])
+                    except (TypeError, ValueError):
+                        pass
+
+            # Yahoo가 거래량만 채운 OHLC=NaN 스텁 봉 → fast_info로 Close 복구
+            nan_patched = False
+            if not hist.empty and not _is_finite(hist["Close"].iloc[-1]):
+                fill = _fast_info_session_close(
+                    ticker, prefer_previous=not market_closed
+                )
+                if fill is not None:
+                    hist = hist.copy()
+                    hist.iloc[-1, hist.columns.get_loc("Close")] = fill
+                    nan_patched = True
+                    print(
+                        f"[market_brief] 🔧 {ticker} NaN Close → fast_info {fill:.4f} "
+                        f"({hist.index[-1].date()})"
+                    )
+
+            # 복구 실패한 NaN Close 봉 제거
+            hist = hist[hist["Close"].apply(_is_finite)]
+            if len(hist) < 1:
                 time.sleep(2 ** attempt)
                 continue
 
-            prev_close = float(hist["Close"].iloc[-2])
-            current    = float(hist["Close"].iloc[-1])
-            ld = hist.index[-1].date()   # 거래소 현지 거래일
+            ld = hist.index[-1].date()
+            current = float(hist["Close"].iloc[-1])
+            volume = (
+                int(hist["Volume"].iloc[-1])
+                if _is_finite(hist["Volume"].iloc[-1]) and hist["Volume"].iloc[-1]
+                else 0
+            )
+            session_patched = False
+            prev_close = None
+
+            # history에 기대 거래일 봉이 통째로 없는 경우(VIX 등 Fri→Tue 점프)
+            if ld < expected and not market_closed:
+                fill = _fast_info_session_close(ticker, prefer_previous=True)
+                if fill is not None and abs(fill - current) > 1e-9:
+                    prev_close = current
+                    current = fill
+                    ld = expected
+                    volume = stub_volumes.get(expected, 0)
+                    session_patched = True
+                    print(
+                        f"[market_brief] 🔧 {ticker} 누락 세션 {expected} "
+                        f"← fast_info previous_close {fill:.4f} "
+                        f"(prev={prev_close:.4f})"
+                    )
+
+            if prev_close is None:
+                if len(hist) < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                prev_close = float(hist["Close"].iloc[-2])
+
+            if not _is_finite(current) or not _is_finite(prev_close) or prev_close == 0:
+                time.sleep(2 ** attempt)
+                continue
+
             weekday_str = WEEKDAY_KR[ld.weekday()]
-            date_label  = f"{ld.strftime('%Y-%m-%d')}({weekday_str})"
+            date_label = f"{ld.strftime('%Y-%m-%d')}({weekday_str})"
 
-            change_pct = (current - prev_close) / prev_close * 100 if prev_close else 0
-            volume     = int(hist["Volume"].iloc[-1]) if hist["Volume"].iloc[-1] else 0
-            avg_volume = int(hist["Volume"].mean()) if hist["Volume"].mean() else 0
-            vol_ratio  = round(volume / avg_volume * 100, 1) if avg_volume else 0
+            change_pct = (current - prev_close) / prev_close * 100
+            avg_volume = (
+                int(hist["Volume"].mean())
+                if _is_finite(hist["Volume"].mean()) and hist["Volume"].mean()
+                else 0
+            )
+            vol_ratio = (
+                round(volume / avg_volume * 100, 1) if avg_volume and volume else 0
+            )
 
-            # 달력 일수가 아니라 '기대 거래일' 대비 지연으로 stale 판정
-            # 예: 월요일이어도 금요일 미국 마감은 PRE_OPEN 시점에 정상(직전 세션)
             days_old = (today_ex - ld).days
-            expected = _expected_session_date(region, now_ex_local)
             stale = ld < expected
+
+            if not _is_finite(change_pct):
+                time.sleep(2 ** attempt)
+                continue
+
+            patch_tag = ""
+            if nan_patched or session_patched:
+                patch_tag = " [fast_info]"
 
             print(
                 f"[market_brief] {'⚠️ STALE' if stale else '✅'} {ticker} {date_label} "
                 f"{current:.2f} ({change_pct:+.2f}%) vol {vol_ratio}%"
                 + (f" — expected={expected}" if stale or ld != today_ex else "")
+                + patch_tag
             )
 
             return {
@@ -675,7 +829,7 @@ def fetch_fear_greed() -> dict | None:
 
 
 def _fmt_chg(d: dict | None, ticker: str = "") -> str:
-    if not d or d.get("change_pct") is None:
+    if not d or not _is_finite(d.get("change_pct")):
         return "데이터 없음"
     if ticker:
         return _format_quote_line(ticker, d)
@@ -697,7 +851,7 @@ def build_featured_context(
     sectors = market_data.get("섹터") or {}
     ranked = []
     for t, d in sectors.items():
-        if d.get("change_pct") is None or d.get("stale"):
+        if not _is_finite(d.get("change_pct")) or d.get("stale"):
             continue
         ranked.append((t, d))
     ranked.sort(key=lambda x: x[1]["change_pct"], reverse=True)
@@ -732,7 +886,7 @@ def build_featured_context(
     for t in KR_MEGA_TICKERS:
         d = kr.get(t)
         name = (d or {}).get("name") or TICKERS["한국"].get(t, t)
-        if d and d.get("change_pct") is not None:
+        if d and _is_finite(d.get("change_pct")):
             lines.append(f"  · {_fmt_chg(d, t)}")
         else:
             lines.append(f"  · {name}({t}): 데이터 없음")
@@ -792,9 +946,9 @@ def _build_data_text(market_data: dict) -> str:
         lines.append(f"\n### {region}")
         for ticker, d in tickers.items():
             chg = d.get("change_pct")
-            if chg is None:
+            if not _is_finite(chg) or not _is_finite(d.get("price")):
                 lines.append(
-                    f"- {d['name']}({ticker}) [데이터일: {d.get('last_date')}] — 가격 없음"
+                    f"- {d['name']}({ticker}) [데이터일: {d.get('last_date')}] — 가격/등락률 없음"
                 )
                 continue
             quote = _format_quote_line(ticker, d)
@@ -839,6 +993,81 @@ def _extract_forecast(analysis: str) -> str:
     return analysis[-300:].strip()
 
 
+def _extract_one_liner(analysis: str) -> str:
+    """시황 본문에서 '한 줄 요약' 추출."""
+    if not analysis:
+        return ""
+    m = re.search(
+        r"###\s*[💡\s]*한\s*줄\s*요약\s*\n+\s*([^\n]+)",
+        analysis,
+    )
+    if m:
+        return m.group(1).strip()[:220]
+    return ""
+
+
+def _metrics_from_brief(doc: dict, tickers: tuple) -> list[str]:
+    """저장된 market_data에서 지정 티커 핵심 수치 줄 목록."""
+    md = doc.get("market_data") or {}
+    flat: dict = {}
+    for region_map in md.values():
+        if isinstance(region_map, dict):
+            flat.update(region_map)
+    lines = []
+    for t in tickers:
+        d = flat.get(t)
+        if not d:
+            continue
+        if _is_finite(d.get("change_pct")) and _is_finite(d.get("price")):
+            lines.append(
+                f"  · {_format_quote_line(t, d)} [{d.get('last_date', '')}]"
+            )
+        else:
+            lines.append(f"  · {d.get('name', t)}({t}): 수치 없음")
+    return lines
+
+
+def _build_circulation_context(brief_type: str) -> str:
+    """순환 체인상 직전 시황(들)의 SIGNAL·한줄·핵심 수치를 Mongo에서 주입.
+    ###0 검증 짝과 별개 — 교차시장 분석 입력용.
+    """
+    from database import get_recent_market_briefs
+
+    feeds = CIRCULATION_FEED.get(brief_type) or []
+    if not feeds:
+        return ""
+
+    blocks = [
+        "\n[교차시장 순환 주입 — Mongo 직전 시황]",
+        "규칙: 아래 SIGNAL·수치·한줄요약을 오늘 전망의 선행 입력으로 연결할 것.",
+        "###0 채점 규칙과 별개. 라이브 제공 데이터와 모순되면 라이브 수치 우선, 괴리는 명시.",
+    ]
+    for feed in feeds:
+        src_type = feed["type"]
+        docs = get_recent_market_briefs(limit=1, brief_type=src_type)
+        label = BRIEF_TYPES.get(src_type, {}).get("label", src_type)
+        predict = BRIEF_TYPES.get(src_type, {}).get("predict", "")
+        if not docs:
+            blocks.append(f"\n▶ {feed['role']}\n  ({label} 저장분 없음 — 라이브 데이터만 사용)")
+            continue
+        doc = docs[0]
+        one = _extract_one_liner(doc.get("analysis", ""))
+        metrics = _metrics_from_brief(doc, tuple(feed.get("tickers") or ()))
+        block = (
+            f"\n▶ {feed['role']}\n"
+            f"  출처: {doc.get('date')} {label} / SIGNAL:{doc.get('signal')} "
+            f"/ 전망대상:{predict}"
+        )
+        if one:
+            block += f"\n  한줄: {one}"
+        if metrics:
+            block += "\n  핵심 수치:\n" + "\n".join(metrics)
+        else:
+            block += "\n  핵심 수치: 없음"
+        blocks.append(block)
+    return "\n".join(blocks)
+
+
 def _build_prev_context(brief_type: str) -> str:
     """검증 짝 시황을 가져와 직전 전망 검증에 사용.
     verify_mode=defer → 인용만, 수치 채점 금지
@@ -865,10 +1094,12 @@ def _build_prev_context(brief_type: str) -> str:
             f"\n[검증 대상(보류) — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
             f"직전 전망 대상: {predict}\n"
             f"{forecast_text}\n"
-            f"[중요] 이 리포트({brief_type})에서는 위 전망을 **검증 보류**로만 작성할 것.\n"
+            f"[중요] ###0 채점만 보류. 교차시장 데이터 활용은 필수.\n"
             f"- 전망 문장을 SIGNAL과 함께 명확히 인용\n"
             f"- 적중/부분 적중/빗나감 판정 금지 (판정=검증 보류)\n"
             f"- 미국 지수로 한국 전망을 채점하거나 그 반대 금지\n"
+            f"- 단, 한국 마감 수치·뉴스는 오늘 미국장 전망의 입력 변수로 적극 사용\n"
+            f"- '검증 보류'를 이유로 리포트 작성 불가/스냅샷 생략 금지\n"
         )
 
     return (
@@ -994,7 +1225,12 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     featured_text = build_featured_context(
         market_data, brief_type=brief_type, fear_greed=fear_greed
     )
-    prev_context = _build_prev_context(brief_type)
+    prev_context = "\n".join(
+        x for x in (
+            _build_prev_context(brief_type),
+            _build_circulation_context(brief_type),
+        ) if x
+    ).strip()
 
     try:
         tomorrow_events = _get_tomorrow_events(now)
@@ -1056,26 +1292,6 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
     next_trading_label, next_kr_str = _next_kr_trading_label(now_kst)
 
-    # 미국 마감 시황일 때 kr_close 브리프 한 줄 요약을 별도 컨텍스트로 추출
-    kr_close_context = ""
-    if brief_type == "us_close":
-        korea_brief = next(
-            (b for b in recent if b.get("type") == "kr_close"),
-            None
-        )
-        if korea_brief:
-            summary_match = re.search(
-                r"###\s*\d+\.\s*💡[^\n]*\n([^\n#]+)",
-                korea_brief.get("analysis", "")
-            )
-            kr_one_line = summary_match.group(1).strip() if summary_match else ""
-            kr_close_context = f"""
-[오늘 한국 장 마감 결과 — kr_close 브리프 {korea_brief['date']} 기준]
-{kr_one_line}
-SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
-(위 내용을 "{next_trading_label} 한국 시장 전망" 섹션 작성 시 참고할 것)
-"""
-
     # 적중률 자기보정 컨텍스트
     from database import get_brief_accuracy
     accuracy = get_brief_accuracy(limit=20, market=target_market)
@@ -1132,9 +1348,17 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
     if brief_type == "us_premarket":
         verify0 = _verify_block(
             bench="—",
-            result_metrics="해당 없음 (직전 us_close 전망 대상=다음 한국 거래일)",
+            result_metrics=(
+                "채점 대상 아님 — 직전 us_close의 '다음 한국장' 전망은 "
+                "한국 마감(kr_close)에서 KOSPI로 채점. "
+                "여기선 한국 마감 수치를 인용만"
+            ),
             mode="defer",
-            extra="직전 미국 마감 SIGNAL은 한국장 전망이다. 미국 SPY/QQQ로 채점하지 말 것.",
+            extra=(
+                "직전 us_close SIGNAL은 한국장 전망이다. "
+                "채점은 kr_close에서 하고, 여기서는 한국 마감(코스피/코스닥 등락·거래량)을 "
+                "오늘 미국장 전망의 선행 신호로 연결할 것."
+            ),
         )
         psych = _psych_block(impact_header="오늘 미국장 영향")
         outlook = _outlook_block(
@@ -1155,8 +1379,13 @@ SIGNAL: {korea_brief.get('signal', 'NEUTRAL')}
 
 [이 리포트 특성 — 미국 장전]
 - 이미 끝난 한국 마감 + 직전 미국 세션을 스냅샷으로 정리한 뒤, 오늘 미국장 전망
+- 한국↔미국은 유기적 관계: 한국 마감 급락/급등·거래량·특징주는 오늘 미국장 전망의 핵심 입력
+- [교차시장 순환 주입]의 kr_close SIGNAL·핵심 수치를 오늘 미국장 전망에 반드시 연결
 - 장중 미확정 봉을 오늘 마감처럼 쓰지 말 것
-- 직전 us_close는 '다음 한국장' 전망 → ###0은 검증 보류 (SPY로 채점 금지)
+- 직전 us_close의 '다음 한국장' 전망 → ###0은 SIGNAL 채점만 검증 보류 (채점 시점은 kr_close)
+- 일부 심리지표가 stale여도, 제공된 한국·미국 지수/섹터/뉴스로 리포트 완성할 것
+- "등락률 누락/데이터 불완전 → 스냅샷 작성 불가" 금지 — 제공된 숫자는 반드시 종가/등락률/거래량으로 기재
+- PRE_OPEN은 직전 미국 세션 마감이 정상 기준이다 (없으면 없다고만 짧게)
 
 [제공 데이터]
 {data_text}
@@ -1251,6 +1480,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [이 리포트 특성 — 한국 마감]
 - 오늘 한국 마감 스냅샷 → 의미 → {next_trading_label} 전망
+- [교차시장 순환 주입]의 kr_premarket·us_close를 검증·맥락에 반영
 - stale 데이터는 전망에 쓰지 말고 명시
 - 비거래일을 "내일"로 쓰지 말 것
 
@@ -1331,6 +1561,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 [이 리포트 특성 — 미국 마감]
 - 오늘 미국 마감 스냅샷 → 의미 → {next_trading_label} 한국 전망
 - SPY vs RSP 시장 폭 해석 필수(갭 있을 때)
+- [교차시장 순환 주입]의 us_premarket·kr_close SIGNAL·수치를 다음 한국장 전망에 연결
 
 [제공 데이터]
 {data_text}
@@ -1343,7 +1574,6 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {news_text}
 
 {prev_context}
-{kr_close_context}
 ## 📈 마감 시황 · {today} {weekday_today}요일
 
 {verify0}
@@ -1416,6 +1646,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 [이 리포트 특성 — 한국 장전]
 - 간밤 미국 마감이 오늘 한국장 입력 변수. 미국→한국 경로로 전망
+- [교차시장 순환 주입]의 us_close SIGNAL·핵심 수치를 오늘 한국장 전망에 반드시 연결
 - 삼성·하이닉스·SMH 연결을 우선
 - 직전 us_close의 한국장 전망은 ###0에서 검증 보류 (채점은 오늘 kr_close)
 
