@@ -892,6 +892,47 @@ const API = IS_LOCAL
   ? "http://127.0.0.1:8000"
   : "https://web-production-3b251.up.railway.app";
 
+const STREAM_KEEPALIVE = "\u200b";
+const stripKeepalive = (text) => text.replace(/\u200b/g, "");
+
+async function parseHttpError(res) {
+  let detail = "";
+  try {
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const j = await res.json();
+      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail || j);
+    } else {
+      detail = (await res.text()).slice(0, 200);
+    }
+  } catch (_) {}
+  if (res.status === 401) return "로그인이 만료되었습니다. 다시 로그인해 주세요.";
+  if (res.status === 403) return "이 분석에 대한 접근 권한이 없습니다.";
+  if (res.status === 404) return detail || "분석 데이터를 찾을 수 없습니다.";
+  if (res.status >= 500) return "서버 오류입니다. 잠시 후 다시 시도해 주세요.";
+  return detail || `요청 실패 (${res.status})`;
+}
+
+function formatFetchError(err) {
+  const msg = err?.message || String(err);
+  if (/failed to fetch|network error|load failed|networkrequestfailed/i.test(msg))
+    return "네트워크 연결이 끊겼습니다. Wi-Fi 확인 후 다시 시도해 주세요.";
+  return msg;
+}
+
+async function readTextStream(res, onChunk) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    fullText += decoder.decode(value, { stream: true });
+    onChunk(stripKeepalive(fullText));
+  }
+  return stripKeepalive(fullText);
+}
+
 const fmtNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—");
 const fmtDollar = (v) => (typeof v === "number" && Number.isFinite(v) ? "$" + v.toLocaleString() : "—");
 const fmtVal = (v, suffix = "") => (v && v !== 0 ? `${v}${suffix}` : "—");
@@ -2080,27 +2121,23 @@ async function sendChat() {
 
   // AI 버블 (스트리밍)
   const assistantBubble = appendChatBubble("assistant", "", selectedSection, true);
+  assistantBubble.innerHTML = `<span style="color:var(--muted);font-size:12px">답변 생성 중...</span>`;
 
   try {
     const res = await fetch(`${API}/chat`, {
       method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()},
       body: JSON.stringify({ doc_id: currentDocId, question, section: selectedSection })
     });
-    if (!res.ok) throw new Error("답변 실패");
+    if (!res.ok) throw new Error(await parseHttpError(res));
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = "";
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      fullText += decoder.decode(value, {stream: true});
+    await readTextStream(res, (text) => {
+      if (!text) return;
       assistantBubble.innerHTML = typeof marked !== "undefined"
-        ? marked.parse(fullText) : fullText.replace(/\n/g, "<br>");
+        ? marked.parse(text) : text.replace(/\n/g, "<br>");
       assistantBubble.scrollIntoView({behavior: "smooth", block: "end"});
-    }
+    });
   } catch(err) {
-    assistantBubble.innerHTML = `<span style="color:var(--red)">오류: ${err.message}</span>`;
+    assistantBubble.innerHTML = `<span style="color:var(--red)">오류: ${formatFetchError(err)}</span>`;
   } finally {
     chatInFlight = false;
     document.getElementById("chat-send-btn").disabled = false;

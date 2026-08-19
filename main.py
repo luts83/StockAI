@@ -6,6 +6,7 @@ from typing import Optional
 import anthropic
 import asyncio
 import io
+import threading
 import json as _json
 import math
 import os
@@ -78,6 +79,13 @@ app.add_middleware(
     allow_credentials=True,
 )
 claude = anthropic.Anthropic()
+
+# 스트리밍 keep-alive (프록시 타임아웃 방지 — 클라이언트에서 제거)
+_STREAM_KEEPALIVE = "\u200b"
+_STREAM_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
 
 # ── 모델 ──────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
@@ -632,6 +640,91 @@ async def analyze_status(job_id: str):
         return {"status": "error", "error": job.error}
     return {"status": job.status}
 
+
+def _build_chat_live_context(px, news_live, doc, data_date: str) -> str:
+    """채팅 system 프롬프트용 실시간 시세·뉴스 블록."""
+    live_blocks = []
+    ticker = doc["ticker"]
+    try:
+        if px:
+            reg = px.get("regular_price")
+            ext = px.get("extended_price")
+            prev = px.get("previous_close")
+            chg = None
+            if reg is not None and prev:
+                chg = round((reg - prev) / prev * 100, 2)
+            live_blocks.append(
+                "[실시간 시세 — 방금 서버에서 조회]\n"
+                f"- 정규장 현재가: ${reg}"
+                + (f" (전일 대비 {chg:+.2f}%)" if chg is not None else "")
+                + "\n"
+                + (f"- 프리/애프터: ${ext}\n" if ext else "")
+                + f"- 전일종가: ${prev}\n"
+                + f"- 분석 기준가({data_date}): ${doc.get('current_price', '—')}"
+            )
+        else:
+            live_blocks.append("[실시간 시세] 조회 결과 없음")
+    except Exception as e:
+        print(f"[chat] 시세 블록 구성 실패 {ticker}: {e}")
+        live_blocks.append("[실시간 시세] 일시 조회 실패")
+
+    try:
+        if news_live:
+            lines = ["[최신 뉴스 — 방금 서버에서 조회 (최대 5건)]"]
+            for n in news_live[:5]:
+                title = n.get("title_ko") or n.get("title") or ""
+                src = n.get("source") or ""
+                pub = (n.get("published") or "")[:16]
+                if title:
+                    lines.append(f"- [{src} {pub}] {title}")
+            live_blocks.append("\n".join(lines))
+        else:
+            live_blocks.append("[최신 뉴스] 수집된 헤드라인 없음")
+    except Exception as e:
+        print(f"[chat] 뉴스 블록 구성 실패 {ticker}: {e}")
+        live_blocks.append("[최신 뉴스] 일시 조회 실패")
+
+    return "\n\n".join(live_blocks)
+
+
+async def _stream_claude_text(system: str, messages: list, *, max_tokens: int = 1200):
+    """Claude 텍스트 스트림 + keep-alive (동기 SDK를 스레드에서 실행)."""
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def _producer():
+        try:
+            with claude.messages.stream(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    loop.call_soon_threadsafe(q.put_nowait, ("chunk", text))
+            loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+        except Exception as e:
+            print(f"[chat] Claude 스트림 오류: {e}")
+            loop.call_soon_threadsafe(q.put_nowait, ("error", str(e)))
+
+    threading.Thread(target=_producer, daemon=True).start()
+
+    while True:
+        try:
+            kind, payload = await asyncio.wait_for(q.get(), timeout=12.0)
+        except asyncio.TimeoutError:
+            yield _STREAM_KEEPALIVE
+            continue
+
+        if kind == "chunk":
+            yield payload
+        elif kind == "done":
+            break
+        elif kind == "error":
+            yield f"\n\n[오류] AI 응답 생성 실패: {payload}"
+            break
+
+
 @app.post("/chat")
 async def chat_stream(
     req: ChatRequest,
@@ -657,48 +750,20 @@ async def chat_stream(
     _data_date = doc.get("data_date") or doc.get("created_at", "")[:10]
     _now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
 
-    # ── 질문 시 실시간 시세·뉴스 조회 (Yahoo로 가라 식 거절 방지) ──
-    live_blocks = []
-    try:
-        px = get_extended_price(ticker)
-        if px:
-            reg = px.get("regular_price")
-            ext = px.get("extended_price")
-            prev = px.get("previous_close")
-            chg = None
-            if reg is not None and prev:
-                chg = round((reg - prev) / prev * 100, 2)
-            live_blocks.append(
-                "[실시간 시세 — 방금 서버에서 조회]\n"
-                f"- 정규장 현재가: ${reg}"
-                + (f" (전일 대비 {chg:+.2f}%)" if chg is not None else "")
-                + "\n"
-                + (f"- 프리/애프터: ${ext}\n" if ext else "")
-                + f"- 전일종가: ${prev}\n"
-                + f"- 분석 기준가({_data_date}): ${doc.get('current_price', '—')}"
-            )
-    except Exception as e:
-        print(f"[chat] 시세 조회 실패 {ticker}: {e}")
-        live_blocks.append("[실시간 시세] 일시 조회 실패")
+    # 시세·뉴스 병렬 조회 (응답 시작 지연 단축)
+    px, news_live = await asyncio.gather(
+        asyncio.to_thread(get_extended_price, ticker),
+        asyncio.to_thread(fetch_news, ticker, False),
+        return_exceptions=True,
+    )
+    if isinstance(px, Exception):
+        print(f"[chat] 시세 조회 실패 {ticker}: {px}")
+        px = None
+    if isinstance(news_live, Exception):
+        print(f"[chat] 뉴스 조회 실패 {ticker}: {news_live}")
+        news_live = []
 
-    try:
-        news_live = fetch_news(ticker, translate=False)
-        if news_live:
-            lines = ["[최신 뉴스 — 방금 서버에서 조회 (최대 5건)]"]
-            for n in news_live[:5]:
-                title = n.get("title_ko") or n.get("title") or ""
-                src = n.get("source") or ""
-                pub = (n.get("published") or "")[:16]
-                if title:
-                    lines.append(f"- [{src} {pub}] {title}")
-            live_blocks.append("\n".join(lines))
-        else:
-            live_blocks.append("[최신 뉴스] 수집된 헤드라인 없음")
-    except Exception as e:
-        print(f"[chat] 뉴스 조회 실패 {ticker}: {e}")
-        live_blocks.append("[최신 뉴스] 일시 조회 실패")
-
-    live_context = "\n\n".join(live_blocks)
+    live_context = _build_chat_live_context(px, news_live, doc, _data_date)
 
     system = (
         f"당신은 주식 기술적 분석 전문가입니다.\n"
@@ -742,21 +807,25 @@ async def chat_stream(
     messages.append({"role": "user", "content": req.question})
 
     append_chat(req.doc_id, "user", req.question, req.section)
-    full_response = []
 
-    def generate():
-        with claude.messages.stream(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=1200,
-            system=system,
-            messages=messages,
-        ) as stream:
-            for text in stream.text_stream:
-                full_response.append(text)
+    async def generate():
+        # 첫 바이트를 즉시 보내 프록시·클라이언트 타임아웃 완화
+        yield _STREAM_KEEPALIVE
+        full_response = []
+        async for text in _stream_claude_text(system, messages):
+            if text == _STREAM_KEEPALIVE:
                 yield text
-        append_chat(req.doc_id, "assistant", "".join(full_response), req.section)
+                continue
+            full_response.append(text)
+            yield text
+        if full_response:
+            append_chat(req.doc_id, "assistant", "".join(full_response), req.section)
 
-    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain; charset=utf-8",
+        headers=_STREAM_HEADERS,
+    )
 
 @app.get("/history")
 async def all_history(
