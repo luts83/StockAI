@@ -387,17 +387,23 @@ def _verify_block(
     result_metrics: str,
     mode: str = "score",
     extra: str = "",
+    cite: str = "",
+    secondary: list[tuple[str, str]] | None = None,
 ) -> str:
     """공통 직전 전망 검증 섹션.
     mode=score: 벤치마크로 적중 판정
     mode=defer: 전망 대상이 아직이라 검증 보류 (SPY로 한국전망 채점 금지 등)
+    cite: Mongo에서 만든 '전망:' 복붙 문구 (SIGNAL + 근거)
+    secondary: [(소제목, 인용문구), ...] — kr_close의 us_close 추가 검증 등
     """
+    cite_line = (cite or "").strip() or "전망 기록 없음 (SIGNAL/본문 미확인)"
     if mode == "defer":
         return f"""### 0. 직전 전망 검증
 (직전 시황 없으면 생략)
 이 시점에서는 **SIGNAL 채점만 하지 말고 검증 보류**한다. 교차시장 숫자는 전망에 쓴다.
 
-- 전망: [직전 SIGNAL] + 전망 대상·핵심 근거를 명확히 한 줄 인용
+- 전망: {cite_line}
+  ※ 위 전망 줄을 삭제·'-'·공백으로 바꾸지 말 것 (그대로 두고 판정만 보류)
 - 실제 결과: {result_metrics}
 - 판정: **검증 보류**
 - 판정 이유: {extra or "전망 대상 시장 채점 시점이 아님 (교차시장 입력 활용과 무관)"}
@@ -406,22 +412,38 @@ def _verify_block(
 ※ 한국 급락/급등·거래량·뉴스를 미국 장전 전망 근거로 쓰는 것은 필수 (유기적 연결)
 ※ '검증 보류'·일부 지표 지연만으로 "스냅샷 작성 불가/리포트 불가" 금지 — 있는 수치로 작성
 """
-    return f"""### 0. 직전 전망 검증
-(직전 시황 없으면 생략)
-반드시 아래 순서로:
 
-- 전망: [SIGNAL:BULL/NEUTRAL/BEAR] + 핵심 근거 한 줄
-  (모호 표현 금지. 전망 대상 시장·조건을 명시)
+    blocks = [f"""### 0. 직전 전망 검증
+(직전 시황 없으면 생략)
+**전망 인용 없이 적중/빗나감 판정 금지.** 아래 '전망:'은 Mongo 직전 시황에서 채운 문장이다.
+
+#### 직전 전망
+- 전망: {cite_line}
+  ※ 위 줄을 수정·삭제·'-'로 바꾸지 말 것. SIGNAL과 근거가 보여야 함
 - 실제 결과: {result_metrics}
 - 판정: 적중 / 부분 적중 / 빗나감 중 하나
-- 판정 이유: 왜 그 판정인지 1~2문장
+  (인용이 "전망 기록 없음"이면 판정=**검증 불가** — 적중/빗나감 금지)
+- 판정 이유: 인용한 전망(SIGNAL·근거)과 실제 수치를 대응해 1~2문장
   [판정 기준 — 벤치마크 {bench}, 중립 밴드 ±0.3%]
   · BULL → {bench} ≥ +0.3% 적중, |Δ|<0.3% 부분 적중, ≤ −0.3% 빗나감
   · BEAR → {bench} ≤ −0.3% 적중, |Δ|<0.3% 부분 적중, ≥ +0.3% 빗나감
   · NEUTRAL → |Δ|<0.3% 적중, 그 외 부분 적중. NEUTRAL을 상승/하락 전망으로 해석해 빗나감 금지
 - 다음 전망 반영: 다음 시황 생성에 바로 쓸 규칙 1줄 (추상적 감상 금지)
-{extra}
-"""
+"""]
+    for title, sec_cite in secondary or []:
+        sec = (sec_cite or "").strip()
+        if not sec:
+            continue
+        blocks.append(f"""
+#### {title}
+- 전망: {sec}
+  ※ 위 줄을 수정·삭제·'-'로 바꾸지 말 것
+- 실제 결과: {result_metrics}
+- 판정: 적중 / 부분 적중 / 빗나감 / 검증 불가 중 하나
+- 판정 이유: 인용 전망과 실제를 대응 (1문장)
+""")
+    blocks.append(extra or "")
+    return "\n".join(blocks).rstrip() + "\n"
 
 
 def _psych_block(*, impact_header: str) -> str:
@@ -993,6 +1015,49 @@ def _extract_forecast(analysis: str) -> str:
     return analysis[-300:].strip()
 
 
+def _condense_forecast_line(forecast_text: str) -> str:
+    """전망 섹션에서 한 줄 근거만 뽑기."""
+    if not forecast_text:
+        return ""
+    keys = ("강세", "약세", "중립", "우위", "결론", "BULL", "BEAR", "NEUTRAL")
+    for raw in forecast_text.splitlines():
+        line = raw.strip().lstrip("-*#• ").strip()
+        if len(line) < 8:
+            continue
+        if any(k in line for k in keys):
+            return line[:200]
+    for raw in forecast_text.splitlines():
+        line = raw.strip().lstrip("-*#• ").strip()
+        if len(line) >= 20 and not line.startswith("["):
+            return line[:200]
+    return forecast_text.replace("\n", " ").strip()[:200]
+
+
+def _forecast_citation(doc: dict | None) -> str:
+    """###0 '전망:' 칸에 넣을 SIGNAL+근거 한 줄 (Mongo 직전 시황)."""
+    if not doc:
+        return ""
+    sig = (doc.get("signal") or "NEUTRAL").strip().upper()
+    if sig not in ("BULL", "NEUTRAL", "BEAR"):
+        sig = "NEUTRAL"
+    analysis = doc.get("analysis") or ""
+    one = _extract_one_liner(analysis)
+    body = one or _condense_forecast_line(_extract_forecast(analysis))
+    if not body:
+        body = "(상세 전망 문장 없음 — SIGNAL만 채점)"
+    date = doc.get("date") or ""
+    return f"[{date}] SIGNAL:{sig} — {body}"
+
+
+def _load_brief_cite(brief_type: str) -> tuple[dict | None, str]:
+    """최근 해당 타입 시황 + 전망 인용 문구."""
+    from database import get_recent_market_briefs
+    docs = get_recent_market_briefs(limit=1, brief_type=brief_type)
+    if not docs:
+        return None, ""
+    return docs[0], _forecast_citation(docs[0])
+
+
 def _extract_one_liner(analysis: str) -> str:
     """시황 본문에서 '한 줄 요약' 추출."""
     if not analysis:
@@ -1073,29 +1138,32 @@ def _build_prev_context(brief_type: str) -> str:
     verify_mode=defer → 인용만, 수치 채점 금지
     verify_mode=score → 같은 세션 장전 전망을 마감 수치로 채점
     """
-    from database import get_recent_market_briefs
     cfg = BRIEF_TYPES.get(brief_type)
     if not cfg:
         return ""
     verify_type = cfg["verify"]
     mode = cfg.get("verify_mode", "score")
 
-    prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
-    if not prev_list:
+    prev, cite = _load_brief_cite(verify_type)
+    if not prev:
         return ""
 
-    prev    = prev_list[0]
     label   = BRIEF_TYPES.get(verify_type, {}).get("label", verify_type)
     predict = BRIEF_TYPES.get(verify_type, {}).get("predict", "")
     forecast_text = _extract_forecast(prev.get("analysis", ""))
 
+    head = (
+        f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
+        f"직전 전망 대상: {predict}\n"
+        f"【###0 전망 칸 복붙용】{cite}\n"
+        f"{forecast_text}\n"
+    )
+
     if mode == "defer":
         return (
-            f"\n[검증 대상(보류) — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
-            f"직전 전망 대상: {predict}\n"
-            f"{forecast_text}\n"
-            f"[중요] ###0 채점만 보류. 교차시장 데이터 활용은 필수.\n"
-            f"- 전망 문장을 SIGNAL과 함께 명확히 인용\n"
+            head
+            + f"[중요] ###0 채점만 보류. 교차시장 데이터 활용은 필수.\n"
+            f"- '전망:'에는 위 복붙용 문구를 그대로 둘 것 (비우기/'-' 금지)\n"
             f"- 적중/부분 적중/빗나감 판정 금지 (판정=검증 보류)\n"
             f"- 미국 지수로 한국 전망을 채점하거나 그 반대 금지\n"
             f"- 단, 한국 마감 수치·뉴스는 오늘 미국장 전망의 입력 변수로 적극 사용\n"
@@ -1103,12 +1171,10 @@ def _build_prev_context(brief_type: str) -> str:
         )
 
     return (
-        f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
-        f"직전 전망 대상: {predict}\n"
-        f"{forecast_text}\n"
-        f"[이 전망({predict})을 오늘 실제 마감 수치와 비교해 "
-        f"### 0. 직전 전망 검증에서 적중/부분 적중/빗나감으로 판정할 것]\n"
-        f"- 전망: SIGNAL + 핵심 근거를 짧고 명확히\n"
+        head
+        + f"[이 전망({predict})을 오늘 실제 마감 수치와 비교해 판정할 것]\n"
+        f"- '전망:'에는 【복붙용】을 그대로 사용 — 비우거나 '-'만 쓰면 안 됨\n"
+        f"- 전망 인용 없이 적중/빗나감 판정 금지\n"
         f"- 실제 결과: 벤치마크 등락률\n"
         f"- 판정 이유 + 다음 전망 반영 규칙 1줄\n"
     )
@@ -1346,6 +1412,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     timing_context += accuracy_context
 
     if brief_type == "us_premarket":
+        _, us_close_cite = _load_brief_cite("us_close")
         verify0 = _verify_block(
             bench="—",
             result_metrics=(
@@ -1354,6 +1421,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
                 "여기선 한국 마감 수치를 인용만"
             ),
             mode="defer",
+            cite=us_close_cite,
             extra=(
                 "직전 us_close SIGNAL은 한국장 전망이다. "
                 "채점은 kr_close에서 하고, 여기서는 한국 마감(코스피/코스닥 등락·거래량)을 "
@@ -1453,13 +1521,20 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "kr_close":
+        _, kr_pm_cite = _load_brief_cite("kr_premarket")
+        _, us_close_cite = _load_brief_cite("us_close")
+        secondary = []
+        if us_close_cite:
+            secondary.append(("간밤 미국→한국 전망 (us_close)", us_close_cite))
         verify0 = _verify_block(
             bench="KOSPI",
             result_metrics="KOSPI ▲/▼X.XX%, KOSDAQ ▲/▼X.XX% (제공 수치)",
             mode="score",
+            cite=kr_pm_cite,
+            secondary=secondary,
             extra=(
-                "\n추가로 직전 us_close의 '다음 한국장' 전망이 있으면 "
-                "같은 KOSPI 수치로 한 줄 더 판정해도 됨 (없으면 생략)."
+                "\n※ 장전(kr_premarket)과 간밤 us_close 전망 모두 "
+                "'전망:'에 인용문이 보여야 하며, 비어 있으면 검증 불가."
             ),
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 영향")
@@ -1539,6 +1614,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
             bench="SPY",
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
             mode="score",
+            cite=_load_brief_cite("us_premarket")[1],
             extra="검증 대상은 오늘 us_premarket의 '오늘 미국장' 전망이다.",
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 한국 영향")
@@ -1621,6 +1697,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
             bench="—",
             result_metrics="해당 없음 (직전 us_close 전망 대상=다음/오늘 한국장, 아직 장전)",
             mode="defer",
+            cite=_load_brief_cite("us_close")[1],
             extra=(
                 "직전 미국 마감의 한국장 전망을 인용만 하고 판정은 보류. "
                 "실제 채점은 오늘 kr_close에서 KOSPI로 한다. "
