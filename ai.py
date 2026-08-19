@@ -282,7 +282,8 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           analysis_date: str = "",
                           earnings_context: dict = None,
                           volume_profile: dict = None,
-                          signal_engine: dict = None) -> str:
+                          signal_engine: dict = None,
+                          feedback_context: str = "") -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:15] if item.get("title")
@@ -424,6 +425,12 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
     from signal_engine import format_engine_for_prompt
     vp_text = format_volume_profile_for_prompt(volume_profile)
     engine_text = format_engine_for_prompt(signal_engine)
+    fb_block = ""
+    if feedback_context and feedback_context.strip():
+        fb_block = f"""
+### 과거 시그널 전환 피드백 (자동 비교·학습)
+{feedback_context.strip()}
+"""
 
     return f"""다음 주식을 분석해줘.
 
@@ -459,7 +466,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 
 ### Signal Engine 결과 (객관 — 덮어쓰기 금지, 설명만)
 {engine_text}
-
+{fb_block}
 ### 밸류에이션
 {valuation_text}
 
@@ -507,7 +514,8 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               news_items: List[Dict], valuation: dict = None,
                               analysis_date: str = "",
                               earnings_context: dict = None,
-                              signal_engine: dict = None) -> str:
+                              signal_engine: dict = None,
+                              feedback_context: str = "") -> str:
     """Claude Vision API로 차트 + 뉴스 + 밸류에이션 + 어닝 종합 분석"""
     from volume_profile import compute_volume_profile
     stats  = get_summary_stats(df, ticker=ticker)
@@ -516,7 +524,8 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                                    analysis_date=analysis_date,
                                    earnings_context=earnings_context,
                                    volume_profile=vp,
-                                   signal_engine=signal_engine)
+                                   signal_engine=signal_engine,
+                                   feedback_context=feedback_context)
 
     try:
         message = _get_client().messages.create(

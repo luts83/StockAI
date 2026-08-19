@@ -39,6 +39,8 @@ from database import (
     save_baseline_report, get_latest_baseline_report,
     upsert_signal_features, get_signal_features, list_signal_features,
     save_engine_training_run, get_latest_engine_training_run,
+    get_previous_analysis, get_feedback_by_next_id,
+    aggregate_transition_stats, list_ticker_feedback,
 )
 from signal_eval import (
     outcome_from_analysis_doc, summarize_baseline, ENGINE_VERSION,
@@ -454,11 +456,22 @@ async def _run_analysis_job(job_id: str, ticker: str,
             print(f"[signal_engine] decide 실패: {e}")
             signal_meta = {}
 
+        # 과거 시그널 전환 교훈 → LLM 설명층에만 주입 (SIGNAL 덮어쓰기 금지)
+        feedback_context = ""
+        try:
+            from analysis_feedback import build_feedback_context_for_ticker
+            feedback_context = build_feedback_context_for_ticker(
+                ticker, req.period, current_signal=signal
+            )
+        except Exception as e:
+            print(f"[feedback] context 실패: {e}")
+
         analysis_raw = await analyze_with_claude(
             chart_b64, df, ticker, news_items, valuation,
             analysis_date=analysis_date,
             earnings_context=earnings_context,
             signal_engine=signal_meta or None,
+            feedback_context=feedback_context,
         )
         llm_signal = extract_signal(analysis_raw)
         analysis = clean_analysis(analysis_raw)
@@ -488,7 +501,17 @@ async def _run_analysis_job(job_id: str, ticker: str,
             / df["Close"].iloc[-2] * 100
         )
         doc_id = ""
+        signal_change = None
         if user_id:
+            # 저장 전 직전 분석 (같은 유저·티커·기간)
+            prev_doc = None
+            try:
+                prev_doc = get_previous_analysis(
+                    ticker, req.period, user_id=user_id
+                )
+            except Exception as e:
+                print(f"[feedback] prev lookup 실패: {e}")
+
             doc_id = save_analysis(
                 ticker=ticker, period=req.period,
                 indicators=indicators, analysis=analysis,
@@ -501,6 +524,26 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 llm_signal=llm_signal,
                 signal_engine=signal_meta,
             )
+            # SIGNAL 변경 시 자동 비교·피드백 저장
+            try:
+                if prev_doc and (prev_doc.get("signal") or "").upper() != (signal or "").upper():
+                    from analysis_feedback import maybe_create_feedback, ui_payload
+                    next_stub = {
+                        "ticker": ticker,
+                        "period": req.period,
+                        "user_id": user_id,
+                        "signal": signal,
+                        "indicators": indicators,
+                        "signal_engine": signal_meta,
+                        "current_price": current_price_val,
+                        "change_pct": change_pct_val,
+                    }
+                    fb = maybe_create_feedback(
+                        prev=prev_doc, next_doc=next_stub, next_id=doc_id
+                    )
+                    signal_change = ui_payload(fb)
+            except Exception as e:
+                print(f"[feedback] create 실패: {e}")
             # Phase 1: 사후성과 stub (horizon은 스케줄러/백필이 채움)
             try:
                 from datetime import datetime as _dt
@@ -557,6 +600,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "signal_engine":   signal_meta,
             "is_saved":        bool(user_id),
             "data_date":       analysis_date,
+            "signal_change":   signal_change,
         }
         job.status = "done"
         elapsed = asyncio.get_event_loop().time() - t0
@@ -761,7 +805,41 @@ async def load_analysis(
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
     if doc.get("user_id") != user.get("sub"):
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    try:
+        from analysis_feedback import ui_payload
+        fb = get_feedback_by_next_id(doc_id)
+        doc["signal_change"] = ui_payload(fb)
+    except Exception:
+        doc["signal_change"] = None
     return doc
+
+
+@app.get("/feedback/transitions")
+async def feedback_transitions(
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """시그널 전환 행렬·사후 채점 요약."""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    return aggregate_transition_stats(limit=2000)
+
+
+@app.get("/feedback/{ticker}")
+async def feedback_for_ticker(
+    ticker: str,
+    period: str = "6mo",
+    limit: int = 5,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    items = list_ticker_feedback(ticker.upper(), period=period, limit=limit)
+    return {"ticker": ticker.upper(), "period": period, "items": items}
+
 
 @app.delete("/analysis/{doc_id}")
 async def remove_analysis(
@@ -1559,9 +1637,29 @@ def _run_daily_engine_learn() -> dict:
     from signal_calibration import train_engine
     from signal_features import features_from_analysis_doc, clear_feature_cache
     import signal_engine as se
+    from analysis_feedback import score_pending_feedbacks
 
     print("[engine] daily learn: baseline backfill")
     base = _run_baseline_backfill(5000, True)
+
+    print("[engine] daily learn: feedback outcome scoring")
+    fb_score = {"checked": 0}
+    try:
+        fb_score = score_pending_feedbacks(min_age_days=10, limit=500)
+        print(f"[engine] feedback scored={fb_score}")
+    except Exception as e:
+        print(f"[engine] feedback score failed: {e}")
+
+    transition_stats = {}
+    try:
+        transition_stats = aggregate_transition_stats(limit=2000)
+        print(
+            f"[engine] transition_stats n={transition_stats.get('n_feedback')} "
+            f"scored={transition_stats.get('n_scored')} "
+            f"matrix_keys={len(transition_stats.get('matrix') or {})}"
+        )
+    except Exception as e:
+        print(f"[engine] transition_stats failed: {e}")
 
     print("[engine] daily learn: feature backfill")
     clear_feature_cache()
@@ -1586,10 +1684,22 @@ def _run_daily_engine_learn() -> dict:
             "n_feat": len(features),
             "n_out": len(outcomes),
             "baseline": base,
+            "feedback_score": fb_score,
+            "transition_stats": transition_stats,
         }
 
     path = Path(__file__).resolve().parent / "data" / "engine_config.json"
     cfg = train_engine(features, outcomes, path)
+    # 전환 통계를 config에 첨부 (임계값 강제 변경 없이 관측용)
+    try:
+        cfg["transition_stats"] = transition_stats
+        path.write_text(
+            __import__("json").dumps(cfg, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[engine] transition_stats write failed: {e}")
+
     run_id = None
     try:
         run_id = save_engine_training_run(cfg, source="daily_scheduler")
@@ -1618,6 +1728,8 @@ def _run_daily_engine_learn() -> dict:
         "baseline_outcomes": base.get("n_outcomes"),
         "features_upserted": feat_ok,
         "feature_errors": feat_err,
+        "feedback_score": fb_score,
+        "transition_stats": transition_stats,
     }
 
 

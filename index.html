@@ -1797,6 +1797,13 @@ function renderResults(data) {
         ExpR 5/10/20d: ${er["5d"] ?? "—"} / ${er["10d"] ?? "—"} / ${er["20d"] ?? "—"}
         ${eng.expected_drawdown ? ` · ExpDD 10d: ${(eng.expected_drawdown || {})["10d"] ?? "—"}` : ""}
       </div>` : "";
+    const sc = data.signal_change;
+    const changeHtml = (sc && sc.prev_signal && sc.next_signal) ? `
+      <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.08);border:1px solid var(--border);font-size:12px;line-height:1.45;color:var(--text)">
+        <div style="font-weight:600;margin-bottom:2px">직전 대비: ${sc.prev_label || sc.prev_signal} → ${sc.next_label || sc.next_signal}</div>
+        <div style="color:var(--muted)">${sc.why_short || ""}</div>
+        ${sc.lesson ? `<div style="margin-top:4px;color:var(--dim);font-size:11px">교훈: ${sc.lesson}</div>` : ""}
+      </div>` : "";
     signalArea.innerHTML = `
       <div class="signal-box ${sigDisplay.boxClass}">
         <div class="signal-icon">${sigDisplay.icon}</div>
@@ -1808,6 +1815,7 @@ function renderResults(data) {
           ${actionLine}
           ${horizonLine}
           ${triggerHtml}
+          ${changeHtml}
         </div>
       </div>`;
   }
@@ -2415,15 +2423,29 @@ function renderHistory(items) {
     list.innerHTML = "<p style='color:var(--dim);font-size:12px;padding:12px'>분석 기록이 없습니다.</p>";
     return;
   }
-  list.innerHTML = items.map(item => {
+  list.innerHTML = items.map((item, i) => {
     const date = new Date(item.created_at).toLocaleDateString("ko-KR", {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
     const sigBadge = getSignalBadge(resolveItemSignal(item), item.analysis || "");
     const chatCount = (item.chat_history || []).length / 2 | 0;
+    const older = items[i + 1];
+    let changeBadge = "";
+    if (
+      older
+      && older.ticker === item.ticker
+      && (older.period || "6mo") === (item.period || "6mo")
+    ) {
+      const prevS = resolveItemSignal(older);
+      const nextS = resolveItemSignal(item);
+      if (prevS && nextS && prevS !== nextS) {
+        changeBadge = `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(148,163,184,0.12);color:var(--muted);white-space:nowrap">${prevS}→${nextS}</span>`;
+      }
+    }
     return `<div class="history-item" id="hist-${item._id}" onclick="loadSavedAnalysis('${item._id}')">
       <span class="history-ticker">${item.ticker}</span>
       <span class="history-date">${date}</span>
       <span style="font-size:10px;padding:2px 7px;background:var(--border2);color:var(--muted);border-radius:4px;font-family:'JetBrains Mono',monospace;">${item.period || '6mo'}</span>
       <span class="history-signal ${sigBadge.cls}">${sigBadge.text}</span>
+      ${changeBadge}
       ${chatCount ? `<span class="history-chats">💬${chatCount}</span>` : ""}
       <div class="history-actions" onclick="event.stopPropagation()">
         <button class="history-btn compare-btn" onclick="selectCompare('${item._id}', '${item.ticker}', '${date}')">비교</button>
@@ -2540,6 +2562,13 @@ async function loadSavedAnalysis(docId) {
         ${sigDisplay2.duration    ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay2.duration}</div>` : ""}
       </div>` : "";
     const sigAreaEl = document.getElementById("signal-area");
+    const sc2 = doc.signal_change;
+    const changeHtml2 = (sc2 && sc2.prev_signal && sc2.next_signal) ? `
+      <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.08);border:1px solid var(--border);font-size:12px;line-height:1.45;color:var(--text)">
+        <div style="font-weight:600;margin-bottom:2px">직전 대비: ${sc2.prev_label || sc2.prev_signal} → ${sc2.next_label || sc2.next_signal}</div>
+        <div style="color:var(--muted)">${sc2.why_short || ""}</div>
+        ${sc2.lesson ? `<div style="margin-top:4px;color:var(--dim);font-size:11px">교훈: ${sc2.lesson}</div>` : ""}
+      </div>` : "";
     if (sigAreaEl) sigAreaEl.innerHTML = `
       <div class="signal-box ${sigDisplay2.boxClass}">
         <div class="signal-icon">${sigDisplay2.icon}</div>
@@ -2547,6 +2576,7 @@ async function loadSavedAnalysis(docId) {
           <div class="signal-text">${sigDisplay2.text}${confBadge2}</div>
           <div class="signal-sub">${sigDisplay2.sub}</div>
           ${watchTriggerHtml2}
+          ${changeHtml2}
         </div>
       </div>`;
 

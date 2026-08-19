@@ -67,6 +67,20 @@ def ensure_indexes():
         [("ticker", 1), ("period", 1), ("user_id", 1), ("created_at", -1)],
         background=True,
     )
+    # analysis_feedback: 시그널 전환 자동 비교·교훈
+    db["analysis_feedback"].create_index(
+        [("ticker", 1), ("period", 1), ("created_at", -1)],
+        background=True,
+    )
+    db["analysis_feedback"].create_index(
+        [("prev_signal", 1), ("next_signal", 1)],
+        background=True,
+    )
+    db["analysis_feedback"].create_index("next_id", background=True)
+    db["analysis_feedback"].create_index(
+        [("outcome_checked", 1), ("created_at", 1)],
+        background=True,
+    )
 
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
@@ -161,6 +175,164 @@ def get_today_analysis(ticker: str, period: str, user_id: str) -> dict | None:
     ).sort("created_at", -1).limit(1)
     items = list(cursor)
     return items[0] if items else None
+
+def get_previous_analysis(
+    ticker: str,
+    period: str,
+    user_id: str = "",
+    exclude_id: str | None = None,
+) -> dict | None:
+    """같은 티커·기간의 직전 분석 1건 (최신순). exclude_id는 방금 저장한 문서 제외용."""
+    q: dict = {"ticker": ticker, "period": period}
+    if user_id:
+        q["user_id"] = user_id
+    if exclude_id:
+        q["_id"] = {"$ne": exclude_id}
+    cursor = (
+        get_db()["analyses"]
+        .find(q, {"chart_b64": 0})
+        .sort("created_at", -1)
+        .limit(1)
+    )
+    items = list(cursor)
+    return items[0] if items else None
+
+
+def save_analysis_feedback(doc: dict) -> str:
+    """시그널 전환 피드백 upsert (next_id 기준 유일)."""
+    next_id = doc.get("next_id")
+    if not next_id:
+        raise ValueError("next_id required")
+    payload = dict(doc)
+    payload["_id"] = f"fb_{next_id}"
+    payload["updated_at"] = datetime.utcnow().isoformat()
+    if "created_at" not in payload:
+        payload["created_at"] = payload["updated_at"]
+    get_db()["analysis_feedback"].replace_one(
+        {"_id": payload["_id"]}, _json_safe(payload), upsert=True
+    )
+    return payload["_id"]
+
+
+def get_analysis_feedback(feedback_id: str) -> dict | None:
+    return get_db()["analysis_feedback"].find_one({"_id": feedback_id})
+
+
+def get_feedback_by_next_id(next_id: str) -> dict | None:
+    return get_db()["analysis_feedback"].find_one({"next_id": next_id})
+
+
+def list_ticker_feedback(
+    ticker: str,
+    period: str | None = None,
+    limit: int = 3,
+) -> list:
+    q: dict = {"ticker": ticker}
+    if period:
+        q["period"] = period
+    cursor = (
+        get_db()["analysis_feedback"]
+        .find(q)
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return _json_safe(items)
+
+
+def list_pattern_feedback(
+    prev_signal: str,
+    next_signal: str,
+    limit: int = 3,
+    exclude_ticker: str | None = None,
+) -> list:
+    q: dict = {
+        "prev_signal": (prev_signal or "").upper(),
+        "next_signal": (next_signal or "").upper(),
+    }
+    if exclude_ticker:
+        q["ticker"] = {"$ne": exclude_ticker}
+    cursor = (
+        get_db()["analysis_feedback"]
+        .find(q)
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return _json_safe(items)
+
+
+def list_unchecked_feedback(limit: int = 500, min_age_days: int = 10) -> list:
+    """outcome 미채점 피드백 (생성 후 min_age_days 경과)."""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=min_age_days)).isoformat()
+    cursor = (
+        get_db()["analysis_feedback"]
+        .find({
+            "outcome_checked": {"$ne": True},
+            "created_at": {"$lte": cutoff},
+        })
+        .sort("created_at", 1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+
+def update_analysis_feedback(feedback_id: str, fields: dict) -> None:
+    get_db()["analysis_feedback"].update_one(
+        {"_id": feedback_id},
+        {"$set": {**fields, "updated_at": datetime.utcnow().isoformat()}},
+    )
+
+
+def aggregate_transition_stats(limit: int = 2000) -> dict:
+    """전환 행렬 + 채점된 피드백 요약."""
+    cursor = (
+        get_db()["analysis_feedback"]
+        .find({}, {"_id": 0, "chart_b64": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    matrix: dict = {}
+    scored = 0
+    favorable = 0
+    for fb in items:
+        key = f"{fb.get('prev_signal')}→{fb.get('next_signal')}"
+        cell = matrix.setdefault(key, {"n": 0, "scored": 0, "favorable": 0, "avg_ret_10d": []})
+        cell["n"] += 1
+        if fb.get("outcome_checked"):
+            scored += 1
+            cell["scored"] += 1
+            if fb.get("transition_favorable"):
+                favorable += 1
+                cell["favorable"] += 1
+            ret = fb.get("ret_10d")
+            if isinstance(ret, (int, float)):
+                cell["avg_ret_10d"].append(float(ret))
+    for cell in matrix.values():
+        vals = cell.pop("avg_ret_10d")
+        cell["avg_ret_10d"] = (
+            round(sum(vals) / len(vals), 3) if vals else None
+        )
+        if cell["scored"]:
+            cell["favorable_pct"] = round(100.0 * cell["favorable"] / cell["scored"], 1)
+        else:
+            cell["favorable_pct"] = None
+    return {
+        "n_feedback": len(items),
+        "n_scored": scored,
+        "n_favorable": favorable,
+        "matrix": matrix,
+    }
+
 
 def get_history(ticker: str, limit: int = 10, user_id: str = "") -> list:
     """특정 종목의 분석 히스토리 (최신순, 차트 제외)"""
