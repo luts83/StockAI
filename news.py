@@ -117,10 +117,30 @@ MACRO_RSS_SOURCES = [
         "source": "Google News",
         "category": "한국증시",
     },
+    {
+        "url": "https://news.google.com/rss/search?q=US+Treasury+buyback+bonds+yield&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "국채/금리",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=bitcoin+crypto+market+today&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "크립토",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=biotech+clinical+trial+FDA+stock&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "바이오/헬스케어",
+    },
+    {
+        "url": "https://news.google.com/rss/search?q=semiconductor+chip+stock+NVIDIA&hl=en-US&gl=US&ceid=US:en",
+        "source": "Google News",
+        "category": "반도체",
+    },
 ]
 
 
-def fetch_macro_news(max_per_source: int = 3) -> List[Dict]:
+def fetch_macro_news(max_per_source: int = 5) -> List[Dict]:
     """
     시황용 매크로 뉴스 수집
     - 유가/연준/달러/증시/한국 관련 RSS 수집
@@ -155,7 +175,8 @@ def fetch_macro_news(max_per_source: int = 3) -> List[Dict]:
                     continue
 
                 title = entry.get("title", "").strip()
-                summary = entry.get("summary", "")[:200].strip()
+                summary = re.sub(r"<[^>]+>", "", entry.get("summary", "") or "")
+                summary = re.sub(r"\s+", " ", summary).strip()[:400]
 
                 if not title:
                     continue
@@ -201,12 +222,19 @@ def format_macro_news_for_brief(news_items: List[Dict]) -> str:
         if cat not in by_category:
             by_category[cat] = []
         title = item.get("title_ko") or item.get("title", "")
-        by_category[cat].append(f"  - {title}")
+        summary = (item.get("summary") or "").strip()
+        line = f"  - {title}"
+        if summary and len(summary) > 20:
+            line += f"\n    요약: {summary[:280]}"
+        by_category[cat].append(line)
 
-    lines = []
-    for cat, titles in by_category.items():
-        lines.append(f"[{cat}]")
-        lines.extend(titles[:3])
+    lines = [
+        "[오늘의 촉매 뉴스 — 아래 제목·요약만 근거로 사용, 없는 내용 창작 금지]",
+        "작성 시: 촉매 → 연결된 지수/섹터/특징주 순으로 ###1 흐름 섹션에 반영",
+    ]
+    for cat, entries in by_category.items():
+        lines.append(f"\n[{cat}]")
+        lines.extend(entries[:4])
 
     return "\n".join(lines)
 

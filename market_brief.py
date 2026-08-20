@@ -1,5 +1,6 @@
 import math
 import re
+import asyncio
 import anthropic
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -272,10 +273,35 @@ TICKERS = {
         "2YY=F":     "미국 2년물 금리",
         "^TNX":      "미국 10년물 금리",
     },
+    "크립토": {
+        "BTC-USD": "비트코인",
+        "ETH-USD": "이더리움",
+        "IBIT":    "비트코인 ETF",
+        "COIN":    "Coinbase",
+    },
 }
 
 KR_INDEX_TICKERS = ("^KS11", "^KQ11")
 KR_MEGA_TICKERS = ("005930.KS", "000660.KS")
+
+# 특징주 스캔 유니버스 (유동성·섹터 대표 — 제공 목록 밖 종목 언급 금지)
+US_MOVER_CANDIDATES: dict[str, str] = {
+    "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "AMD": "AMD",
+    "AVGO": "Broadcom", "MRVL": "Marvell", "MRNA": "Moderna", "GOOGL": "Alphabet",
+    "META": "Meta", "AMZN": "Amazon", "TSLA": "Tesla", "COIN": "Coinbase",
+    "MSTR": "MicroStrategy", "SMCI": "Super Micro", "INTC": "Intel",
+    "QCOM": "Qualcomm", "CRM": "Salesforce", "ORCL": "Oracle", "NFLX": "Netflix",
+    "JPM": "JPMorgan", "LLY": "Eli Lilly", "UNH": "UnitedHealth", "PFE": "Pfizer",
+    "BA": "Boeing", "HOOD": "Robinhood", "RIOT": "Riot Platforms",
+    "MARA": "Marathon Digital", "PLTR": "Palantir", "UBER": "Uber",
+}
+
+KR_MOVER_CANDIDATES: dict[str, str] = {
+    "005930.KS": "삼성전자", "000660.KS": "SK하이닉스", "035420.KS": "NAVER",
+    "005380.KS": "현대차", "051910.KS": "LG화학", "035720.KS": "카카오",
+    "006400.KS": "삼성SDI", "373220.KS": "LG에너지솔루션", "207940.KS": "삼성바이오",
+    "068270.KS": "셀트리온", "000270.KS": "기아", "105560.KS": "KB금융",
+}
 
 # 종가 표기: 금리·환율은 $ 접두 없이
 _RATE_TICKERS = frozenset({"^TNX", "^IRX", "^FVX", "^TYX", "2YY=F"})
@@ -318,51 +344,52 @@ def _is_kr_symbol(ticker: str) -> bool:
 
 STRICT_RULE = """
 [절대 원칙]
-1. 제공된 데이터에 없는 내용 언급 금지
-2. 뉴스/실적/경제지표 일정은 데이터로 주어지지 않으면 언급 금지
-3. 근거 없는 표현 ("외국인 매수세", "AI 관련주 재조명" 등) 금지 — 단, 제공된 수급·특징주 수치 인용은 허용
-4. 데이터로 설명 불가하면 "데이터상 원인 불명확"으로 표기
-5. 숫자 없는 강세/약세 표현 금지 — 반드시 지수/종목명 + % 포함
-6. 전망은 현재 데이터 패턴에서만 도출, 외부 변수 추측 금지
-7. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
-8. 신뢰도는 반드시 상/중/하 세 단계 중 하나만 사용. '중상', '중하' 등 중간 단계 표현 금지
-9. 추측성 표현 금지 — "~로 추정", "~가능성" 대신 데이터가 없으면 "데이터 없음"으로 명시
-10. Fear & Greed / 삼성·하이닉스 / 섹터 ETF는 제공된 경우에만 언급
+1. 제공된 데이터·뉴스 요약·특징주 목록에 없는 내용 창작 금지
+2. 근거 없는 표현 ("외국인 매수세" 등) 금지 — 제공 수치·뉴스 요약만
+3. 데이터로 설명 불가하면 "데이터상 원인 불명확"으로 표기
+4. 숫자 없는 강세/약세 표현 금지 — 지수/종목명 + % 포함
+5. 직전 전망이 틀렸을 때 명확히 인정하고 데이터 기반 원인 분석
+6. 신뢰도는 상/중/하 세 단계만. '중상'·'중하' 금지
+7. Fear & Greed / 크립토 / 특징주는 제공된 경우에만 언급
+"""
+
+AUDIENCE_RULE = """
+[타깃 독자 — 반드시 염두]
+- 어제 장을 종일 못 본 투자자. 3~5분 읽고 "무슨 일이 있었는지" + "내 포지션을 어떻게 대응할지"가 떠올라야 함
+- 지수 나열만으로 끝내지 말 것. **촉매 → 연쇄 반응 → 시사점** 한 줄기 흐름 필수
+- 마지막 전망·한줄요약은 "무엇을 지켜보며 어떻게 대응할지" actionable 하게
 """
 
 NEWS_RULE = """
-[뉴스 활용 원칙]
-- 위 뉴스 제목은 참고용으로만 사용
-- 제목만으로 내용을 추측해서 분석에 활용 금지
-- 뉴스 제목이 시장 데이터(등락률/거래량)와 일치할 때만 연결해서 언급
-- 예시 (허용): "[뉴스] 유가 하락 뉴스 + SPY ▼0.5% → 에너지 섹터 약세 가능성"
-- 예시 (금지): "연준 발언 뉴스 있음 → 금리 인상 우려로 약세" (수치 없는 추측)
-- 뉴스 언급 시 반드시 "[뉴스]" 태그 붙여서 데이터와 구분
+[뉴스·촉매 활용]
+- [오늘의 촉매 뉴스]의 **제목+요약**은 근거로 사용 가능 (제목만 있을 때 추측 금지)
+- 촉매를 ###1 흐름 섹션 **첫 문단**에 반드시 연결: 무슨 뉴스/정책 → 어떤 자산·섹터·종목 → 지수
+- 특징주 급등락은 [특징주] 목록 + 가능하면 연결 촉매 뉴스로 설명
+- 뉴스 인용: "📰 [제목] → [연결 지표/종목]" 별도 줄
+- 제공 뉴스·특징주와 무관한 종목·이슈 창작 금지
 """
 
 BRIEF_STYLE_RULE = """
-[시황 작성 스타일 원칙]
-1. 서술(짧게) → 수치는 아래 항목으로 분리. 숫자는 "종가 / 등락률 / 거래량" 형식
-2. [뉴스] 태그를 서술 문장 중간에 삽입 금지 → 별도 줄: "📰 [제목] → [연결 지표]"
-3. "다음 거래일 (MM/DD 요일)" 긴 표현은 처음 1회만, 이후 "다음 거래일"/요일로 축약.
-   달력상 내일이 거래일이 아니면 "내일" 금지
-4. 강세/약세 조건은 각 2개 이내, 지표명+임계치 필수
-5. 전체 분석이 완결되어야 함 — 중간에 끊기지 말 것
+[시황 작성 스타일]
+1. ###1 흐름(4~7문장) → ###2 수치 스냅샷 → ###3 특징주·섹터 → 심리표 → 전망 → 한줄요약
+2. 흐름 섹션: 시간·인과 순. "A 때문에 B, 그래서 C" 구조. 숫자는 흐름 안에 자연스럽게
+3. 스냅샷 섹션: 종가/등락률/거래량 구조화 (흐름에서 이미 쓴 숫자는 생략 가능)
+4. 특징주: [특징주] 목록에서 급등·급락 상위만, 각 1줄 (종목 +% + 가능한 촉매)
+5. 전망: 앞 흐름·촉매가 **이어지는지/되돌림인지** 명시 + 검증 가능한 수치 조건
+6. 전체 완결 — 중간 끊김 금지
 """
 
 ENGINE_STRUCTURE_RULE = """
-[시황 엔진 공통 구조 — 장전/마감·한/미 모두 동일]
+[시황 공통 구조]
 0. 직전 전망 검증
-1. 핵심 시장 스냅샷 — 무엇이 움직였는가 (짧은 한줄 + 구조화 수치)
-2. 업종·특징주 — 왜/의미 (앞 섹션 등락률·종가 재나열 금지)
-3. 시장 심리 한 눈에 — 지표명 명확히 (VIX, DXY, USD/KRW, 2Y, 10Y, 금리차)
-4. 전망 — 데이터→분석→결론 + 검증 가능한 수치 조건
-5. 한 줄 요약 — 짧게 (불필요하게 늘리지 말 것)
+1. 📖 오늘 장의 흐름 — 촉매·연쇄·시사점 (필수, 4~7문장)
+2. 핵심 수치 스냅샷 — 지수·섹터·시장폭
+3. 특징주 & 섹터 — 급등락 종목 + 의미 (재나열 금지)
+4. 📊 시장 심리 한 눈에
+5. 🔮 전망 + 대응 (강세/약세 조건, 신뢰도, 핵심 체크)
+6. 💡 한 줄 요약 — 오늘 장 핵심 + 내일/다음 세션 주목 포인트
 
-[가독성]
-- 30초~1분 스캔용. 긴 줄글 단락 금지. 항목·표·짧은 문장
-- 제공된 심리지표만 표에 넣고, 없는 행은 생략
-- "달러"/"금리"처럼 모호한 표기 금지
+[가독성] 장을 못 본 사람이 스캔해도 흐름이 읽혀야 함. 표·불릿 활용, 긴 줄글 단락 지양
 """
 
 BREADTH_RULE = """
@@ -462,13 +489,16 @@ def _psych_block(*, impact_header: str) -> str:
 
 def _outlook_block(*, title: str, condition_examples: str) -> str:
     return f"""### 🔮 {title}
-서술 2~3문장: 앞 데이터 → 분석 → 결론이 한 줄기로 연결되게.
+서술 2~3문장: 앞 흐름·촉매가 **이어지는지 / 되돌림인지** 연결.
 
-**결론: 강세 우위 / 약세 우위 / 중립**
+**결론: 강세 우위 / 약세 우위 / 중립 (조건부 XX 우위)**
 - 강세 조건: 검증 가능한 수치 조건
 - 약세 조건: 검증 가능한 수치 조건
 {condition_examples}
 ※ 모호한 조건 금지 — 지표명 + 임계치 필수
+
+**대응**: 장을 못 본 독자가 내일/다음 세션에 취할 수 있는 관점 1~2문장
+(예: 반도체 급등 후 SMH 확인, 금리 하락 수혜 섹터 vs 되돌림 경계 등 — 제공 데이터 범위)
 
 신뢰도: 상/중/하
 핵심 체크: 이번에 볼 것 1개
@@ -570,8 +600,10 @@ def _get_tomorrow_events(now) -> str:
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     lines = [f"[내일({tomorrow}) 주요 일정]"]
 
-    watch_tickers = ["ORCL", "CHWY", "AVGO", "ADBE", "FDX",
-                     "COST", "WMT", "TGT", "HD", "LOW"]
+    watch_tickers = [
+        "ORCL", "CHWY", "AVGO", "ADBE", "FDX", "COST", "WMT", "TGT", "HD", "LOW",
+        "BABA", "DE", "ROST", "AMAT", "MSFT", "NVDA", "CRM", "PANW",
+    ]
     earnings_tomorrow = []
     for t in watch_tickers:
         try:
@@ -866,9 +898,36 @@ def build_featured_context(
     *,
     brief_type: str,
     fear_greed: dict | None = None,
+    movers: dict | None = None,
 ) -> str:
-    """섹터·국장 대형주·F&G를 프롬프트용 텍스트로 정리."""
-    lines = ["[업종·특징주·심리 — 아래 수치만 인용, 없는 종목 창작 금지]"]
+    """섹터·특징주·크립토·F&G를 프롬프트용 텍스트로 정리."""
+    lines = ["[섹터·특징주·크립토 — 아래 목록만 인용, 없는 종목 창작 금지]"]
+
+    movers = movers or {}
+    us_g = movers.get("us_gainers") or []
+    us_l = movers.get("us_losers") or []
+    kr_g = movers.get("kr_gainers") or []
+    kr_l = movers.get("kr_losers") or []
+
+    if us_g or us_l:
+        lines.append("\n[미국 특징주 — 당일 등락 상위]")
+        for t, d in us_g:
+            lines.append(f"  · 급등 {_format_quote_line(t, d)}")
+        for t, d in us_l:
+            lines.append(f"  · 급락 {_format_quote_line(t, d)}")
+    if kr_g or kr_l:
+        lines.append("\n[한국 특징주 — 당일 등락 상위]")
+        for t, d in kr_g:
+            lines.append(f"  · 급등 {_format_quote_line(t, d)}")
+        for t, d in kr_l:
+            lines.append(f"  · 급락 {_format_quote_line(t, d)}")
+
+    crypto = market_data.get("크립토") or {}
+    if crypto:
+        lines.append("\n[크립토·관련]")
+        for t, d in crypto.items():
+            if d and _is_finite(d.get("change_pct")):
+                lines.append(f"  · {_format_quote_line(t, d)}")
 
     sectors = market_data.get("섹터") or {}
     ranked = []
@@ -923,11 +982,86 @@ def build_featured_context(
             lines.append("Fear & Greed: 데이터 없음 (언급 금지)")
 
     lines.append(
-        "작성 규칙: 위 항목으로 '업종·특징주' 섹션을 3~5줄로만 작성. "
-        "앞에서 쓴 등락률 재나열 금지 — 의미·함의 중심. "
-        "제공되지 않은 개별 특징주 이름을 만들지 말 것."
+        "작성 규칙: ###1 흐름·###3 특징주에 위 목록을 반드시 활용. "
+        "급등·급락 종목은 촉매 뉴스와 연결해 1줄씩 설명. "
+        "제공되지 않은 개별주 이름 창작 금지."
     )
     return "\n".join(lines)
+
+
+async def fetch_movers_async(
+    candidates: dict[str, str],
+    now_ex,
+    *,
+    top: int = 5,
+    bottom: int = 5,
+) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]]:
+    """유니버스 스캔 → 당일 급등·급락 상위."""
+    tasks = [
+        asyncio.to_thread(_fetch_ticker, sym, candidates[sym], now_ex=now_ex)
+        for sym in candidates
+    ]
+    fetched = await asyncio.gather(*tasks, return_exceptions=True)
+    rows: list[tuple[str, dict]] = []
+    for sym, d in zip(candidates, fetched):
+        if isinstance(d, Exception) or not d:
+            continue
+        if d.get("stale") or not _is_finite(d.get("change_pct")):
+            continue
+        rows.append((sym, d))
+    rows.sort(key=lambda x: x[1]["change_pct"], reverse=True)
+    gainers = [(t, d) for t, d in rows if d["change_pct"] > 0][:top]
+    losers = sorted(
+        [(t, d) for t, d in rows if d["change_pct"] < 0],
+        key=lambda x: x[1]["change_pct"],
+    )[:bottom]
+    print(
+        f"[market_brief] 특징주 스캔 {len(candidates)}종 → "
+        f"급등 {len(gainers)} / 급락 {len(losers)}"
+    )
+    return gainers, losers
+
+
+async def collect_movers(now_et, now_kst) -> dict:
+    """미국·한국 특징주 병렬 수집."""
+    us_g, us_l = await fetch_movers_async(US_MOVER_CANDIDATES, now_et)
+    kr_g, kr_l = await fetch_movers_async(KR_MOVER_CANDIDATES, now_kst)
+    return {
+        "us_gainers": us_g,
+        "us_losers": us_l,
+        "kr_gainers": kr_g,
+        "kr_losers": kr_l,
+    }
+
+
+def _flow_section_hint(brief_type: str) -> str:
+    """brief_type별 ###1 흐름 섹션 가이드."""
+    hints = {
+        "us_close": (
+            "### 1. 📖 오늘 미국장의 흐름 (필수 4~7문장)\n"
+            "장을 못 본 독자용: **오늘 무슨 촉매 → 금리/달러/섹터/특징주 → 지수** 순서.\n"
+            "국채·연준·실적·바이오·반도체·크립토 등 제공 촉매·특징주·뉴스 요약을 연결.\n"
+            "SPY vs RSP 갭이 있으면 '지수만 보면 X, 실제론 Y' 구분.\n"
+            "마지막 1문장: 한국(삼성·하이닉스) 투자자 관점 시사점."
+        ),
+        "us_premarket": (
+            "### 1. 📖 오늘 미국장 전망의 흐름 (필수 4~6문장)\n"
+            "어제 한국 마감 + 직전 미국 세션 + 간밤 촉매를 **한 줄기**로.\n"
+            "한국 급등락·특징주가 오늘 미국 어떤 섹터에 시사하는지 연결."
+        ),
+        "kr_close": (
+            "### 1. 📖 오늘 한국장의 흐름 (필수 4~7문장)\n"
+            "장을 못 본 독자용: **촉매(자사주·금리·뉴스 등) → 반도체/대형주 → KOSPI** 순서.\n"
+            "제공 특징주·뉴스·섹터·간밤 미국(SMH 등)과의 괴리/연동 명시.\n"
+            "마지막 1문장: 다음 세션 대응 시사점."
+        ),
+        "kr_premarket": (
+            "### 1. 📖 오늘 한국장 전망의 흐름 (필수 4~6문장)\n"
+            "간밤 미국 마감 촉매 → SMH·금리·환율 → 삼성·하이닉스·KOSPI 경로.\n"
+            "미국 특징주·크립토 움직임이 한국에 미치는 함의."
+        ),
+    }
+    return hints.get(brief_type, hints["us_close"])
 
 
 # 백필 시 각 시황 타입의 정규 생성 시각 (현지)
@@ -1047,6 +1181,56 @@ def _forecast_citation(doc: dict | None) -> str:
         body = "(상세 전망 문장 없음 — SIGNAL만 채점)"
     date = doc.get("date") or ""
     return f"[{date}] SIGNAL:{sig} — {body}"
+
+
+def _force_verify_citations(analysis: str, cites: list[str]) -> str:
+    """LLM이 ###0 '전망:'을 비우거나 날짜만 남기면 Mongo 인용으로 강제 교체.
+
+    Claude가 프롬프트의 복붙용 문구를 무시하고
+    `전망: [2026-08-20] -` 처럼 비우는 경우를 막는다.
+    """
+    cites = [c.strip() for c in (cites or []) if c and str(c).strip()]
+    if not analysis or not cites:
+        return analysis
+
+    m = re.search(
+        r"(###\s*0\.\s*직전 전망 검증)([\s\S]*?)(?=\n---\s*\n|\n###\s*[1-9]|\Z)",
+        analysis,
+    )
+    if not m:
+        return analysis
+
+    header, body = m.group(1), m.group(2)
+    idx = 0
+
+    def _repl(match: re.Match) -> str:
+        nonlocal idx
+        prefix = match.group(1)
+        after = match.group(2) or ""
+        # 같은 줄에 '실제 결과:'가 붙었으면 분리
+        glued = re.search(r"\s+[-–]?\s*(실제\s*결과\s*:.*)$", after)
+        suffix = f"\n- {glued.group(1).strip()}" if glued else ""
+        if idx >= len(cites):
+            return match.group(0)
+        cite = cites[idx]
+        idx += 1
+        return f"{prefix}{cite}{suffix}"
+
+    new_body, n = re.subn(
+        r"(^[ \t]*[-*•]?\s*전망\s*:\s*)(.*)$",
+        _repl,
+        body,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        insert = "\n".join(f"- 전망: {c}" for c in cites) + "\n"
+        new_body = insert + body
+    elif idx < len(cites):
+        # 전망 줄이 cite보다 적으면 남은 인용 추가
+        extra = "\n".join(f"- 전망: {c}" for c in cites[idx:])
+        new_body = new_body.rstrip() + "\n" + extra + "\n"
+
+    return analysis[: m.start()] + header + new_body + analysis[m.end() :]
 
 
 def _load_brief_cite(brief_type: str) -> tuple[dict | None, str]:
@@ -1183,7 +1367,6 @@ def _build_prev_context(brief_type: str) -> str:
 async def generate_market_brief(brief_type: str, as_of: str | None = None) -> dict:
     """as_of: 'YYYY-MM-DD' — 해당일 정규 시각 기준으로 백필/재생성."""
     from database import get_recent_market_briefs
-    import asyncio
 
     # 시황 타입 검증
     if brief_type not in BRIEF_TYPES:
@@ -1207,7 +1390,10 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         raise RuntimeError(f"주말({wd}요일) — 시황 생성 안 함")
 
     market_data = get_market_data(now_et=now_et, now_kst=now_kst)
-    macro_news = fetch_macro_news(max_per_source=3)
+    macro_news, movers = await asyncio.gather(
+        asyncio.to_thread(fetch_macro_news, 5),
+        collect_movers(now_et, now_kst),
+    )
     news_text = format_macro_news_for_brief(macro_news)
 
     fear_greed = None
@@ -1289,7 +1475,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
     data_text = _build_data_text(market_data)
     featured_text = build_featured_context(
-        market_data, brief_type=brief_type, fear_greed=fear_greed
+        market_data, brief_type=brief_type, fear_greed=fear_greed, movers=movers
     )
     prev_context = "\n".join(
         x for x in (
@@ -1410,9 +1596,13 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 8. status=UNKNOWN → 단정 금지. "수집 실패로 전망 불가"처럼 장황하게 쓰지 말고 전일 기준만 짧게 참고
 """
     timing_context += accuracy_context
+    flow_hint = _flow_section_hint(brief_type)
+
+    verify_cites: list[str] = []
 
     if brief_type == "us_premarket":
         _, us_close_cite = _load_brief_cite("us_close")
+        verify_cites = [us_close_cite]
         verify0 = _verify_block(
             bench="—",
             result_metrics=(
@@ -1439,6 +1629,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         prompt = f"""오늘 {today}({weekday_today}) 미국장 전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{AUDIENCE_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
@@ -1473,37 +1664,24 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
 ---
 
-### 1. 🇰🇷 한국 시장 마감 결과
-한 문장 핵심 (최대 2문장). 숫자는 아래에.
-
-**주요 지수** (종가 / 등락률 / 거래량)
-- KOSPI …
-- KOSDAQ …
-- 삼성전자 / SK하이닉스 (제공 시)
-
-(데이터 없으면 "한국 시장 데이터 없음 — 전일 참고"만)
+{flow_hint}
 
 ---
 
-### 2. 🇺🇸 미국 장전·직전세션 스냅샷
-한 문장 핵심. 숫자는 아래에.
+### 2. 핵심 수치 스냅샷
+**🇰🇷 한국 마감** (종가 / 등락률 / 거래량)
+- KOSPI … / KOSDAQ … / 삼성·하이닉스(제공 시)
 
-**주요 지수** (종가 / 등락률 / 거래량)
-- S&P500 (SPY) …
-- S&P 동일가중 (RSP) …
-- NASDAQ (QQQ) …
-- DOW (DIA) …
-- 러셀2000 (IWM) …
-
-**시장 폭**: SPY vs RSP 갭 — 한 줄
-**강세/약세 섹터** (각 1~2개, 종가/등락률/거래량)
-**시장 심리**: VIX · Fear & Greed(제공 시)
-📰 관련 뉴스: (데이터 방향과 일치할 때만) [제목] → [연결 지표]
+**🇺🇸 미국 직전세션** (종가 / 등락률 / 거래량)
+- SPY … / RSP … / QQQ … / IWM …
+- **시장 폭**: SPY vs RSP 갭 — 한 줄
+- **섹터**: 강세·약세 각 1~2개
 
 ---
 
-### 3. 업종·특징주
-3~5줄. 수치 재나열 금지. 왜/의미·오늘 미국장 함의. 없는 종목 창작 금지.
+### 3. 특징주 & 섹터
+[특징주] 목록에서 급등·급락 상위만 — 종목명 +% + 촉매 뉴스 연결 (각 1줄).
+크립토 움직임이 있으면 리스크온/오프 함의 1문장.
 
 ---
 
@@ -1523,6 +1701,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     elif brief_type == "kr_close":
         _, kr_pm_cite = _load_brief_cite("kr_premarket")
         _, us_close_cite = _load_brief_cite("us_close")
+        verify_cites = [c for c in (kr_pm_cite, us_close_cite) if c]
         secondary = []
         if us_close_cite:
             secondary.append(("간밤 미국→한국 전망 (us_close)", us_close_cite))
@@ -1548,6 +1727,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today}({weekday_today}) 한국 장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{AUDIENCE_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
@@ -1577,22 +1757,19 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 ---
 
-### 1. 🇰🇷 한국 시장 마감 결과
-한 문장 핵심 (최대 2문장). 숫자는 아래에.
-
-**주요 지수** (종가 / 등락률 / 거래량)
-- KOSPI …
-- KOSDAQ …
-- 삼성전자 …
-- SK하이닉스 …
-
-**강세/약세 포인트** (제공 섹터·대형주만, 각 1~2개)
-📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
+{flow_hint}
 
 ---
 
-### 2. 업종·특징주
-3~5줄. 수치 재나열 금지. 왜/의미·수급 함의. 없는 종목 창작 금지.
+### 2. 🇰🇷 핵심 수치 스냅샷
+- KOSPI … / KOSDAQ … / 삼성전자 … / SK하이닉스 …
+- **섹터·시장폭**: 제공 섹터 ETF + 강세/약세 포인트 각 1~2개
+
+---
+
+### 3. 특징주 & 섹터
+[특징주]·[크립토]·촉매 뉴스를 연결 — 급등·급락 종목 각 1줄 (재나열 금지).
+간밤 미국(SMH 등)과의 괴리/연동이 있으면 명시.
 
 ---
 
@@ -1610,11 +1787,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "us_close":
+        us_pm_cite = _load_brief_cite("us_premarket")[1]
+        verify_cites = [us_pm_cite]
         verify0 = _verify_block(
             bench="SPY",
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
             mode="score",
-            cite=_load_brief_cite("us_premarket")[1],
+            cite=us_pm_cite,
             extra="검증 대상은 오늘 us_premarket의 '오늘 미국장' 전망이다.",
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 한국 영향")
@@ -1628,6 +1807,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today}({weekday_today}) 미국장 마감 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{AUDIENCE_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
@@ -1656,26 +1836,21 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 ---
 
-### 1. 🇺🇸 미국 시장 마감 결과
-한 문장 핵심 (최대 2문장). 숫자는 아래에.
-
-**주요 지수** (종가 / 등락률 / 거래량)
-- S&P500 (SPY) …
-- S&P 동일가중 (RSP) …
-- NASDAQ (QQQ) …
-- DOW (DIA) …
-- 러셀2000 (IWM) …
-
-**시장 폭**: SPY vs RSP 갭 X.XXp — 한 줄
-**강세 섹터** (1~2개, 종가/등락률/거래량)
-**약세 섹터** (1~2개, 종가/등락률/거래량)
-**시장 심리**: VIX · Fear & Greed(제공 시)
-📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
+{flow_hint}
 
 ---
 
-### 2. 업종·특징주
-3~5줄. 수치 재나열 금지. 왜/의미·한국(삼성·하이닉스·반도체) 함의. 없는 종목 창작 금지.
+### 2. 🇺🇸 핵심 수치 스냅샷
+- SPY … / RSP … / QQQ … / DIA … / IWM …
+- **시장 폭**: SPY vs RSP 갭 X.XXp
+- **섹터**: 강세·약세 각 1~2개 / VIX · Fear&Greed(제공 시)
+- **크립토**(제공 시): BTC·ETH·IBIT 등락 한 줄
+
+---
+
+### 3. 특징주 & 섹터
+[특징주] 급등·급락 상위 — 종목 +% + 촉매(뉴스 요약) 연결.
+한국(삼성·하이닉스) 투자자 관점 함의 1~2문장.
 
 ---
 
@@ -1693,11 +1868,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # kr_premarket
+        us_close_cite = _load_brief_cite("us_close")[1]
+        verify_cites = [us_close_cite]
         verify0 = _verify_block(
             bench="—",
             result_metrics="해당 없음 (직전 us_close 전망 대상=다음/오늘 한국장, 아직 장전)",
             mode="defer",
-            cite=_load_brief_cite("us_close")[1],
+            cite=us_close_cite,
             extra=(
                 "직전 미국 마감의 한국장 전망을 인용만 하고 판정은 보류. "
                 "실제 채점은 오늘 kr_close에서 KOSPI로 한다. "
@@ -1715,6 +1892,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         prompt = f"""오늘 {today}({weekday_today}) 한국장 전 시황을 아래 데이터만 사용해서 작성해줘.
 
 {STRICT_RULE}
+{AUDIENCE_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
@@ -1745,25 +1923,19 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 ---
 
-### 1. 🌙 간밤 미국 시장 결과
-한 문장 핵심 (최대 2문장). 숫자는 아래에.
-
-**주요 지수** (종가 / 등락률 / 거래량)
-- S&P500 (SPY) …
-- S&P 동일가중 (RSP) …
-- NASDAQ (QQQ) …
-- DOW (DIA) …
-- 러셀2000 (IWM) …
-- 반도체 (SMH) …
-
-**시장 폭**: SPY vs RSP — 한 줄
-**강세/약세 섹터** (각 1~2개)
-📰 관련 뉴스: (일치할 때만) [제목] → [연결 지표]
+{flow_hint}
 
 ---
 
-### 2. 업종·특징주
-3~5줄. 수치 재나열 금지. 왜/의미·오늘 한국(삼성·하이닉스) 함의. 없는 종목 창작 금지.
+### 2. 🌙 간밤 미국·크립토 스냅샷
+- SPY … / RSP … / QQQ … / SMH …
+- **시장 폭** · **섹터** 각 1~2개
+- **크립토**(제공 시): BTC·ETH·IBIT
+
+---
+
+### 3. 특징주 & 한국 연결
+미국 [특징주] 급등락 + 촉매 → 삼성·하이닉스·KOSPI 함의 (재나열 금지).
 
 ---
 
@@ -1784,7 +1956,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     client = anthropic.Anthropic()
     message = client.messages.create(
         model="claude-sonnet-4-5-20250929",
-        max_tokens=3000,
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
     analysis = message.content[0].text
@@ -1803,6 +1975,9 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
+
+    # ###0 전망 인용 강제 주입 (LLM이 비우거나 날짜만 남기는 경우 보정)
+    analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
 
     # created_at은 실제 생성 시각(재생성 시 최신으로 올라오게)
     created = datetime.now(pytz.timezone("Europe/London")).isoformat()
