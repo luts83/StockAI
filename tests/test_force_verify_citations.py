@@ -61,8 +61,48 @@ def test_forecast_citation_format():
     assert "반도체" in cite
 
 
+def test_forecast_citation_ignores_section0_recursion():
+    """###0 검증 섹션이 '전망' 글자 때문에 재귀 오염되면 안 됨."""
+    analysis = """### 0. 직전 전망 검증
+- 전망: [2026-08-20] SIGNAL:BEAR — 0. 직전 전망 검증- 전망: [2026-08-19] SIGNAL:BEAR — 오염된 인용
+- 판정: 검증 보류
+
+### 🔮 내일 한국 시장 전망
+**결론: 약세 우위**
+- 강세 조건: SMH ▲1%+
+
+### 💡 한 줄 요약
+오늘 미국 RSP ▲1.04% vs SPY ▲0.21% 격차 + VIX ▼6.0% 때문에 내일 한국장은 반도체 외 업종 방어 vs 삼성·하이닉스 반등력 주목.
+"""
+    cite = _forecast_citation({
+        "date": "2026-08-19",
+        "signal": "BEAR",
+        "analysis": analysis,
+    })
+    assert cite.startswith("[2026-08-19] SIGNAL:BEAR — ")
+    assert "직전 전망 검증" not in cite
+    assert "0. 직전" not in cite
+    assert "RSP" in cite or "VIX" in cite or "반도체" in cite
+    assert cite.count("SIGNAL:") == 1
+
+
+def test_sanitize_nested_cite_body():
+    from market_brief import _sanitize_cite_body, _sanitize_full_cite
+    nested = (
+        "[2026-08-20] SIGNAL:BEAR — 0. 직전 전망 검증- 전망: [2026-08-20] "
+        "SIGNAL:BEAR — 0. 직전 전망 검증- 전망: [2026-08-19] SIGNAL:BEAR — "
+        "오늘 미국 RSP ▲1.04% vs SPY ▲0.21% 격차 + VIX ▼6.0% 때문에 내일 한국장은 주목."
+    )
+    cleaned = _sanitize_full_cite(nested)
+    assert cleaned.count("SIGNAL:") == 1
+    assert "직전 전망 검증" not in cleaned
+    assert "RSP" in cleaned
+
+
 if __name__ == "__main__":
     test_force_replaces_empty_date_only_cite()
     test_force_splits_glued_actual_result()
     test_forecast_citation_format()
+    test_forecast_citation_ignores_section0_recursion()
+    test_sanitize_nested_cite_body()
     print("all ok")

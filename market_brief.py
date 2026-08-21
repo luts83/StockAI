@@ -407,6 +407,55 @@ BREADTH_RULE = """
 4. 섹터 데이터가 없으면 언급하지 말 것 (추측 금지)
 """
 
+CROSS_MARKET_RULE = """
+[한·미 교차시장 — 양방향, 반도체 축]
+- 과거처럼 "미국→한국 일방"만 쓰지 말 것. **반도체(SMH·NVDA·삼성·SK하이닉스)는 양방향 연결 축**
+- 미국 영향력이 더 크지만, 한국 마감(삼성·하이닉스 급등락)은 **같은 날·다음 미국장 SMH/QQQ에 역으로 시사**할 수 있음
+- 괴리가 있으면 반드시 명시: "미국 SMH ▼인데 한국 반도체 ▲ → 역행, 이유는 [제공 촉매]"
+- 장전 리포트: **직전 마감 이후~개장 전** 사이 확정된 양쪽 시장·뉴스·프리마켓 신호를 종합
+- 마감 리포트: **오늘 해당 시장 세션 안에서** 무슨 일이 있었는지 확정 스냅샷 + 교차시장 함의
+"""
+
+
+def _brief_type_rule(brief_type: str) -> str:
+    """장전 vs 마감, 4종별 작성 목표."""
+    rules = {
+        "kr_premarket": """
+[이 리포트 = 🇰🇷 한국 **장전** — 마감 리포트와 목표가 다름]
+- 독자: 어제~오늘 아침까지 장을 못 본 사람 → **오늘 한국장 개장 전** 종합 브리핑
+- 시간축: **간밤 미국 마감(확정) + 프리/애프터·뉴스·크립토 + 금리/환율** → 오늘 KOSPI 전망
+- 마감 리포트(kr_close)처럼 "오늘 한국장이 어땠는지" 쓰지 말 것 — 아직 장 시작 전
+- ###1 흐름: 미국 촉매 → SMH·금리 → 삼성·하이닉스 **개장 시 주목** (미국→한국 경로 우선, 역방향 신호 있으면 병기)
+- ###0: 직전 us_close 한국장 전망은 **인용만**, 채점은 kr_close에서
+""",
+        "kr_close": """
+[이 리포트 = 🇰🇷 한국 **마감** — 장전과 목표가 다름]
+- 독자: 오늘 한국장을 못 본 사람 → **오늘 세션 확정 결과** + 다음 세션 대응
+- 시간축: **오늘 KOSPI/KOSDAQ/삼성·하이닉스 마감** + 오늘 촉매 + 간밤 미국과의 괴리/연동
+- 장전(kr_premarket) 전망을 ###0에서 채점. 장전 내용을 그대로 반복하지 말고 **오늘 실제 결과** 중심
+- ###1 흐름: 오늘 한국 **확정** 촉매 → 반도체·대형주 → 지수. 미국 SMH와 역행/동행 구분
+- 한국 반도체 급등락은 **다음 미국 SMH·NVDA** 관점 1문장 포함 (양방향)
+""",
+        "us_premarket": """
+[이 리포트 = 🇺🇸 미국 **장전** — 마감 리포트와 목표가 다름]
+- 독자: 어제~오늘 아침(ET)까지 못 본 사람 → **오늘 미국장 개장 전** 종합 브리핑
+- 시간축: **오늘 한국 마감(방금 끝남) + 직전 미국 세션 + 간밤 뉴스·금리·크립토** → 오늘 SPY 전망
+- 마감(us_close)처럼 "오늘 미국장이 어땠는지" 쓰지 말 것 — 아직 미국 장 시작 전
+- ###1 흐름: **한국 마감(삼성·하이닉스·KOSPI)을 오늘 미국장 핵심 입력**으로 — 예전 일방향보다 양방향
+- 반도체: 한국 ▲ + 미국 직전 SMH ▼ 같은 괴리면 "오늘 미국 반도체 주목"으로 연결
+- ###0: us_close 한국장 전망은 인용만 (채점은 kr_close)
+""",
+        "us_close": """
+[이 리포트 = 🇺🇸 미국 **마감** — 장전과 목표가 다름]
+- 독자: 오늘 미국장을 못 본 사람 → **오늘 US 세션 확정 결과** + 다음 한국장 함의
+- 시간축: **오늘 SPY/QQQ/SMH 마감** + 오늘 촉매·특징주 + **오늘 한국 마감과의 연결**
+- 장전(us_premarket) 전망을 ###0에서 채점. 장전 서술 반복 금지 — **오늘 미국 확정** 중심
+- ###1 흐름: 오늘 미국 촉매 → 섹터·특징주 → 지수. 마지막에 **다음 한국장(삼성·하이닉스)** 시사점
+- 한국이 먼저 움직였다면: "한국 반도체 ▲ → 오늘 미국 SMH ▲/▼" 인과 또는 괴리 명시
+""",
+    }
+    return rules.get(brief_type, "")
+
 
 def _verify_block(
     *,
@@ -1035,30 +1084,31 @@ async def collect_movers(now_et, now_kst) -> dict:
 
 
 def _flow_section_hint(brief_type: str) -> str:
-    """brief_type별 ###1 흐름 섹션 가이드."""
+    """brief_type별 ###1 흐름 섹션 가이드 (장전≠마감)."""
     hints = {
         "us_close": (
-            "### 1. 📖 오늘 미국장의 흐름 (필수 4~7문장)\n"
-            "장을 못 본 독자용: **오늘 무슨 촉매 → 금리/달러/섹터/특징주 → 지수** 순서.\n"
-            "국채·연준·실적·바이오·반도체·크립토 등 제공 촉매·특징주·뉴스 요약을 연결.\n"
-            "SPY vs RSP 갭이 있으면 '지수만 보면 X, 실제론 Y' 구분.\n"
-            "마지막 1문장: 한국(삼성·하이닉스) 투자자 관점 시사점."
+            "### 1. 📖 오늘 미국장의 흐름 (마감 리포트 — 4~7문장)\n"
+            "**오늘 US 세션 안에서** 확정된 일만: 촉매 → 금리/달러/섹터/특징주 → SPY·QQQ·SMH.\n"
+            "오늘 한국 마감(삼성·하이닉스)과 SMH가 **동행/역행**이면 반드시 구분.\n"
+            "마지막: 다음 한국장(또는 프리마켓)에서 볼 포인트 1문장."
         ),
         "us_premarket": (
-            "### 1. 📖 오늘 미국장 전망의 흐름 (필수 4~6문장)\n"
-            "어제 한국 마감 + 직전 미국 세션 + 간밤 촉매를 **한 줄기**로.\n"
-            "한국 급등락·특징주가 오늘 미국 어떤 섹터에 시사하는지 연결."
+            "### 1. 📖 개장 전 종합 흐름 (장전 리포트 — 4~6문장)\n"
+            "**마감 리포트가 아님.** 직전 미국 세션 마감 + **오늘 한국 마감(방금)** + 간밤 뉴스·금리·크립토를 한 줄기로.\n"
+            "한국 반도체 급등락 → 오늘 미국 SMH·NVDA·QQQ에 미칠 함의 (양방향, 미국 영향력 더 큼).\n"
+            "목표: '오늘 미국장 어떻게 열릴지/주목할 섹터' — 오늘 미국 마감 결과는 아직 없음."
         ),
         "kr_close": (
-            "### 1. 📖 오늘 한국장의 흐름 (필수 4~7문장)\n"
-            "장을 못 본 독자용: **촉매(자사주·금리·뉴스 등) → 반도체/대형주 → KOSPI** 순서.\n"
-            "제공 특징주·뉴스·섹터·간밤 미국(SMH 등)과의 괴리/연동 명시.\n"
-            "마지막 1문장: 다음 세션 대응 시사점."
+            "### 1. 📖 오늘 한국장의 흐름 (마감 리포트 — 4~7문장)\n"
+            "**오늘 KR 세션 안에서** 확정된 일만: 촉매 → 삼성·하이닉스·KOSPI.\n"
+            "간밤 미국(SMH·QQQ)과 **역행/동행** + 이유(자사주·금리·국내 이슈 등 제공 촉매).\n"
+            "마지막: 다음 미국/한국 세션 대응 시사점."
         ),
         "kr_premarket": (
-            "### 1. 📖 오늘 한국장 전망의 흐름 (필수 4~6문장)\n"
-            "간밤 미국 마감 촉매 → SMH·금리·환율 → 삼성·하이닉스·KOSPI 경로.\n"
-            "미국 특징주·크립토 움직임이 한국에 미치는 함의."
+            "### 1. 📖 개장 전 종합 흐름 (장전 리포트 — 4~6문장)\n"
+            "**마감 리포트가 아님.** 간밤 **미국 마감(확정)** + 금리·환율·크립토·뉴스 → 오늘 한국장 전망.\n"
+            "미국 SMH·특징주 → 삼성·하이닉스·KOSPI 개장 시나리오 (미국→한국 우선, 역신호 있으면 병기).\n"
+            "목표: '오늘 한국장 어떻게 열릴지' — 오늘 한국 마감 결과는 아직 없음."
         ),
     }
     return hints.get(brief_type, hints["us_close"])
@@ -1133,38 +1183,90 @@ def _build_data_text(market_data: dict) -> str:
 
 
 def _extract_forecast(analysis: str) -> str:
-    """직전 시황 분석에서 '전망 섹션'을 추출 — 여러 패턴 대응"""
+    """직전 시황 분석에서 '전망 섹션'을 추출 — ###0 검증 섹션 제외."""
     if not analysis:
         return ""
+    # ###0 직전 전망 검증은 '전망' 글자 때문에 오매칭 → 제거 후 탐색
+    cleaned = re.sub(
+        r"###\s*0\.\s*직전 전망 검증[\s\S]*?(?=\n###\s*[1-9]|\n---\s*\n|\Z)",
+        "",
+        analysis,
+        count=1,
+    )
     patterns = [
-        r"###\s*\d+[\.\s🔮]*[^\n]*(전망|Forecast)[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
-        r"###\s*\d+[\.\s🔮]*[^\n]*(오늘|내일|한국)[^\n]*장[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
-        r"(강세 우위|약세 우위|중립)[^\n]*\n([\s\S]{0,400}?)(?=\n###|\Z)",
+        # 🔮 전망 / ### N. … 전망 (검증·직전 제외)
+        r"###\s*[🔮\s]*[^\n]*(?<!직전 )(?<!검증 )(전망|Forecast)[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
+        r"###\s*\d+[\.\s🔮📖]*[^\n]*(오늘|내일|다음)[^\n]*(장|시장)[^\n]*\n([\s\S]*?)(?=\n###|\Z)",
+        r"\*\*결론\s*:\s*(강세|약세|중립)[^\n]*\n([\s\S]{0,500}?)(?=\n###|\Z)",
+        r"(강세 우위|약세 우위|중립\s*\(?조건부)[^\n]*\n([\s\S]{0,400}?)(?=\n###|\Z)",
     ]
     for pat in patterns:
-        m = re.search(pat, analysis, re.IGNORECASE)
-        if m:
-            return m.group(0)[:500].strip()
-    # 마지막 fallback — 뒤쪽 300자 (전망은 보통 후반부)
-    return analysis[-300:].strip()
+        m = re.search(pat, cleaned, re.IGNORECASE)
+        if not m:
+            continue
+        block = m.group(0).strip()
+        if "직전 전망 검증" in block or re.match(r"###\s*0\.", block):
+            continue
+        return block[:500]
+    # fallback — 한 줄 요약 근처 / 후반부 (검증 블록 제외본)
+    return cleaned[-300:].strip()
 
 
 def _condense_forecast_line(forecast_text: str) -> str:
     """전망 섹션에서 한 줄 근거만 뽑기."""
     if not forecast_text:
         return ""
-    keys = ("강세", "약세", "중립", "우위", "결론", "BULL", "BEAR", "NEUTRAL")
+    keys = ("강세", "약세", "중립", "우위", "결론", "BULL", "BEAR", "NEUTRAL", "때문에")
+    skip_prefix = (
+        "전망:", "실제 결과", "판정", "다음 전망", "직전 전망",
+        "###", "SIGNAL:", "검증",
+    )
     for raw in forecast_text.splitlines():
         line = raw.strip().lstrip("-*#• ").strip()
         if len(line) < 8:
+            continue
+        if any(line.startswith(p) or p in line[:20] for p in skip_prefix):
+            continue
+        if "직전 전망 검증" in line:
             continue
         if any(k in line for k in keys):
             return line[:200]
     for raw in forecast_text.splitlines():
         line = raw.strip().lstrip("-*#• ").strip()
-        if len(line) >= 20 and not line.startswith("["):
-            return line[:200]
-    return forecast_text.replace("\n", " ").strip()[:200]
+        if len(line) < 20 or line.startswith("["):
+            continue
+        if any(p in line for p in ("전망:", "직전 전망", "SIGNAL:BEAR — 0.", "SIGNAL:BULL — 0.")):
+            continue
+        return line[:200]
+    return ""
+
+
+def _sanitize_cite_body(body: str) -> str:
+    """재귀 오염된 인용 본문 정리 (검증 섹션이 전망 본문으로 들어간 경우)."""
+    if not body:
+        return ""
+    text = body.strip()
+    # 중첩된 '전망: [date] SIGNAL:XX —' 체인에서 마지막 실질 문장만 남김
+    if "직전 전망 검증" in text or text.count("SIGNAL:") > 1 or text.count("전망:") >= 1:
+        parts = re.split(r"SIGNAL:(?:BULL|BEAR|NEUTRAL)\s*[—\-–]\s*", text)
+        candidates = [p.strip() for p in parts if p and p.strip()]
+        # 날짜/검증 찌꺼기 제거
+        cleaned = []
+        for c in candidates:
+            c = re.sub(r"^\[?\d{4}-\d{2}-\d{2}\]?\s*", "", c).strip()
+            c = re.sub(r"^0\.\s*직전 전망 검증[^\n—\-–]*[—\-–]?\s*", "", c).strip()
+            c = re.sub(r"^전망\s*:\s*", "", c).strip()
+            if "직전 전망 검증" in c:
+                continue
+            if len(c) >= 12:
+                cleaned.append(c)
+        if cleaned:
+            text = cleaned[-1]
+    text = re.sub(r"\s+", " ", text).strip()
+    # 여전히 오염이면 포기
+    if "직전 전망 검증" in text or text.count("SIGNAL:") > 0:
+        return ""
+    return text[:220]
 
 
 def _forecast_citation(doc: dict | None) -> str:
@@ -1175,8 +1277,10 @@ def _forecast_citation(doc: dict | None) -> str:
     if sig not in ("BULL", "NEUTRAL", "BEAR"):
         sig = "NEUTRAL"
     analysis = doc.get("analysis") or ""
-    one = _extract_one_liner(analysis)
-    body = one or _condense_forecast_line(_extract_forecast(analysis))
+    one = _sanitize_cite_body(_extract_one_liner(analysis))
+    body = one or _sanitize_cite_body(
+        _condense_forecast_line(_extract_forecast(analysis))
+    )
     if not body:
         body = "(상세 전망 문장 없음 — SIGNAL만 채점)"
     date = doc.get("date") or ""
@@ -1189,7 +1293,8 @@ def _force_verify_citations(analysis: str, cites: list[str]) -> str:
     Claude가 프롬프트의 복붙용 문구를 무시하고
     `전망: [2026-08-20] -` 처럼 비우는 경우를 막는다.
     """
-    cites = [c.strip() for c in (cites or []) if c and str(c).strip()]
+    cites = [_sanitize_full_cite(c) for c in (cites or []) if c and str(c).strip()]
+    cites = [c for c in cites if c]
     if not analysis or not cites:
         return analysis
 
@@ -1233,6 +1338,25 @@ def _force_verify_citations(analysis: str, cites: list[str]) -> str:
     return analysis[: m.start()] + header + new_body + analysis[m.end() :]
 
 
+def _sanitize_full_cite(cite: str) -> str:
+    """완성된 '[date] SIGNAL:X — body' 인용 한 줄 정리."""
+    cite = (cite or "").strip()
+    if not cite:
+        return ""
+    m = re.match(
+        r"^(\[\d{4}-\d{2}-\d{2}\]\s*SIGNAL:(?:BULL|BEAR|NEUTRAL)\s*[—\-–]\s*)(.*)$",
+        cite,
+        re.DOTALL,
+    )
+    if m:
+        body = _sanitize_cite_body(m.group(2))
+        if not body:
+            body = "(상세 전망 문장 없음 — SIGNAL만 채점)"
+        return m.group(1) + body
+    body = _sanitize_cite_body(cite)
+    return body
+
+
 def _load_brief_cite(brief_type: str) -> tuple[dict | None, str]:
     """최근 해당 타입 시황 + 전망 인용 문구."""
     from database import get_recent_market_briefs
@@ -1251,7 +1375,10 @@ def _extract_one_liner(analysis: str) -> str:
         analysis,
     )
     if m:
-        return m.group(1).strip()[:220]
+        line = m.group(1).strip()[:220]
+        if "직전 전망 검증" in line or line.count("SIGNAL:") > 0:
+            return ""
+        return line
     return ""
 
 
@@ -1597,6 +1724,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 """
     timing_context += accuracy_context
     flow_hint = _flow_section_hint(brief_type)
+    brief_type_rule = _brief_type_rule(brief_type)
 
     verify_cites: list[str] = []
 
@@ -1630,21 +1758,14 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
 {STRICT_RULE}
 {AUDIENCE_RULE}
+{CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
 {timing_context}
 
-[이 리포트 특성 — 미국 장전]
-- 이미 끝난 한국 마감 + 직전 미국 세션을 스냅샷으로 정리한 뒤, 오늘 미국장 전망
-- 한국↔미국은 유기적 관계: 한국 마감 급락/급등·거래량·특징주는 오늘 미국장 전망의 핵심 입력
-- [교차시장 순환 주입]의 kr_close SIGNAL·핵심 수치를 오늘 미국장 전망에 반드시 연결
-- 장중 미확정 봉을 오늘 마감처럼 쓰지 말 것
-- 직전 us_close의 '다음 한국장' 전망 → ###0은 SIGNAL 채점만 검증 보류 (채점 시점은 kr_close)
-- 일부 심리지표가 stale여도, 제공된 한국·미국 지수/섹터/뉴스로 리포트 완성할 것
-- "등락률 누락/데이터 불완전 → 스냅샷 작성 불가" 금지 — 제공된 숫자는 반드시 종가/등락률/거래량으로 기재
-- PRE_OPEN은 직전 미국 세션 마감이 정상 기준이다 (없으면 없다고만 짧게)
+{brief_type_rule}
 
 [제공 데이터]
 {data_text}
@@ -1728,16 +1849,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 {STRICT_RULE}
 {AUDIENCE_RULE}
+{CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
 {timing_context}
 
-[이 리포트 특성 — 한국 마감]
-- 오늘 한국 마감 스냅샷 → 의미 → {next_trading_label} 전망
-- [교차시장 순환 주입]의 kr_premarket·us_close를 검증·맥락에 반영
-- stale 데이터는 전망에 쓰지 말고 명시
-- 비거래일을 "내일"로 쓰지 말 것
+{brief_type_rule}
 
 [제공 데이터]
 {data_text}
@@ -1808,16 +1926,14 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 {STRICT_RULE}
 {AUDIENCE_RULE}
+{CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
 {timing_context}
 
-[이 리포트 특성 — 미국 마감]
-- 오늘 미국 마감 스냅샷 → 의미 → {next_trading_label} 한국 전망
-- SPY vs RSP 시장 폭 해석 필수(갭 있을 때)
-- [교차시장 순환 주입]의 us_premarket·kr_close SIGNAL·수치를 다음 한국장 전망에 연결
+{brief_type_rule}
 
 [제공 데이터]
 {data_text}
@@ -1893,17 +2009,14 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 {STRICT_RULE}
 {AUDIENCE_RULE}
+{CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
 {timing_context}
 
-[이 리포트 특성 — 한국 장전]
-- 간밤 미국 마감이 오늘 한국장 입력 변수. 미국→한국 경로로 전망
-- [교차시장 순환 주입]의 us_close SIGNAL·핵심 수치를 오늘 한국장 전망에 반드시 연결
-- 삼성·하이닉스·SMH 연결을 우선
-- 직전 us_close의 한국장 전망은 ###0에서 검증 보류 (채점은 오늘 kr_close)
+{brief_type_rule}
 
 [제공 데이터]
 {data_text}
