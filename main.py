@@ -87,6 +87,11 @@ _STREAM_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
+# 추가질문·비교 분석 출력 한도
+CHAT_MAX_TOKENS = 4096
+COMPARE_MAX_TOKENS = 16384
+COMPARE_ANALYSIS_CHARS = 8000
+
 # ── 모델 ──────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
     ticker: str
@@ -687,7 +692,7 @@ def _build_chat_live_context(px, news_live, doc, data_date: str) -> str:
     return "\n\n".join(live_blocks)
 
 
-async def _stream_claude_text(system: str, messages: list, *, max_tokens: int = 1200):
+async def _stream_claude_text(system: str, messages: list, *, max_tokens: int = CHAT_MAX_TOKENS):
     """Claude 텍스트 스트림 + keep-alive (동기 SDK를 스레드에서 실행)."""
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
@@ -777,7 +782,7 @@ async def chat_stream(
         f"{live_context}\n"
         f"\n"
         f"[답변 규칙 — 반드시 준수]\n"
-        f"1. 길이: 기본 3~6문장. 복잡한 질문도 최대 12문장. 긴 보고서 형식 금지.\n"
+        f"1. 길이: 일반 5~10문장. 복잡한 질문·시나리오는 필요한 만큼(최대 20문장). 중간에 끊지 말 것.\n"
         f"2. 형식: ### 헤더 금지. 불릿은 최대 4개.\n"
         f"3. 서론/인사 없이 결론부터.\n"
         f"4. 숫자 인용은 꼭 필요한 1~3개만.\n"
@@ -812,7 +817,7 @@ async def chat_stream(
         # 첫 바이트를 즉시 보내 프록시·클라이언트 타임아웃 완화
         yield _STREAM_KEEPALIVE
         full_response = []
-        async for text in _stream_claude_text(system, messages):
+        async for text in _stream_claude_text(system, messages, max_tokens=CHAT_MAX_TOKENS):
             if text == _STREAM_KEEPALIVE:
                 yield text
                 continue
@@ -945,12 +950,12 @@ async def compare_analyses(
 === 분석 A ({doc_a['created_at'][:10]}) ===
 지표: RSI {doc_a['indicators'].get('rsi')}, MACD {doc_a['indicators'].get('macd')}
 시그널: {doc_a.get('signal')}
-{doc_a['analysis'][:4000]}
+{doc_a['analysis'][:COMPARE_ANALYSIS_CHARS]}
 
 === 분석 B ({doc_b['created_at'][:10]}) ===
 지표: RSI {doc_b['indicators'].get('rsi')}, MACD {doc_b['indicators'].get('macd')}
 시그널: {doc_b.get('signal')}
-{doc_b['analysis'][:4000]}
+{doc_b['analysis'][:COMPARE_ANALYSIS_CHARS]}
 
 ## 1. 주요 지표 변화
 ## 2. 추세 변화
@@ -965,7 +970,7 @@ async def compare_analyses(
     def generate():
         with claude.messages.stream(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=8000,
+            max_tokens=COMPARE_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for text in stream.text_stream:
