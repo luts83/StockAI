@@ -1,6 +1,6 @@
 """
 Instagram card generator — Playwright HTML→PNG
-한글/이모지 완전 지원, Google Fonts (Noto Sans KR + Space Grotesk)
+한글/이모지 완전 지원, Docker 내장 NanumGothic (외부 CDN 없음)
 5장 카드: 커버 / 차트 / 트렌드분석 / 시나리오 / 종합
 모든 카드 1080×1350 통일
 """
@@ -29,8 +29,9 @@ YELLOW = "#fbbf24"
 MUTED  = "#8b949e"
 WHITE  = "#e6edf3"
 
-FONTS = "@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=Space+Grotesk:wght@400;500;600;700;800&display=swap');"
-RESET = "* { margin:0; padding:0; box-sizing:border-box; } body { font-family:'Noto Sans KR','Space Grotesk',-apple-system,sans-serif; -webkit-font-smoothing:antialiased; overflow:hidden; }"
+FONT_STACK = "'NanumGothic','NanumBarunGothic','Noto Sans KR',sans-serif"
+FONTS = ""
+RESET = f"* {{ margin:0; padding:0; box-sizing:border-box; }} body {{ font-family:{FONT_STACK}; -webkit-font-smoothing:antialiased; overflow:hidden; }}"
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────
@@ -98,11 +99,11 @@ def _header(ticker: str, date_str: str, subtitle: str = "") -> str:
                 background:{CARD}">
       <div style="display:flex;align-items:center;gap:14px">
         <span style="font-size:26px">📈</span>
-        <span style="font-family:'Space Grotesk',sans-serif;font-size:30px;
+        <span style="font-family:'NanumGothic',sans-serif;font-size:30px;
                      font-weight:800;color:{ACCENT}">{ticker}</span>
         {f'<span style="font-size:22px;color:{MUTED};margin-left:6px">{subtitle}</span>' if subtitle else ''}
       </div>
-      <span style="font-family:'Space Grotesk',sans-serif;font-size:22px;color:{MUTED}">{date_str}</span>
+      <span style="font-family:'NanumGothic',sans-serif;font-size:22px;color:{MUTED}">{date_str}</span>
     </div>
     <div style="height:2px;background:linear-gradient(90deg,transparent,{ACCENT}55,transparent)"></div>"""
 
@@ -113,7 +114,7 @@ def _footer(small_text: str = "") -> str:
                 display:flex;justify-content:space-between;align-items:center;
                 background:{CARD}">
       <span style="font-size:18px;color:{MUTED}">{small_text}</span>
-      <span style="font-family:'Space Grotesk',sans-serif;font-size:20px;color:{MUTED}">{WATERMARK}</span>
+      <span style="font-family:'NanumGothic',sans-serif;font-size:20px;color:{MUTED}">{WATERMARK}</span>
     </div>"""
 
 
@@ -125,7 +126,7 @@ def _flex_section(icon: str, title: str, body_html: str, color: str = ACCENT) ->
                 padding:28px 36px;display:flex;flex-direction:column">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
         <span style="font-size:26px">{icon}</span>
-        <span style="font-family:'Space Grotesk',sans-serif;font-size:28px;
+        <span style="font-family:'NanumGothic',sans-serif;font-size:28px;
                      font-weight:700;color:{color}">{title}</span>
       </div>
       <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
@@ -178,9 +179,9 @@ _CHROMIUM_PATHS = [
 _LAUNCH_ARGS = [
     "--no-sandbox", "--disable-setuid-sandbox",
     "--disable-dev-shm-usage", "--disable-gpu",
-    "--disable-software-rasterizer",
-    "--single-process",  # Railway 등 소메모리 컨테이너 안정화
 ]
+
+_PAGE_TIMEOUT_MS = 25_000
 
 
 def _launch_browser_sync(p):
@@ -203,6 +204,33 @@ def _launch_browser_sync(p):
     )
 
 
+def _wait_fonts(page, ms: int = 1500):
+    """로컬 폰트 대기 — 실패·타임아웃 시 무시."""
+    try:
+        page.evaluate(
+            f"() => Promise.race([document.fonts.ready, "
+            f"new Promise(r => setTimeout(r, {ms}))])"
+        )
+    except Exception:
+        pass
+
+
+def _screenshot_html(browser, html: str, dynamic: bool) -> bytes:
+    page = browser.new_page(viewport={"width": W, "height": 1920 if dynamic else H})
+    page.set_default_timeout(_PAGE_TIMEOUT_MS)
+    try:
+        page.set_content(html, wait_until="load", timeout=_PAGE_TIMEOUT_MS)
+        _wait_fonts(page)
+        height = H
+        if dynamic:
+            content_height = page.evaluate("document.body.scrollHeight")
+            height = max(H, int(content_height) + 60)
+            page.set_viewport_size({"width": W, "height": height})
+        return page.screenshot(clip={"x": 0, "y": 0, "width": W, "height": height})
+    finally:
+        page.close()
+
+
 def _render_card_pngs_sync(cards_html: list) -> list:
     """HTML → PNG (sync). uvicorn 이벤트 루프 밖에서 Playwright 실행."""
     from playwright.sync_api import sync_playwright
@@ -215,25 +243,13 @@ def _render_card_pngs_sync(cards_html: list) -> list:
                 results = []
                 try:
                     for filename, html, dynamic in cards_html:
-                        if dynamic:
-                            page = browser.new_page(viewport={"width": W, "height": 1920})
-                            page.set_content(html, wait_until="networkidle")
-                            page.evaluate("document.fonts.ready")
-                            content_height = page.evaluate("document.body.scrollHeight")
-                            actual_height = max(H, content_height + 60)
-                            page.set_viewport_size({"width": W, "height": actual_height})
-                            screenshot = page.screenshot(
-                                clip={"x": 0, "y": 0, "width": W, "height": actual_height}
-                            )
-                        else:
-                            page = browser.new_page(viewport={"width": W, "height": H})
-                            page.set_content(html, wait_until="networkidle")
-                            page.evaluate("document.fonts.ready")
-                            screenshot = page.screenshot(
-                                clip={"x": 0, "y": 0, "width": W, "height": H}
-                            )
-                        page.close()
-                        results.append((filename, screenshot))
+                        print(f"[Playwright] 렌더링 {filename}...", flush=True)
+                        shot = _screenshot_html(browser, html, dynamic)
+                        results.append((filename, shot))
+                        print(
+                            f"[Playwright] 완료 {filename} ({len(shot)} bytes)",
+                            flush=True,
+                        )
                 finally:
                     browser.close()
                 return results
@@ -301,10 +317,10 @@ def _html_cover(ticker: str, signal: str, indicators: dict, created_at: str,
                 padding:40px 64px;background:{CARD};border-bottom:1px solid {BORDER}">
       <div style="display:flex;align-items:center;gap:14px">
         <span style="font-size:30px">📈</span>
-        <span style="font-family:'Space Grotesk',sans-serif;font-size:32px;
+        <span style="font-family:'NanumGothic',sans-serif;font-size:32px;
                      font-weight:800;color:{ACCENT}">StockAI</span>
       </div>
-      <span style="font-family:'Space Grotesk',sans-serif;font-size:24px;color:{MUTED}">{date_str}</span>
+      <span style="font-family:'NanumGothic',sans-serif;font-size:24px;color:{MUTED}">{date_str}</span>
     </div>
     <div style="height:2px;background:linear-gradient(90deg,transparent,{ACCENT}88,transparent)"></div>
 
@@ -314,14 +330,14 @@ def _html_cover(ticker: str, signal: str, indicators: dict, created_at: str,
                 background:linear-gradient(160deg,{BG} 0%,#1a2030 100%)">
 
       <!-- 티커 -->
-      <div style="font-family:'Space Grotesk',sans-serif;font-size:160px;font-weight:800;
+      <div style="font-family:'NanumGothic',sans-serif;font-size:160px;font-weight:800;
                   color:{WHITE};letter-spacing:-6px;line-height:1">{ticker}</div>
 
       <!-- 현재가 + 등락률 -->
       <div style="text-align:center">
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:72px;font-weight:700;
+        <div style="font-family:'NanumGothic',sans-serif;font-size:72px;font-weight:700;
                     color:{ACCENT};letter-spacing:-2px">{price_str}</div>
-        {f'<div style="font-family:\'Space Grotesk\',sans-serif;font-size:40px;font-weight:700;color:{chg_col};margin-top:10px">{chg_str}</div>' if chg_str else ""}
+        {f'<div style="font-family:\'NanumGothic\',sans-serif;font-size:40px;font-weight:700;color:{chg_col};margin-top:10px">{chg_str}</div>' if chg_str else ""}
       </div>
 
       <!-- 구분선 -->
@@ -330,13 +346,13 @@ def _html_cover(ticker: str, signal: str, indicators: dict, created_at: str,
       <!-- RSI / MACD -->
       <div style="display:flex;gap:72px;align-items:center">
         <div style="text-align:center">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:34px;
+          <div style="font-family:'NanumGothic',sans-serif;font-size:34px;
                        font-weight:700;color:{rsi_col}">RSI {f"{rsi:.1f}" if rsi else "—"}</div>
           <div style="font-size:20px;color:{MUTED};margin-top:6px">{rsi_lbl}</div>
         </div>
         <span style="width:1px;height:50px;background:{BORDER}"></span>
         <div style="text-align:center">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:34px;
+          <div style="font-family:'NanumGothic',sans-serif;font-size:34px;
                        font-weight:700;color:{GREEN if macd_bull else RED}">
             MACD {"▲" if macd_bull else "▼"}
           </div>
@@ -368,7 +384,7 @@ def _html_cover(ticker: str, signal: str, indicators: dict, created_at: str,
     <div style="display:flex;justify-content:space-between;align-items:center;
                 padding:28px 64px;background:{CARD};border-top:1px solid {BORDER}">
       <span style="font-size:20px;color:{MUTED}">캔들스틱 · RSI · MACD · 볼린저밴드</span>
-      <span style="font-family:'Space Grotesk',sans-serif;font-size:22px;color:{MUTED}">{WATERMARK}</span>
+      <span style="font-family:'NanumGothic',sans-serif;font-size:22px;color:{MUTED}">{WATERMARK}</span>
     </div>"""
 
     return _wrap_html(content)
@@ -405,7 +421,7 @@ def _html_chart(ticker: str, chart_b64: str, indicators: dict, created_at: str,
     grid_html = "".join(f"""
       <div style="background:{BG};border-radius:10px;padding:20px 14px;text-align:center">
         <div style="font-size:16px;color:{MUTED};margin-bottom:8px">{lbl}</div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;
+        <div style="font-family:'NanumGothic',sans-serif;font-size:28px;
                     font-weight:700;color:{col}">{val}</div>
         <div style="font-size:14px;color:{MUTED};margin-top:6px">{sub}</div>
       </div>""" for lbl, val, sub, col in cells)
@@ -495,11 +511,11 @@ def _html_analysis(ticker: str, analysis: str, signal: str,
         sr_html = '<div style="display:flex;gap:24px">'
         if resistance:
             sr_html += f'<div style="flex:1"><div style="color:{RED};font-size:22px;font-weight:700;margin-bottom:10px">▲ 저항선</div>'
-            sr_html += "".join(f'<div style="color:{WHITE};font-size:22px;margin-bottom:8px;font-family:\'Space Grotesk\',sans-serif;line-height:1.8">{_clean(r)}</div>' for r in resistance[:3])
+            sr_html += "".join(f'<div style="color:{WHITE};font-size:22px;margin-bottom:8px;font-family:\'NanumGothic\',sans-serif;line-height:1.8">{_clean(r)}</div>' for r in resistance[:3])
             sr_html += "</div>"
         if support:
             sr_html += f'<div style="flex:1"><div style="color:{GREEN};font-size:22px;font-weight:700;margin-bottom:10px">▼ 지지선</div>'
-            sr_html += "".join(f'<div style="color:{WHITE};font-size:22px;margin-bottom:8px;font-family:\'Space Grotesk\',sans-serif;line-height:1.8">{_clean(s)}</div>' for s in support[:3])
+            sr_html += "".join(f'<div style="color:{WHITE};font-size:22px;margin-bottom:8px;font-family:\'NanumGothic\',sans-serif;line-height:1.8">{_clean(s)}</div>' for s in support[:3])
             sr_html += "</div>"
         sr_html += "</div>"
     else:
@@ -513,7 +529,7 @@ def _html_analysis(ticker: str, analysis: str, signal: str,
 
     ma_badges = "".join(
         f'<span style="background:{BG};border-radius:8px;padding:6px 14px;font-size:19px;color:{MUTED}">'
-        f'<span style="color:{WHITE};font-family:\'Space Grotesk\',sans-serif">{"MA20" if k=="ma20" else "MA60" if k=="ma60" else "MA200"}</span>'
+        f'<span style="color:{WHITE};font-family:\'NanumGothic\',sans-serif">{"MA20" if k=="ma20" else "MA60" if k=="ma60" else "MA200"}</span>'
         f' ${v:,.0f}</span>'
         for k, v in [("ma20", ma20), ("ma60", ma60), ("ma200", ma200)] if v
     )
@@ -595,7 +611,7 @@ def _html_scenarios(ticker: str, analysis: str, signal: str,
                     margin-bottom:10px;overflow:hidden">
           <div style="width:{pct}%;height:100%;background:{color};border-radius:6px"></div>
         </div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:36px;
+        <div style="font-family:'NanumGothic',sans-serif;font-size:36px;
                     font-weight:800;color:{color};margin-bottom:16px">{pct}%</div>"""
 
     def targets_html(items: list, color: str) -> str:

@@ -1113,7 +1113,17 @@ async def create_card(
 
     from card import generate_cards
     try:
-        cards = await generate_cards(doc, card_data, card_chart_b64=card_chart_b64)
+        cards = await asyncio.wait_for(
+            generate_cards(doc, card_data, card_chart_b64=card_chart_b64),
+            timeout=120.0,
+        )
+        print(f"[card] PNG {len(cards)}장 생성 완료: {doc.get('ticker')}", flush=True)
+    except asyncio.TimeoutError:
+        print(f"[card] PNG 생성 타임아웃: {doc_id}", flush=True)
+        raise HTTPException(
+            status_code=503,
+            detail="카드 생성 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+        )
     except RuntimeError as e:
         print(f"[card] PNG 생성 실패: {e}")
         raise HTTPException(
