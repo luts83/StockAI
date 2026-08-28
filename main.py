@@ -1079,7 +1079,20 @@ async def create_card(
         print(f"[card] 가로형 차트 생성 실패 — 기존 차트 사용: {_e}")
 
     from card import generate_cards
-    cards = await generate_cards(doc, card_data, card_chart_b64=card_chart_b64)
+    try:
+        cards = await generate_cards(doc, card_data, card_chart_b64=card_chart_b64)
+    except RuntimeError as e:
+        print(f"[card] PNG 생성 실패: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="카드 이미지 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from e
+    except Exception as e:
+        print(f"[card] 예상치 못한 오류: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="카드 생성 중 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from e
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:

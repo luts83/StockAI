@@ -164,6 +164,10 @@ body {{ width:{W}px; min-height:{H}px; background:{BG};
 
 # ── Playwright 스크린샷 ───────────────────────────────────
 
+import time
+
+_CARD_GEN_LOCK = asyncio.Lock()
+
 _CHROMIUM_PATHS = [
     None,                          # Playwright 기본 캐시 경로
     "/usr/bin/chromium",           # apt/nixpkgs 설치 경로
@@ -175,35 +179,95 @@ _LAUNCH_ARGS = [
     "--no-sandbox", "--disable-setuid-sandbox",
     "--disable-dev-shm-usage", "--disable-gpu",
     "--disable-software-rasterizer",
+    "--single-process",  # Railway 등 소메모리 컨테이너 안정화
 ]
 
-async def _launch_browser(p):
-    """시스템에 설치된 Chromium 경로를 순서대로 시도"""
+
+def _launch_browser_sync(p):
+    """시스템에 설치된 Chromium 경로를 순서대로 시도 (sync)."""
     for path in _CHROMIUM_PATHS:
         try:
-            kwargs = {"args": _LAUNCH_ARGS}
+            kwargs = {"headless": True, "args": _LAUNCH_ARGS}
             if path:
+                if not os.path.isfile(path):
+                    continue
                 kwargs["executable_path"] = path
-            browser = await p.chromium.launch(**kwargs)
-            print(f"[Playwright] Chromium launched: {path or 'default'}")
+            browser = p.chromium.launch(**kwargs)
+            print(f"[Playwright] Chromium launched: {path or 'default'}", flush=True)
             return browser
         except Exception as e:
-            print(f"[Playwright] Failed ({path or 'default'}): {e}")
-    raise RuntimeError("Chromium 실행 파일을 찾을 수 없습니다. playwright install chromium 실행 필요")
+            print(f"[Playwright] Failed ({path or 'default'}): {e}", flush=True)
+    raise RuntimeError(
+        "Chromium 실행 파일을 찾을 수 없습니다. "
+        "playwright install --with-deps chromium 실행 필요"
+    )
+
+
+def _render_card_pngs_sync(cards_html: list) -> list:
+    """HTML → PNG (sync). uvicorn 이벤트 루프 밖에서 Playwright 실행."""
+    from playwright.sync_api import sync_playwright
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            with sync_playwright() as pw:
+                browser = _launch_browser_sync(pw)
+                results = []
+                try:
+                    for filename, html, dynamic in cards_html:
+                        if dynamic:
+                            page = browser.new_page(viewport={"width": W, "height": 1920})
+                            page.set_content(html, wait_until="networkidle")
+                            page.evaluate("document.fonts.ready")
+                            content_height = page.evaluate("document.body.scrollHeight")
+                            actual_height = max(H, content_height + 60)
+                            page.set_viewport_size({"width": W, "height": actual_height})
+                            screenshot = page.screenshot(
+                                clip={"x": 0, "y": 0, "width": W, "height": actual_height}
+                            )
+                        else:
+                            page = browser.new_page(viewport={"width": W, "height": H})
+                            page.set_content(html, wait_until="networkidle")
+                            page.evaluate("document.fonts.ready")
+                            screenshot = page.screenshot(
+                                clip={"x": 0, "y": 0, "width": W, "height": H}
+                            )
+                        page.close()
+                        results.append((filename, screenshot))
+                finally:
+                    browser.close()
+                return results
+        except Exception as e:
+            last_err = e
+            print(
+                f"[Playwright] 카드 렌더 시도 {attempt + 1}/3 실패: {e}",
+                flush=True,
+            )
+            time.sleep(1.0 + attempt)
+    raise RuntimeError(f"카드 PNG 생성 실패: {last_err}") from last_err
+
+
+async def _launch_browser(p):
+    """레거시 async 런처 — sync 경로 사용 권장."""
+    for path in _CHROMIUM_PATHS:
+        try:
+            kwargs = {"headless": True, "args": _LAUNCH_ARGS}
+            if path:
+                if not os.path.isfile(path):
+                    continue
+                kwargs["executable_path"] = path
+            browser = await p.chromium.launch(**kwargs)
+            print(f"[Playwright] Chromium launched: {path or 'default'}", flush=True)
+            return browser
+        except Exception as e:
+            print(f"[Playwright] Failed ({path or 'default'}): {e}", flush=True)
+    raise RuntimeError("Chromium 실행 파일을 찾을 수 없습니다.")
 
 
 async def _screenshot(html: str, width: int, height: int) -> bytes:
-    from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser = await _launch_browser(p)
-        page = await browser.new_page(viewport={"width": width, "height": height})
-        await page.set_content(html, wait_until="networkidle")
-        await page.evaluate("document.fonts.ready")
-        data = await page.screenshot(
-            clip={"x": 0, "y": 0, "width": width, "height": height}
-        )
-        await browser.close()
-        return data
+    cards = [("_shot.png", html, False)]
+    results = await asyncio.to_thread(_render_card_pngs_sync, cards)
+    return results[0][1]
 
 
 # ── 카드 1: 커버 (1080×1350) ─────────────────────────────
@@ -738,31 +802,7 @@ async def generate_cards(doc: dict, card_data: dict = None,
         (f"{ticker}_5_summary.png",   _html_summary(ticker, analysis, signal, indicators, created_at, cd),            False),
     ]
 
-    from playwright.async_api import async_playwright
-    results = []
-    async with async_playwright() as p:
-        browser = await _launch_browser(p)
-        for filename, html, dynamic in cards_html:
-            if dynamic:
-                # 카드 4: 콘텐츠 높이를 측정한 뒤 뷰포트·클립 동적 조정
-                page = await browser.new_page(viewport={"width": W, "height": 1920})
-                await page.set_content(html, wait_until="networkidle")
-                await page.evaluate("document.fonts.ready")
-                content_height = await page.evaluate("document.body.scrollHeight")
-                actual_height = max(H, content_height + 60)
-                await page.set_viewport_size({"width": W, "height": actual_height})
-                screenshot = await page.screenshot(
-                    clip={"x": 0, "y": 0, "width": W, "height": actual_height}
-                )
-            else:
-                page = await browser.new_page(viewport={"width": W, "height": H})
-                await page.set_content(html, wait_until="networkidle")
-                await page.evaluate("document.fonts.ready")
-                screenshot = await page.screenshot(
-                    clip={"x": 0, "y": 0, "width": W, "height": H}
-                )
-            await page.close()
-            results.append((filename, screenshot))
-        await browser.close()
-
-    return results
+    # Playwright는 sync + 스레드에서 실행 (uvicorn async와 충돌 방지)
+    # 동시 요청은 Lock으로 직렬화 — 컨테이너 OOM 방지
+    async with _CARD_GEN_LOCK:
+        return await asyncio.to_thread(_render_card_pngs_sync, cards_html)

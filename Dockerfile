@@ -17,9 +17,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Playwright Chromium 설치
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# Playwright Chromium 설치 (고정 경로 — Railway/컨테이너 재시작 시 경로 일치)
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN mkdir -p /ms-playwright \
+    && playwright install --with-deps chromium
 
 COPY . .
 
