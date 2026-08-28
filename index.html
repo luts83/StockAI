@@ -334,6 +334,7 @@ header {
 .chat-section { background:var(--card); border:1px solid var(--border2); border-radius:14px; overflow:hidden; margin-top:20px; }
 .chat-section-head { display:flex; align-items:center; gap:8px; padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card2); }
 .chat-section-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.7px; color:var(--muted); }
+.chat-section-hint { font-size:10px; color:var(--dim); margin-left:auto; font-family:'JetBrains Mono',monospace; }
 .section-chips { display:flex; gap:6px; flex-wrap:wrap; padding:14px 16px; border-bottom:1px solid var(--border); }
 .section-chip { padding:6px 12px; font-size:11px; background:var(--border); border:1px solid var(--border2); border-radius:20px; color:var(--muted); cursor:pointer; font-family:'JetBrains Mono',monospace; font-weight:500; transition:all 0.15s; }
 .section-chip:hover { border-color:var(--blue); color:var(--blue); }
@@ -835,6 +836,7 @@ header {
       <div class="chat-section-head">
         <span style="font-size:14px">💬</span>
         <span class="chat-section-title">추가 질문하기</span>
+        <span class="chat-section-hint">실시간 시세·지표 반영 · 대화는 분석에 저장</span>
       </div>
       <div class="section-chips" id="section-chips">
         <span class="section-chip active" data-section="전체">전체</span>
@@ -1909,7 +1911,11 @@ function renderResults(data) {
   if (cardBtnM) cardBtnM.style.display = showCard;
 
   // 채팅/히스토리 섹션 표시 (로그인 여부와 무관하게 보이지만 잠금 처리)
-  document.getElementById("chat-messages").innerHTML = "";
+  const chatEl = document.getElementById("chat-messages");
+  if (chatEl) {
+    chatEl.innerHTML = "";
+    (data.chat_history || []).forEach(m => appendChatBubble(m.role, m.content, m.section));
+  }
   document.getElementById("chat-section").style.display = "block";
   document.getElementById("history-section").style.display = "block";
   updateLockUI();

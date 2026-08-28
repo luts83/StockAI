@@ -333,6 +333,45 @@ def get_extended_price(ticker: str) -> dict:
         return {}
 
 
+def get_chat_live_snapshot(ticker: str, baseline_price: float = None) -> dict:
+    """채팅용 실시간 시세 + 최신 기술지표 스냅샷 (질문 시점 기준)."""
+    snap = get_extended_price(ticker)
+    snap.setdefault("indicators", None)
+    snap.setdefault("data_as_of", None)
+    snap.setdefault("vs_baseline_pct", None)
+
+    try:
+        df = get_stock_data(ticker, period="6mo", interval="1d")
+        if df is not None and not df.empty:
+            df = calculate_indicators(df)
+            latest = df.iloc[-1]
+            close = float(latest["Close"])
+            snap["data_as_of"] = df.index[-1].strftime("%Y-%m-%d")
+            snap["indicators"] = {
+                "rsi": round(_last_valid(df["RSI"], 50.0), 1),
+                "macd": round(_last_valid(df["MACD"], 0.0), 3),
+                "macd_signal": round(_last_valid(df["MACD_Signal"], 0.0), 3),
+                "ma20": round(_last_valid(df["MA20"], close), 2),
+                "ma60": round(_last_valid(df["MA60"], close), 2),
+                "ma200": round(_last_valid(df["MA200"], close), 2),
+                "bb_upper": round(_last_valid(df["BB_Upper"], close), 2),
+                "bb_lower": round(_last_valid(df["BB_Lower"], close), 2),
+                "daily_close": round(close, 2),
+            }
+    except Exception as e:
+        print(f"[chat_snapshot] 지표 {ticker} 오류: {e}")
+
+    current = snap.get("extended_price") or snap.get("regular_price")
+    try:
+        baseline = float(baseline_price) if baseline_price is not None else None
+    except (TypeError, ValueError):
+        baseline = None
+    if current and baseline and baseline > 0:
+        snap["vs_baseline_pct"] = round((current - baseline) / baseline * 100, 2)
+
+    return snap
+
+
 def _yf_frame(obj):
     """yfinance가 DataFrame/dict/None을 섞어 돌려주는 경우 통일."""
     if obj is None:

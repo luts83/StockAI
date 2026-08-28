@@ -20,7 +20,7 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 from analyzer import (
     get_stock_data, calculate_indicators,
-    get_valuation_data, get_extended_price,
+    get_valuation_data, get_extended_price, get_chat_live_snapshot,
     get_earnings_context,
 )
 from chart import generate_chart
@@ -419,6 +419,7 @@ async def analyze(
                     "has_new_news":    bool(new_news),
                     "new_news_count":  len(new_news),
                     "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
+                    "chat_history":    existing.get("chat_history", []),
                 }
 
     # 신규 분석 — 백그라운드 job 생성 후 job_id 즉시 반환
@@ -646,27 +647,51 @@ async def analyze_status(job_id: str):
     return {"status": job.status}
 
 
-def _build_chat_live_context(px, news_live, doc, data_date: str) -> str:
-    """채팅 system 프롬프트용 실시간 시세·뉴스 블록."""
+def _build_chat_live_context(snap: dict, news_live, doc, data_date: str) -> str:
+    """채팅 system 프롬프트용 실시간 시세·지표·뉴스 블록."""
     live_blocks = []
     ticker = doc["ticker"]
+    baseline = doc.get("current_price")
     try:
-        if px:
-            reg = px.get("regular_price")
-            ext = px.get("extended_price")
-            prev = px.get("previous_close")
+        if snap and (snap.get("regular_price") or snap.get("extended_price")):
+            reg = snap.get("regular_price")
+            ext = snap.get("extended_price")
+            prev = snap.get("previous_close")
+            effective = ext or reg
             chg = None
             if reg is not None and prev:
                 chg = round((reg - prev) / prev * 100, 2)
-            live_blocks.append(
-                "[실시간 시세 — 방금 서버에서 조회]\n"
-                f"- 정규장 현재가: ${reg}"
-                + (f" (전일 대비 {chg:+.2f}%)" if chg is not None else "")
-                + "\n"
-                + (f"- 프리/애프터: ${ext}\n" if ext else "")
-                + f"- 전일종가: ${prev}\n"
-                + f"- 분석 기준가({data_date}): ${doc.get('current_price', '—')}"
-            )
+            lines = [
+                "[실시간 스냅샷 — 질문 시점, 서버가 방금 조회]",
+                f"- 유효 현재가: ${effective}"
+                + (f" (정규장 ${reg}, 전일 대비 {chg:+.2f}%)" if reg and chg is not None else ""),
+            ]
+            if ext and reg and ext != reg:
+                lines.append(f"- 프리/애프터: ${ext}")
+            if prev:
+                lines.append(f"- 전일종가: ${prev}")
+            if snap.get("has_gap") and snap.get("gap_pct") is not None:
+                lines.append(f"- 장외 갭: {snap['gap_pct']:+.2f}%")
+            lines.append(f"- 분석 리포트 기준가({data_date}): ${baseline}")
+            vs = snap.get("vs_baseline_pct")
+            if vs is not None:
+                lines.append(f"- 리포트 대비 변동: {vs:+.2f}% (${baseline} → ${effective})")
+
+            ind = snap.get("indicators") or {}
+            if ind:
+                as_of = snap.get("data_as_of") or "최근 거래일"
+                macd_note = "골든" if ind.get("macd", 0) > ind.get("macd_signal", 0) else "데드"
+                lines.append(f"- 최신 지표 ({as_of} 종가 ${ind.get('daily_close', '—')} 기준):")
+                lines.append(
+                    f"  RSI {ind.get('rsi', '—')} · MACD {ind.get('macd', '—')} ({macd_note})"
+                )
+                lines.append(
+                    f"  MA20 ${ind.get('ma20', '—')} · MA60 ${ind.get('ma60', '—')} · MA200 ${ind.get('ma200', '—')}"
+                )
+                lines.append(
+                    f"  볼린저 ${ind.get('bb_lower', '—')} ~ ${ind.get('bb_upper', '—')}"
+                )
+            live_blocks.append("\n".join(lines))
         else:
             live_blocks.append("[실시간 시세] 조회 결과 없음")
     except Exception as e:
@@ -755,31 +780,35 @@ async def chat_stream(
     _data_date = doc.get("data_date") or doc.get("created_at", "")[:10]
     _now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
 
-    # 시세·뉴스 병렬 조회 (응답 시작 지연 단축)
-    px, news_live = await asyncio.gather(
-        asyncio.to_thread(get_extended_price, ticker),
+    # 시세·지표·뉴스 병렬 조회 (질문 시점 스냅샷)
+    snap, news_live = await asyncio.gather(
+        asyncio.to_thread(get_chat_live_snapshot, ticker, doc.get("current_price")),
         asyncio.to_thread(fetch_news, ticker, False),
         return_exceptions=True,
     )
-    if isinstance(px, Exception):
-        print(f"[chat] 시세 조회 실패 {ticker}: {px}")
-        px = None
+    if isinstance(snap, Exception):
+        print(f"[chat] 스냅샷 조회 실패 {ticker}: {snap}")
+        snap = {}
     if isinstance(news_live, Exception):
         print(f"[chat] 뉴스 조회 실패 {ticker}: {news_live}")
         news_live = []
 
-    live_context = _build_chat_live_context(px, news_live, doc, _data_date)
+    live_context = _build_chat_live_context(snap, news_live, doc, _data_date)
+    saved_inds = doc.get("indicators") or {}
 
     system = (
         f"당신은 주식 기술적 분석 전문가입니다.\n"
         f"\n"
         f"[분석 메타데이터]\n"
         f"- 분석 대상: {ticker}\n"
-        f"- 분석 기준일: {_data_date}\n"
-        f"- 분석 기준가: ${doc.get('current_price', '—')}\n"
+        f"- 분석 리포트 작성일: {_data_date}\n"
+        f"- 리포트 당시 기준가: ${doc.get('current_price', '—')}\n"
+        f"- 리포트 당시 RSI/MACD: {saved_inds.get('rsi', '—')} / {saved_inds.get('macd', '—')}\n"
         f"- 서버 시각(UTC): {_now_utc}\n"
         f"\n"
+        f"=== 1순위: 실시간 데이터 (가격·지표·뉴스 질문은 반드시 여기 기준) ===\n"
         f"{live_context}\n"
+        f"=== 실시간 데이터 종료 ===\n"
         f"\n"
         f"[답변 규칙 — 반드시 준수]\n"
         f"1. 길이: 일반 5~10문장. 복잡한 질문·시나리오는 필요한 만큼(최대 20문장). 중간에 끊지 말 것.\n"
@@ -787,24 +816,23 @@ async def chat_stream(
         f"3. 서론/인사 없이 결론부터.\n"
         f"4. 숫자 인용은 꼭 필요한 1~3개만.\n"
         f"\n"
-        f"5. 실시간 데이터 규칙 (중요)\n"
-        f"   - 위 [실시간 시세]/[최신 뉴스]가 있으면 그걸 근거로 바로 답할 것.\n"
-        f"   - Yahoo/구글/HTS로 가서 확인하라는 안내 절대 금지.\n"
-        f"   - '실시간 조회 불가'라고 말하지 말 것. 서버가 이미 조회했다.\n"
-        f"   - 분석 기준일 이후 움직임은 실시간 시세/뉴스로 설명하고,\n"
-        f"     기존 분석과 다르면 '분석 이후 변화'로 짧게 구분할 것.\n"
+        f"5. 실시간 우선 규칙 (가장 중요)\n"
+        f"   - '지금 가격', '오늘', '최근', '분석 이후' 질문 → 위 실시간 스냅샷만 근거.\n"
+        f"   - 리포트의 옛 가격·RSI·MACD를 현재가처럼 말하지 말 것.\n"
+        f"   - 리포트와 실시간이 다르면 '리포트({_data_date}) 이후 ~% 변동, RSI ~→~'처럼 변화를 설명.\n"
+        f"   - Yahoo/구글/HTS 확인 안내 금지. 서버가 이미 조회함.\n"
+        f"   - '실시간 조회 불가'라고 말하지 말 것.\n"
         f"   - 뉴스가 급등 원인으로 보이면 헤드라인 1~2개만 인용.\n"
-        f"   - 뉴스와 무관한 급등이면 기술/수급 가능성으로 짧게.\n"
         f"\n"
-        f"6. 여전히 추측 금지인 것\n"
+        f"6. 리포트 참고 규칙\n"
+        f"   - 아래 리포트는 {_data_date} 스냅샷. 시나리오·저항/지지·트리거·종합 의견 참고용.\n"
         f"   - 제공되지 않은 실적 수치·어닝콜 발언·재무 세부 수치 생성 금지.\n"
-        f"   - 실시간 블록에 없는 내용은 '확인된 헤드라인/시세 기준으로는 ~'로 한정.\n"
         f"\n"
         f"질문 섹션: {req.section}\n"
         f"\n"
-        f"=== 기존 분석 ({_data_date} 기준) ===\n"
+        f"=== 2순위: 기존 분석 리포트 ({_data_date} 기준, 참고용) ===\n"
         f"{doc['analysis']}\n"
-        f"=== 분석 종료 ==="
+        f"=== 리포트 종료 ==="
     )
 
     for h in history:
