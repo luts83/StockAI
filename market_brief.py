@@ -556,6 +556,7 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 """
 
 
+WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 BRIEF_MAX_TOKENS = 8192
 
 # 시황 4종 서큘레이션
