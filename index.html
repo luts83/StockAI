@@ -785,6 +785,9 @@ header {
       </div>
     </div>
 
+    <!-- 실적·어닝 패널 -->
+    <div id="earnings-panel" style="display:none"></div>
+
     <div class="chart-wrap">
       <div class="chart-topbar">
         <span class="chart-label">Technical Chart</span>
@@ -996,6 +999,278 @@ function getSignalDisplay(signal, analysis = "") {
     sub = `${sub} — BUY: ${meta.buyTrigger || "—"} / SELL: ${meta.sellTrigger || "—"}`;
   }
   return { boxClass, icon: "👀", text, sub, ...meta };
+}
+
+const TREND_LABEL_KR = {
+  STRONG_BULLISH: "강한 상승 추세",
+  BULLISH: "상승 추세",
+  NEUTRAL: "중립",
+  BEARISH: "하락 추세",
+  STRONG_BEARISH: "강한 하락 추세",
+};
+const ENTRY_STANCE_KR = {
+  ENTRY_READY: "진입 조건은 갖춤",
+  ENTRY_WAIT: "진입 타이밍 대기",
+  ENTRY_AVOID: "진입 회피",
+};
+const ACTION_KR = {
+  entry: { BUY: "매수", WAIT: "대기", AVOID: "회피" },
+  holding: { HOLD: "보유", REDUCE: "비중 축소", EXIT: "청산" },
+  trading: { BUY: "매수", WAIT: "대기", NO_CHASE: "추격 금지" },
+};
+const REASON_CODE_KR = {
+  below_ma20: "MA20 하회",
+  above_ma20: "MA20 상회",
+  macd_golden: "MACD 골든크로스",
+  macd_dead: "MACD 데드크로스",
+  rsi_momentum_ok: "RSI 모멘텀 양호",
+  rsi_overbought: "RSI 과매수",
+  rsi_oversold: "RSI 과매도",
+  rvol_strong: "거래량 강함",
+  rvol_weak: "거래량 약함",
+  trend_ok_entry_wait: "추세 양호·진입 대기",
+  buy_gate_blocked: "매수 게이트 미충족",
+  buy_deploy_disabled: "매수 신호 비활성",
+};
+
+function fmtExpReturn(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const pct = v * 100;
+  return (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
+}
+
+function buildSignalSubLine(eng, sigDisplay) {
+  const trend = TREND_LABEL_KR[eng.trend_label] || eng.trend_label;
+  const stance = ENTRY_STANCE_KR[eng.entry_stance] || eng.entry_stance;
+  if (eng.trend_label && eng.entry_stance) {
+    return `${trend} · ${stance} — 추세와 진입 타이밍은 별개로 봅니다`;
+  }
+  return sigDisplay.sub;
+}
+
+function buildSignalActionSummary(actions) {
+  if (!actions || !actions.entry) return "";
+  const e = ACTION_KR.entry[actions.entry] || actions.entry;
+  const h = ACTION_KR.holding[actions.holding] || actions.holding;
+  const t = ACTION_KR.trading[actions.trading] || actions.trading;
+  return `신규 진입 ${e} · 보유 ${h} · 단기 ${t}`;
+}
+
+function fmtEarningsSurprise(pct) {
+  if (typeof pct !== "number" || !Number.isFinite(pct)) return "";
+  return (pct >= 0 ? "+" : "") + pct + "%";
+}
+
+function fmtRevBillions(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const b = v > 1e6 ? v / 1e9 : v;
+  return "$" + b.toFixed(2) + "B";
+}
+
+function renderEarningsPanel(earnings) {
+  const panel = document.getElementById("earnings-panel");
+  const badge = document.getElementById("res-earnings-badge");
+  if (badge) badge.remove();
+
+  if (!panel) return;
+  const e = earnings || {};
+  const hasNext = e.show_next && e.next_earnings_date;
+  const hasResult = e.show_result && e.last_earnings;
+  const hasCall = e.show_call && e.earnings_call;
+  const hasHistory = (e.history_count || 0) >= 1 || (e.history || []).length >= 1;
+  const comp = e.comparison_text || [];
+  if (!hasNext && !hasResult && !hasCall && !hasHistory) {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    return;
+  }
+
+  if (hasNext) {
+    const days = e.days_to_earnings;
+    const thBadges = document.querySelector(".th-badges");
+    if (thBadges) {
+      const span = document.createElement("span");
+      span.id = "res-earnings-badge";
+      const urgent = days != null && days >= 0 && days <= 3;
+      span.className = "badge " + (urgent ? "badge-dn" : "badge-yellow");
+      let label = "📅 실적 " + e.next_earnings_date;
+      if (days != null) {
+        if (days > 0) label += " (D-" + days + ")";
+        else if (days === 0) label += " (D-day)";
+        else label += " (D+" + Math.abs(days) + ")";
+      }
+      span.textContent = label;
+      thBadges.appendChild(span);
+    }
+  }
+
+  const blocks = [];
+
+  if (hasNext) {
+    const days = e.days_to_earnings;
+    let note = "다음 실적 발표 일정";
+    if (days != null && days >= 0 && days <= 3) note = "⚠️ 실적 임박 — 이벤트 변동성 주의";
+    blocks.push(`
+      <div style="flex:1;min-width:140px">
+        <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em">다음 실적</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text);margin-top:4px">${e.next_earnings_date}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${note}</div>
+      </div>`);
+  }
+
+  if (hasResult) {
+    const le = e.last_earnings;
+    const sp = le.eps_surprise_pct;
+    const spColor = sp == null ? "var(--muted)" : sp >= 0 ? "var(--green)" : "var(--red)";
+    const spLabel = sp == null ? "" : (sp >= 0 ? "서프라이즈" : "쇼크");
+    blocks.push(`
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:10px;color:var(--dim)">최신 실적 (${le.date}) · 발표 직후 강조</div>
+        <div style="font-size:13px;margin-top:4px;color:var(--text)">
+          EPS <strong>$${le.actual_eps ?? "—"}</strong> / 예상 $${le.estimate_eps ?? "—"}
+          ${sp != null ? `<span style="color:${spColor};margin-left:6px">${fmtEarningsSurprise(sp)} ${spLabel}</span>` : ""}
+        </div>
+        ${le.actual_revenue != null ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">매출 ${fmtRevBillions(le.actual_revenue)} / 예상 ${fmtRevBillions(le.estimate_revenue)}</div>` : ""}
+      </div>`);
+  } else if (e.last_earnings) {
+    const le = e.last_earnings;
+    blocks.push(`
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:10px;color:var(--dim)">최신 실적 (DB · ${le.date})</div>
+        <div style="font-size:12px;margin-top:4px;color:var(--muted)">
+          EPS $${le.actual_eps ?? "—"}${le.eps_surprise_pct != null ? ` · 컨센서스 ${fmtEarningsSurprise(le.eps_surprise_pct)}` : ""}
+        </div>
+      </div>`);
+  }
+
+  if (comp.length >= 2) {
+    const compHtml = comp.slice(0, 6).map((ln) =>
+      `<div style="font-size:11px;color:var(--muted);line-height:1.45">${ln.replace(/^  /, "")}</div>`
+    ).join("");
+    blocks.push(`
+      <div style="flex:2;min-width:220px">
+        <div style="font-size:10px;color:var(--dim)">📈 분기 비교 (DB ${e.history_count || comp.length}분기)</div>
+        <div style="margin-top:4px">${compHtml}</div>
+      </div>`);
+  }
+
+  if (hasCall) {
+    const call = e.earnings_call;
+    const highlights = (call.highlights || []).slice(0, 3).map((h) => `<li>${h}</li>`).join("");
+    blocks.push(`
+      <div style="flex:2;min-width:200px">
+        <div style="font-size:10px;color:var(--dim)">🎙️ 어닝콜 요약 (${call.earnings_date}) · D-${e.call_days_left ?? "?"}</div>
+        <div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.5">${call.summary || ""}</div>
+        ${highlights ? `<ul style="margin:6px 0 0 16px;padding:0;font-size:11px;color:var(--muted)">${highlights}</ul>` : ""}
+        ${call.guidance_note ? `<div style="font-size:11px;color:var(--yellow);margin-top:4px">가이던스: ${call.guidance_note}</div>` : ""}
+      </div>`);
+  }
+
+  panel.style.display = "block";
+  panel.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:16px;padding:12px 16px;margin-bottom:14px;background:rgba(77,159,255,0.05);border:1px solid rgba(77,159,255,0.18);border-radius:10px">
+      ${blocks.join("")}
+    </div>`;
+}
+
+function buildSignalBoxHtml({ signal, sigDisplay, eng = {}, confidence = "", signalChange = null }) {
+  const engConf = (typeof eng.confidence === "number")
+    ? Math.round(eng.confidence * 100)
+    : null;
+  const confColor = engConf != null
+    ? (engConf >= 70 ? "var(--green)" : engConf >= 55 ? "var(--yellow)" : "var(--muted)")
+    : (confidence === "상" ? "var(--green)" : confidence === "중" ? "var(--yellow)" : "var(--muted)");
+  const confBadge = engConf != null
+    ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">엔진 ${engConf}%${eng.confidence_calibrated ? "·보정" : ""}</span>`
+    : (confidence
+      ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
+      : "");
+
+  const actionSummary = buildSignalActionSummary(eng.actions);
+  const actionSummaryLine = actionSummary
+    ? `<div style="font-size:13px;color:var(--text);margin-top:6px;font-weight:600">${actionSummary}</div>`
+    : "";
+
+  const scores = eng.scores || {};
+  const actions = eng.actions || {};
+  const trig = eng.triggers || {};
+  const prob = eng.probability || {};
+
+  const buyTrig = trig.buy_trigger || sigDisplay.buyTrigger;
+  const downTrig = trig.down_trigger || sigDisplay.sellTrigger;
+  const invTrig = trig.invalidation || sigDisplay.invalidation;
+  let triggerHtml = "";
+  if (signal !== "BUY" && (buyTrig || downTrig || invTrig || sigDisplay.duration || trig.duration)) {
+    triggerHtml = `
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+        ${buyTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 매수 전환: ${buyTrig}</div>` : ""}
+        ${downTrig ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 하락 전환: ${downTrig}</div>` : ""}
+        ${invTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(248,113,113,0.08);border-left:3px solid var(--orange, #f0883e);border-radius:4px;color:var(--orange, #f0883e)">⛔ 무효화: ${invTrig}</div>` : ""}
+        ${sigDisplay.duration || trig.duration ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay.duration || trig.duration}</div>` : ""}
+      </div>`;
+  } else if (signal === "BUY" && (buyTrig || sigDisplay.duration)) {
+    triggerHtml = `
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+        ${buyTrig ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 매수 근거: ${buyTrig}</div>` : ""}
+        ${sigDisplay.duration || trig.duration ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay.duration || trig.duration}</div>` : ""}
+      </div>`;
+  }
+
+  const scoreBreak = (scores.trend != null) ? `
+    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(5,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">추세</div><div style="color:var(--text);font-weight:700">${scores.trend}</div><div style="color:var(--muted);margin-top:2px;font-size:9px">${TREND_LABEL_KR[eng.trend_label] || eng.trend_label || ""}</div></div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">모멘텀</div><div style="color:var(--text);font-weight:700">${scores.momentum ?? "—"}</div></div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">거래량</div><div style="color:var(--text);font-weight:700">${scores.participation ?? "—"}</div></div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">진입</div><div style="color:var(--text);font-weight:700">${scores.entry_quality ?? "—"}</div><div style="color:var(--muted);margin-top:2px;font-size:9px">${ENTRY_STANCE_KR[eng.entry_stance] || eng.entry_stance || ""}</div></div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">손익비</div><div style="color:var(--text);font-weight:700">${scores.risk_reward ?? "—"}</div></div>
+    </div>` : "";
+
+  const actionLine = (actions.entry) ? `
+    <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">신규 ${ACTION_KR.entry[actions.entry] || actions.entry}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">보유 ${ACTION_KR.holding[actions.holding] || actions.holding}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">단기 ${ACTION_KR.trading[actions.trading] || actions.trading}</span>
+      ${eng.rvol != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">RVOL ${Number(eng.rvol).toFixed(2)}</span>` : ""}
+    </div>` : "";
+
+  const er = eng.expected_return || {};
+  const horizonLine = (er["5d"] != null || er["10d"] != null) ? `
+    <div style="margin-top:6px;font-size:11px;color:var(--dim)">
+      기대수익 5/10/20일: ${fmtExpReturn(er["5d"])} / ${fmtExpReturn(er["10d"])} / ${fmtExpReturn(er["20d"])}
+      ${eng.expected_drawdown ? ` · 최대낙폭(10일) ${fmtExpReturn((eng.expected_drawdown || {})["10d"])}` : ""}
+    </div>` : "";
+
+  const reasons = (eng.reason_codes || []).slice(0, 6).map((c) => REASON_CODE_KR[c] || c);
+  const techDetail = (typeof eng.score === "number" || reasons.length) ? `
+    <details style="margin-top:8px;font-size:11px;color:var(--muted)">
+      <summary style="cursor:pointer;color:var(--dim)">기술 지표 상세</summary>
+      ${typeof eng.score === "number" ? `<div style="margin-top:6px">종합 점수 ${eng.score}${prob.up != null ? ` · 상승확률 ${Math.round(prob.up * 100)}% / 하락 ${Math.round((prob.down || 0) * 100)}%` : ""}</div>` : ""}
+      ${reasons.length ? `<div style="margin-top:4px;line-height:1.5">${reasons.join(" · ")}</div>` : ""}
+      ${scoreBreak}
+      ${horizonLine}
+    </details>` : scoreBreak;
+
+  const sc = signalChange;
+  const changeHtml = (sc && sc.prev_signal && sc.next_signal) ? `
+    <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.08);border:1px solid var(--border);font-size:12px;line-height:1.45;color:var(--text)">
+      <div style="font-weight:600;margin-bottom:2px">직전 대비: ${sc.prev_label || sc.prev_signal} → ${sc.next_label || sc.next_signal}</div>
+      <div style="color:var(--muted)">${sc.why_short || ""}</div>
+      ${sc.lesson ? `<div style="margin-top:4px;color:var(--dim);font-size:11px">교훈: ${sc.lesson}</div>` : ""}
+    </div>` : "";
+
+  return `
+    <div class="signal-box ${sigDisplay.boxClass}">
+      <div class="signal-icon">${sigDisplay.icon}</div>
+      <div style="flex:1">
+        <div class="signal-text">${sigDisplay.text}${confBadge}</div>
+        <div class="signal-sub">${buildSignalSubLine(eng, sigDisplay)}</div>
+        ${actionSummaryLine}
+        ${triggerHtml}
+        ${actionLine}
+        ${techDetail}
+        ${changeHtml}
+      </div>
+    </div>`;
 }
 
 function inferWatchFromIndicators(item = {}) {
@@ -1769,6 +2044,8 @@ function renderResults(data) {
 
   renderValuation(data.valuation);
 
+  renderEarningsPanel(data.earnings);
+
   const analysis = data.analysis || "";
 
   // ── 1. 시그널 파싱 — DB/엔진 signal 필드 우선 (구형 WATCH는 방향 세분화)
@@ -1787,80 +2064,13 @@ function renderResults(data) {
   // ── 2. 시그널 박스 렌더링
   const signalArea = document.getElementById("signal-area");
   if (signalArea) {
-    const engConf = (typeof eng.confidence === "number")
-      ? Math.round(eng.confidence * 100)
-      : null;
-    const confColor = engConf != null
-      ? (engConf >= 70 ? "var(--green)" : engConf >= 55 ? "var(--yellow)" : "var(--muted)")
-      : (confidence === "상" ? "var(--green)" : confidence === "중" ? "var(--yellow)" : "var(--muted)");
-    const confBadge = engConf != null
-      ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">엔진 ${engConf}%${eng.confidence_calibrated ? "·보정" : ""}</span>`
-      : (confidence
-        ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
-        : "");
-    const scoreLine = (typeof eng.score === "number")
-      ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">Score ${eng.score} · ${(eng.reason_codes || []).slice(0,4).join(", ")}</div>`
-      : "";
-    const scores = eng.scores || {};
-    const actions = eng.actions || {};
-    const trig = eng.triggers || {};
-    const prob = eng.probability || {};
-    const scoreBreak = (scores.trend != null) ? `
-      <div style="margin-top:8px;display:grid;grid-template-columns:repeat(5,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
-        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Trend</div><div style="color:var(--text);font-weight:700">${scores.trend}</div><div style="color:var(--muted);margin-top:2px">${eng.trend_label || ""}</div></div>
-        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Mom</div><div style="color:var(--text);font-weight:700">${scores.momentum ?? "—"}</div></div>
-        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">RVOL</div><div style="color:var(--text);font-weight:700">${scores.participation ?? "—"}</div></div>
-        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Entry</div><div style="color:var(--text);font-weight:700">${scores.entry_quality ?? "—"}</div><div style="color:var(--muted);margin-top:2px">${eng.entry_stance || ""}</div></div>
-        <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">R:R</div><div style="color:var(--text);font-weight:700">${scores.risk_reward ?? "—"}</div></div>
-      </div>` : "";
-    const actionLine = (actions.entry) ? `
-      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
-        <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">ENTRY ${actions.entry}</span>
-        <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">HOLDING ${actions.holding}</span>
-        <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">TRADING ${actions.trading}</span>
-        ${prob.up != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">P↑${Math.round(prob.up*100)}% · P↓${Math.round((prob.down||0)*100)}%</span>` : ""}
-        ${eng.rvol != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">RVOL ${eng.rvol}</span>` : ""}
-      </div>` : "";
-    const buyTrig = trig.buy_trigger || sigDisplay.buyTrigger;
-    const downTrig = trig.down_trigger || sigDisplay.sellTrigger;
-    const invTrig = trig.invalidation || sigDisplay.invalidation;
-    let triggerHtml = "";
-    if (signal !== "BUY" && (buyTrig || downTrig || invTrig || sigDisplay.duration)) {
-      triggerHtml = `
-        <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-          ${buyTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY Trigger: ${buyTrig}</div>` : ""}
-          ${downTrig ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 DOWN Trigger: ${downTrig}</div>` : ""}
-          ${invTrig  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(248,113,113,0.08);border-left:3px solid var(--orange, #f0883e);border-radius:4px;color:var(--orange, #f0883e)">⛔ Invalidation: ${invTrig}</div>` : ""}
-          ${sigDisplay.duration || trig.duration ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay.duration || trig.duration}</div>` : ""}
-        </div>`;
-    }
-    const er = eng.expected_return || {};
-    const horizonLine = (er["5d"] != null || er["10d"] != null) ? `
-      <div style="margin-top:6px;font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">
-        ExpR 5/10/20d: ${er["5d"] ?? "—"} / ${er["10d"] ?? "—"} / ${er["20d"] ?? "—"}
-        ${eng.expected_drawdown ? ` · ExpDD 10d: ${(eng.expected_drawdown || {})["10d"] ?? "—"}` : ""}
-      </div>` : "";
-    const sc = data.signal_change;
-    const changeHtml = (sc && sc.prev_signal && sc.next_signal) ? `
-      <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.08);border:1px solid var(--border);font-size:12px;line-height:1.45;color:var(--text)">
-        <div style="font-weight:600;margin-bottom:2px">직전 대비: ${sc.prev_label || sc.prev_signal} → ${sc.next_label || sc.next_signal}</div>
-        <div style="color:var(--muted)">${sc.why_short || ""}</div>
-        ${sc.lesson ? `<div style="margin-top:4px;color:var(--dim);font-size:11px">교훈: ${sc.lesson}</div>` : ""}
-      </div>` : "";
-    signalArea.innerHTML = `
-      <div class="signal-box ${sigDisplay.boxClass}">
-        <div class="signal-icon">${sigDisplay.icon}</div>
-        <div style="flex:1">
-          <div class="signal-text">${sigDisplay.text}${confBadge}</div>
-          <div class="signal-sub">${eng.trend_label && eng.entry_stance ? `${eng.trend_label} · ${eng.entry_stance}` : sigDisplay.sub}</div>
-          ${scoreLine}
-          ${scoreBreak}
-          ${actionLine}
-          ${horizonLine}
-          ${triggerHtml}
-          ${changeHtml}
-        </div>
-      </div>`;
+    signalArea.innerHTML = buildSignalBoxHtml({
+      signal,
+      sigDisplay,
+      eng,
+      confidence,
+      signalChange: data.signal_change,
+    });
   }
 
   // ── 3. 분석 텍스트 렌더링 (시그널 파싱과 완전 독립)
@@ -2586,42 +2796,25 @@ async function loadSavedAnalysis(docId) {
     // 밸류에이션
     renderValuation(doc.valuation);
 
+    renderEarningsPanel(doc.earnings || doc.earnings_snapshot);
+
     // 시그널
     const analysis = doc.analysis || "";
     const signal2 = resolveItemSignal(doc);
     const sigDisplay2 = getSignalDisplay(signal2, analysis);
     const confMatch2     = analysis.match(/CONFIDENCE:\s*(상|중|하)/);
     const conf2 = confMatch2?.[1] || "";
-    const confColor2 = conf2 === "상" ? "var(--green)"
-                     : conf2 === "중" ? "var(--yellow)"
-                     : "var(--muted)";
-    const confBadge2 = conf2
-      ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor2};color:${confColor2};margin-left:8px">신뢰도 ${conf2}</span>`
-      : "";
-    const watchTriggerHtml2 = (signal2 === "WATCH" && (sigDisplay2.buyTrigger || sigDisplay2.sellTrigger || sigDisplay2.duration)) ? `
-      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-        ${sigDisplay2.buyTrigger  ? `<div style="font-size:12px;padding:6px 10px;background:rgba(34,197,94,0.12);border-left:3px solid var(--green);border-radius:4px;color:var(--green)">🟢 BUY 전환: ${sigDisplay2.buyTrigger}</div>` : ""}
-        ${sigDisplay2.sellTrigger ? `<div style="font-size:12px;padding:6px 10px;background:rgba(239,68,68,0.12);border-left:3px solid var(--red);border-radius:4px;color:var(--red)">🔴 SELL 전환: ${sigDisplay2.sellTrigger}</div>` : ""}
-        ${sigDisplay2.duration    ? `<div style="font-size:12px;padding:6px 10px;background:rgba(251,191,36,0.1);border-left:3px solid var(--yellow);border-radius:4px;color:var(--yellow)">⏱ ${sigDisplay2.duration}</div>` : ""}
-      </div>` : "";
     const sigAreaEl = document.getElementById("signal-area");
     const sc2 = doc.signal_change;
-    const changeHtml2 = (sc2 && sc2.prev_signal && sc2.next_signal) ? `
-      <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.08);border:1px solid var(--border);font-size:12px;line-height:1.45;color:var(--text)">
-        <div style="font-weight:600;margin-bottom:2px">직전 대비: ${sc2.prev_label || sc2.prev_signal} → ${sc2.next_label || sc2.next_signal}</div>
-        <div style="color:var(--muted)">${sc2.why_short || ""}</div>
-        ${sc2.lesson ? `<div style="margin-top:4px;color:var(--dim);font-size:11px">교훈: ${sc2.lesson}</div>` : ""}
-      </div>` : "";
-    if (sigAreaEl) sigAreaEl.innerHTML = `
-      <div class="signal-box ${sigDisplay2.boxClass}">
-        <div class="signal-icon">${sigDisplay2.icon}</div>
-        <div style="flex:1">
-          <div class="signal-text">${sigDisplay2.text}${confBadge2}</div>
-          <div class="signal-sub">${sigDisplay2.sub}</div>
-          ${watchTriggerHtml2}
-          ${changeHtml2}
-        </div>
-      </div>`;
+    if (sigAreaEl) {
+      sigAreaEl.innerHTML = buildSignalBoxHtml({
+        signal: signal2,
+        sigDisplay: sigDisplay2,
+        eng: doc.signal_engine || {},
+        confidence: conf2,
+        signalChange: sc2,
+      });
+    }
 
     // 분석 텍스트
     const cleanAnalysis = analysis

@@ -21,8 +21,8 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 from analyzer import (
     get_stock_data, calculate_indicators,
     get_valuation_data, get_extended_price, get_chat_live_snapshot,
-    get_earnings_context,
 )
+from earnings import get_earnings_for_report, get_earnings_display_bundle
 from chart import generate_chart
 from news import fetch_news
 from ai import analyze_with_claude
@@ -364,6 +364,9 @@ async def analyze(
             ok, reason = cache_is_fresh(pub, ticker, live_px)
             if ok:
                 print(f"[PUBLIC CACHE] hit: {ticker} {req.period} ({reason})")
+                earnings_disp = await asyncio.to_thread(
+                    get_earnings_display_bundle, ticker, pub.get("earnings_snapshot")
+                )
                 return {
                     "doc_id":         "",
                     "ticker":         pub["ticker"],
@@ -381,6 +384,7 @@ async def analyze(
                     "has_new_news":   False,
                     "new_news_count": 0,
                     "data_date":      pub.get("data_date", pub.get("created_at", "")[:10]),
+                    "earnings":       earnings_disp,
                 }
             print(f"[PUBLIC CACHE] stale: {ticker} ({reason}) → reanalyze")
 
@@ -401,6 +405,11 @@ async def analyze(
                     updated_news = (new_news + existing.get("news", []))[:15]
                     update_analysis_news(existing["_id"], updated_news)
                     existing["news"] = updated_news
+                earnings_disp = await asyncio.to_thread(
+                    get_earnings_display_bundle,
+                    ticker,
+                    existing.get("earnings_snapshot"),
+                )
                 return {
                     "doc_id":          existing["_id"],
                     "ticker":          existing["ticker"],
@@ -420,6 +429,7 @@ async def analyze(
                     "new_news_count":  len(new_news),
                     "data_date":       existing.get("data_date", existing.get("created_at", "")[:10]),
                     "chat_history":    existing.get("chat_history", []),
+                    "earnings":        earnings_disp,
                 }
 
     # 신규 분석 — 백그라운드 job 생성 후 job_id 즉시 반환
@@ -446,7 +456,9 @@ async def _run_analysis_job(job_id: str, ticker: str,
         chart_b64 = await asyncio.to_thread(generate_chart, df, ticker)
         news_items = await asyncio.to_thread(fetch_news, ticker)
         valuation = await asyncio.to_thread(get_valuation_data, ticker)
-        earnings_context = await asyncio.to_thread(get_earnings_context, ticker)
+        earnings_bundle = await asyncio.to_thread(
+            lambda: get_earnings_for_report(ticker, claude, force_sync=False)
+        )
         analysis_date = df.index[-1].strftime("%Y-%m-%d")
 
         # Engine first → LLM explains (cannot override)
@@ -483,7 +495,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
         analysis_raw = await analyze_with_claude(
             chart_b64, df, ticker, news_items, valuation,
             analysis_date=analysis_date,
-            earnings_context=earnings_context,
+            earnings_context=earnings_bundle,
             signal_engine=signal_meta or None,
             feedback_context=feedback_context,
         )
@@ -537,6 +549,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 data_date=analysis_date,
                 llm_signal=llm_signal,
                 signal_engine=signal_meta,
+                earnings_snapshot=earnings_bundle,
             )
             # SIGNAL 변경 시 자동 비교·피드백 저장
             try:
@@ -615,6 +628,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "is_saved":        bool(user_id),
             "data_date":       analysis_date,
             "signal_change":   signal_change,
+            "earnings":          earnings_bundle,
         }
         job.status = "done"
         elapsed = asyncio.get_event_loop().time() - t0
@@ -795,6 +809,17 @@ async def chat_stream(
 
     live_context = _build_chat_live_context(snap, news_live, doc, _data_date)
     saved_inds = doc.get("indicators") or {}
+    earn_block = ""
+    try:
+        earn = get_earnings_display_bundle(ticker, doc.get("earnings_snapshot"))
+        if earn.get("prompt_text"):
+            earn_block = (
+                f"\n=== 실적·어닝 (분석 시점 스냅샷 — 제공 데이터만 인용) ===\n"
+                f"{earn['prompt_text']}\n"
+                f"=== 실적·어닝 종료 ===\n"
+            )
+    except Exception as e:
+        print(f"[chat] earnings context 실패: {e}")
 
     system = (
         f"당신은 주식 기술적 분석 전문가입니다.\n"
@@ -827,6 +852,7 @@ async def chat_stream(
         f"6. 리포트 참고 규칙\n"
         f"   - 아래 리포트는 {_data_date} 스냅샷. 시나리오·저항/지지·트리거·종합 의견 참고용.\n"
         f"   - 제공되지 않은 실적 수치·어닝콜 발언·재무 세부 수치 생성 금지.\n"
+        f"{earn_block}"
         f"\n"
         f"질문 섹션: {req.section}\n"
         f"\n"
@@ -913,6 +939,15 @@ async def load_analysis(
         doc["signal_change"] = ui_payload(fb)
     except Exception:
         doc["signal_change"] = None
+    try:
+        doc["earnings"] = await asyncio.to_thread(
+            get_earnings_display_bundle,
+            doc.get("ticker", ""),
+            doc.get("earnings_snapshot"),
+        )
+    except Exception as e:
+        print(f"[analysis] earnings display 실패: {e}")
+        doc["earnings"] = doc.get("earnings_snapshot") or {}
     return doc
 
 

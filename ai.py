@@ -323,51 +323,60 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 
     # ── 어닝 컨텍스트 텍스트 구성 ──
     ec = earnings_context or {}
-    earnings_lines = []
+    if ec.get("prompt_text"):
+        earnings_text = ec["prompt_text"]
+    else:
+        earnings_lines = []
+        days = ec.get("days_to_earnings")
+        if days is not None and ec.get("next_earnings_date"):
+            if -3 <= days <= 0:
+                earnings_lines.append(
+                    f"⚠️ 실적 발표 {abs(days)}일 전 발표 완료 ({ec['next_earnings_date']}) "
+                    f"— 발표 직후 변동성 구간, 시장 반응 주시 필요"
+                )
+            elif 1 <= days <= 3:
+                earnings_lines.append(
+                    f"⚠️ 실적 발표 D-{days} ({ec['next_earnings_date']}) "
+                    f"— 이벤트 리스크 존재, WATCH 조건 해당"
+                )
+            elif 4 <= days <= 14:
+                earnings_lines.append(f"📅 실적 발표 예정: {ec['next_earnings_date']} (D-{days})")
 
-    days = ec.get("days_to_earnings")
-    if days is not None:
-        if -3 <= days <= 0:
-            earnings_lines.append(
-                f"⚠️ 실적 발표 {abs(days)}일 전 발표 완료 ({ec['next_earnings_date']}) "
-                f"— 발표 직후 변동성 구간, 시장 반응 주시 필요"
-            )
-        elif 1 <= days <= 3:
-            earnings_lines.append(
-                f"⚠️ 실적 발표 D-{days} ({ec['next_earnings_date']}) "
-                f"— 이벤트 리스크 존재, WATCH 조건 해당"
-            )
-        elif 4 <= days <= 14:
-            earnings_lines.append(f"📅 실적 발표 예정: {ec['next_earnings_date']} (D-{days})")
+        re_earn = ec.get("last_earnings") or ec.get("recent_earnings")
+        if ec.get("show_result") and re_earn and re_earn.get("actual_eps") is not None:
+            surprise = re_earn.get("eps_surprise_pct") or re_earn.get("surprise_pct")
+            if surprise is not None:
+                emoji = "🟢" if surprise > 0 else "🔴"
+                label = "어닝 서프라이즈 (예상 상회)" if surprise > 0 else "어닝 쇼크 (예상 하회)"
+                earnings_lines.append(
+                    f"{emoji} 최근 실적 ({re_earn['date']}): "
+                    f"EPS 실제 ${re_earn['actual_eps']} / 예상 ${re_earn.get('estimate_eps')} "
+                    f"({'+' if surprise > 0 else ''}{surprise}% — {label})"
+                )
 
-    re_earn = ec.get("recent_earnings")
-    if re_earn and re_earn.get("actual_eps") is not None:
-        surprise = re_earn.get("surprise_pct")
-        if surprise is not None:
-            emoji = "🟢" if surprise > 0 else "🔴"
-            label = "어닝 서프라이즈 (예상 상회)" if surprise > 0 else "어닝 쇼크 (예상 하회)"
-            earnings_lines.append(
-                f"{emoji} 최근 실적 ({re_earn['date']}): "
-                f"EPS 실제 ${re_earn['actual_eps']} / 예상 ${re_earn['estimate_eps']} "
-                f"({'+' if surprise > 0 else ''}{surprise}% — {label})"
-            )
+        rf = ec.get("last_financials") or ec.get("recent_financials")
+        if ec.get("show_result") and rf:
+            parts = []
+            if rf.get("revenue_b"):
+                parts.append(f"매출 ${rf['revenue_b']}B")
+            if rf.get("net_income_b"):
+                parts.append(f"순이익 ${rf['net_income_b']}B")
+            if rf.get("op_income_b"):
+                parts.append(f"영업이익 ${rf['op_income_b']}B")
+            if parts:
+                earnings_lines.append(
+                    f"📊 최근 분기 ({rf.get('quarter', '')}): " + " / ".join(parts)
+                )
 
-    rf = ec.get("recent_financials")
-    if rf:
-        parts = []
-        if rf.get("revenue_b"):    parts.append(f"매출 ${rf['revenue_b']}B")
-        if rf.get("net_income_b"): parts.append(f"순이익 ${rf['net_income_b']}B")
-        if rf.get("op_income_b"):  parts.append(f"영업이익 ${rf['op_income_b']}B")
-        if parts:
-            earnings_lines.append(
-                f"📊 최근 분기 ({rf.get('quarter', '')}): " + " / ".join(parts)
-            )
+        if ec.get("show_call") and ec.get("earnings_call"):
+            call = ec["earnings_call"]
+            earnings_lines.append(f"🎙️ 어닝콜 요약: {call.get('summary', '')}")
 
-    earnings_text = (
-        "\n".join(earnings_lines)
-        if earnings_lines
-        else "실적 데이터 없음 (ETF이거나 yfinance 수집 실패 — 추측 금지)"
-    )
+        earnings_text = (
+            "\n".join(earnings_lines)
+            if earnings_lines
+            else "실적 데이터 없음 (ETF이거나 yfinance 수집 실패 — 추측 금지)"
+        )
 
     psr_ttm = val.get("psr_ttm")
     psr_forward = val.get("psr_forward")
@@ -497,6 +506,13 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 
 ## 4. 뉴스/이슈 영향
 최신 뉴스가 주가에 미치는 영향
+
+## 4.5 실적·어닝 (StockAI DB 이력만 — yfinance 재조회·추측 금지)
+- 다음 실적일(show_next)이 있으면 일정·D-day·이벤트 리스크 명시
+- comparison_text / 실적 이력이 있으면 QoQ·YoY·beat/miss 연속성 반드시 해석
+- 어닝콜 요약(show_call)이 제공된 경우에만 핵심·가이던스 인용
+- DB에 없는 분기 수치·콜 발언·가이던스 창작 금지
+- 어닝 서프라이즈 ≠ 주가 상승 (기대 선반영 규칙 적용)
 
 ## 5. 단기 시나리오 (1~4주)
 - 🟢 강세 시나리오: 조건과 목표가 (엔진 Expected Return 인용)

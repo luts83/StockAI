@@ -81,6 +81,91 @@ def ensure_indexes():
         [("outcome_checked", 1), ("created_at", 1)],
         background=True,
     )
+    db["ticker_earnings"].create_index("updated_at", background=True)
+    db["earnings_history"].create_index([("ticker", 1), ("date", -1)], background=True)
+
+# ── 실적 분기 이력 (영구 보관) ───────────────────────────
+def _earnings_record_id(ticker: str, earnings_date: str) -> str:
+    return f"{(ticker or '').upper()}_{(earnings_date or '')[:10]}"
+
+
+def upsert_earnings_record(record: dict) -> str:
+    ticker = (record.get("ticker") or "").upper()
+    edate = (record.get("date") or "")[:10]
+    if not ticker or not edate:
+        raise ValueError("ticker and date required")
+    rid = _earnings_record_id(ticker, edate)
+    existing = get_db()["earnings_history"].find_one({"_id": rid}) or {}
+    payload = dict(existing)
+    payload.update(record)
+    payload["_id"] = rid
+    payload["ticker"] = ticker
+    payload["date"] = edate
+    if existing.get("earnings_call") and not record.get("earnings_call"):
+        payload["earnings_call"] = existing["earnings_call"]
+    payload["updated_at"] = datetime.utcnow().isoformat()
+    if "collected_at" not in payload:
+        payload["collected_at"] = payload["updated_at"]
+    get_db()["earnings_history"].replace_one(
+        {"_id": rid}, _json_safe(payload), upsert=True
+    )
+    return rid
+
+
+def get_earnings_record(ticker: str, earnings_date: str) -> dict | None:
+    rid = _earnings_record_id(ticker, earnings_date)
+    doc = get_db()["earnings_history"].find_one({"_id": rid})
+    if doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+
+def list_earnings_history(ticker: str, limit: int = 8) -> list:
+    t = (ticker or "").upper()
+    if not t:
+        return []
+    cursor = (
+        get_db()["earnings_history"]
+        .find({"ticker": t})
+        .sort("date", -1)
+        .limit(limit)
+    )
+    items = list(cursor)
+    for item in items:
+        item["_id"] = str(item["_id"])
+    return items
+
+
+def count_earnings_history(ticker: str) -> int:
+    t = (ticker or "").upper()
+    if not t:
+        return 0
+    return get_db()["earnings_history"].count_documents({"ticker": t})
+
+
+# ── 티커별 실적 프로필 (다음 일정·동기화 메타) ─────────
+def upsert_ticker_earnings(doc: dict) -> None:
+    ticker = (doc.get("ticker") or doc.get("_id") or "").upper()
+    if not ticker:
+        raise ValueError("ticker required")
+    payload = dict(doc)
+    payload["_id"] = ticker
+    payload["ticker"] = ticker
+    payload["updated_at"] = payload.get("updated_at") or datetime.utcnow().isoformat()
+    get_db()["ticker_earnings"].replace_one(
+        {"_id": ticker}, _json_safe(payload), upsert=True
+    )
+
+
+def get_ticker_earnings(ticker: str) -> dict | None:
+    t = (ticker or "").upper()
+    if not t:
+        return None
+    doc = get_db()["ticker_earnings"].find_one({"_id": t})
+    if doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
 
 # ── 분석 저장 ──────────────────────────────────────────
 def save_analysis(ticker: str, period: str, indicators: dict,
@@ -89,7 +174,8 @@ def save_analysis(ticker: str, period: str, indicators: dict,
                   change_pct: float = None, valuation: dict = None,
                   data_date: str = None,
                   llm_signal: str = None,
-                  signal_engine: dict = None) -> str:
+                  signal_engine: dict = None,
+                  earnings_snapshot: dict = None) -> str:
     db = get_db()
     doc_id = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     doc = {
@@ -106,6 +192,7 @@ def save_analysis(ticker: str, period: str, indicators: dict,
         "signal":        signal,
         "llm_signal":    llm_signal or signal,
         "signal_engine": signal_engine or {},
+        "earnings_snapshot": earnings_snapshot or {},
         "news":          news,
         "chart_b64":     chart_b64,
         "chat_history":  [],
