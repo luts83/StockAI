@@ -3100,7 +3100,8 @@ async function generateBrief(type) {
       throw new Error(err.detail || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    alert(`✅ 시황 생성 완료 (SIGNAL: ${data.signal})`);
+    const asOfHint = data.as_of ? ` · 기준일 ${data.as_of}` : "";
+    alert(`✅ 시황 생성 완료 (SIGNAL: ${data.signal}${asOfHint})`);
     await loadMarketBanner();
   } catch(e) {
     console.error("[generateBrief]", e);

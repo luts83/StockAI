@@ -1556,6 +1556,22 @@ def _build_prev_context(brief_type: str, prefer_date: str | None = None) -> str:
     )
 
 
+def resolve_manual_brief_as_of(brief_type: str, as_of: str | None = None) -> str | None:
+    """수동 시황 생성: as_of 미지정 + 주말이면 대상 시장 직전 거래일로 자동 설정."""
+    if as_of:
+        return as_of
+    if brief_type not in BRIEF_TYPES:
+        return None
+    target_market = BRIEF_TYPES[brief_type]["market"]
+    region = "한국" if target_market == "한국" else "미국"
+    tz_name = "Asia/Seoul" if region == "한국" else "America/New_York"
+    now_local = datetime.now(pytz.timezone(tz_name))
+    if now_local.weekday() >= 5:
+        prev = _prev_session_date(region, now_local.date())
+        return prev.strftime("%Y-%m-%d")
+    return None
+
+
 async def generate_market_brief(brief_type: str, as_of: str | None = None) -> dict:
     """as_of: 'YYYY-MM-DD' — 해당일 정규 시각 기준으로 백필/재생성."""
     from database import get_recent_market_briefs

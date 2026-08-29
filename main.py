@@ -54,7 +54,7 @@ from signal_engine import (
     resolve_display_signal,
     ENGINE_VERSION as SIGNAL_ENGINE_VERSION,
 )
-from market_brief import generate_market_brief
+from market_brief import generate_market_brief, resolve_manual_brief_as_of
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from auth import (
@@ -1375,9 +1375,23 @@ async def generate_brief(
     if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
         raise HTTPException(status_code=403, detail="관리자 전용")
 
-    brief  = await generate_market_brief(brief_type, as_of=as_of)
+    effective_as_of = resolve_manual_brief_as_of(brief_type, as_of)
+    if effective_as_of and not as_of:
+        print(f"[market_brief] 주말 수동 생성 → as_of={effective_as_of} 자동 지정 ({brief_type})")
+
+    try:
+        brief = await generate_market_brief(brief_type, as_of=effective_as_of)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
     doc_id = save_market_brief(brief)
-    return {"ok": True, "id": doc_id, "signal": brief["signal"], "date": brief["date"]}
+    return {
+        "ok": True,
+        "id": doc_id,
+        "signal": brief["signal"],
+        "date": brief["date"],
+        "as_of": effective_as_of,
+    }
 
 
 @app.delete("/market/brief/{doc_id}")
