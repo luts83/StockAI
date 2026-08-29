@@ -419,6 +419,19 @@ CROSS_MARKET_RULE = """
 - 마감 리포트: **오늘 해당 시장 세션 안에서** 무슨 일이 있었는지 확정 스냅샷 + 교차시장 함의
 """
 
+CLOSE_REPORT_RULE = """
+[마감 리포트 전용 — us_close / kr_close, ###1~6에 최우선 적용]
+1. **시간축**: 오늘 해당 시장 정규장은 **이미 마감**. 독자에게 "오늘 장 결과"를 알려주는 리포트.
+2. **과거형 서술**: ###1~6에서 "주목", "지켜볼", "예정", "앞으로", "개장 전" 금지.
+   - 세션 중 이미 끝난 이벤트(연준 연설·경제지표·실적): **무슨 일이 있었고 → 시장이 어떻게 반응했는지**까지 과거형으로.
+   - ❌ "워시 연설 주목" / ✅ "워시 연설에서 금리 인상 시사 → SMH ▼3.5% 급락"
+3. **###0 vs ###1 분리**
+   - ###0 '전망:' 줄 = **장전 시점 인용**(그대로, 수정 금지). 미래형·'주목' 표현이 있어도 OK.
+   - ###1~6 = 장전 문구 **복붙·반복 금지**. 오늘 세션에서 **실제로 일어난 일**만 간결히 재서술.
+4. **###1 흐름**: 4~6문장, 시간순 한 줄기 — (1) 핵심 촉매 (2) 섹터·특징주 (3) 지수·시장폭 (4) 한국 연결(해당 시).
+5. **판정 이유(###0)**: SPY/QQQ 등 **채점 벤치마크** 중심. 장전 인용 속 한국·연설 '주목'은 배경만 — 실제 연설·반응은 결과로 서술.
+"""
+
 
 def _brief_type_rule(brief_type: str) -> str:
     """장전 vs 마감, 4종별 작성 목표."""
@@ -451,10 +464,11 @@ def _brief_type_rule(brief_type: str) -> str:
         "us_close": """
 [이 리포트 = 🇺🇸 미국 **마감** — 장전과 목표가 다름]
 - 독자: 오늘 미국장을 못 본 사람 → **오늘 US 세션 확정 결과** + 다음 한국장 함의
-- 시간축: **오늘 SPY/QQQ/SMH 마감** + 오늘 촉매·특징주 + **오늘 한국 마감과의 연결**
-- 장전(us_premarket) 전망을 ###0에서 채점. 장전 서술 반복 금지 — **오늘 미국 확정** 중심
-- ###1 흐름: 오늘 미국 촉매 → 섹터·특징주 → 지수. 마지막에 **다음 한국장(삼성·하이닉스)** 시사점
-- 한국이 먼저 움직였다면: "한국 반도체 ▲ → 오늘 미국 SMH ▲/▼" 인과 또는 괴리 명시
+- 시간축: **오늘 SPY/QQQ/SMH 마감** + **오늘 장 중** 촉매·연설·특징주 + 오늘 한국 마감과의 연결
+- 장전(us_premarket) 전망은 ###0에서만 인용·채점. ###1~6에 장전 문구 복붙 금지
+- ###1: **오늘 미국장이 어땠는지** 4~6문장 (촉매→반응→섹터→지수). 이미 끝난 연설·지표는 **결과까지** 과거형
+- "주목·지켜볼·예정"은 ###5(다음 한국장 전망)에만 — ###1~4 금지
+- 마지막: **다음 한국장(삼성·하이닉스)** 시사점은 ###5에
 """,
     }
     return rules.get(brief_type, "")
@@ -494,15 +508,14 @@ def _verify_block(
 
     blocks = [f"""### 0. 직전 전망 검증
 (직전 시황 없으면 생략)
-**전망 인용 없이 적중/빗나감 판정 금지.** 아래 '전망:'은 Mongo 직전 시황에서 채운 문장이다.
+**전망 인용 없이 적중/빗나감 판정 금지.** 아래 '전망:'은 Mongo 직전 **장전** 시황 인용(수정 금지).
 
-#### 직전 전망
 - 전망: {cite_line}
-  ※ 위 줄을 수정·삭제·'-'로 바꾸지 말 것. SIGNAL과 근거가 보여야 함
+  ※ 위 줄은 장전 시점 그대로 — '주목' 등 미래형 표현이 있어도 수정하지 말 것
 - 실제 결과: {result_metrics}
 - 판정: 적중 / 부분 적중 / 빗나감 중 하나
   (인용이 "전망 기록 없음"이면 판정=**검증 불가** — 적중/빗나감 금지)
-- 판정 이유: 인용한 전망(SIGNAL·근거)과 실제 수치를 대응해 1~2문장
+- 판정 이유: **벤치마크 {bench} 등락**과 SIGNAL 대응 1~2문장 (과거형)
   [판정 기준 — 벤치마크 {bench}, 중립 밴드 ±0.3%]
   · BULL → {bench} ≥ +0.3% 적중, |Δ|<0.3% 부분 적중, ≤ −0.3% 빗나감
   · BEAR → {bench} ≤ −0.3% 적중, |Δ|<0.3% 부분 적중, ≥ +0.3% 빗나감
@@ -1394,6 +1407,25 @@ def _force_verify_citations(analysis: str, cites: list[str]) -> str:
     return analysis[:start] + header + new_body + analysis[body_end:]
 
 
+def _normalize_brief_headers(analysis: str) -> str:
+    """LLM이 붙여 쓴 ###0 헤더·중복 소제목 정리."""
+    if not analysis:
+        return analysis
+    text = analysis
+    text = re.sub(
+        r"(?:^|\n)(?:###\s*)?0\.\s*직전\s*전망\s*검증\s*[-–—]?\s*",
+        "\n### 0. 직전 전망 검증\n\n",
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r"\n####\s*직전\s*전망\s*\n",
+        "\n",
+        text,
+    )
+    return text.strip()
+
+
 def _repair_truncated_brief_tail(analysis: str) -> str:
     """한 줄 요약·미완성 마크다운 잘림 보정."""
     if not analysis:
@@ -1963,6 +1995,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {STRICT_RULE}
 {AUDIENCE_RULE}
 {CROSS_MARKET_RULE}
+{CLOSE_REPORT_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
@@ -2030,7 +2063,10 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
             mode="score",
             cite=us_pm_cite,
-            extra="검증 대상은 오늘 us_premarket의 '오늘 미국장' 전망이다.",
+            extra=(
+                "검증 대상: 오늘 us_premarket의 '오늘 미국장' 전망. "
+                "판정 이유는 SPY·QQQ·SMH 수치 중심 — 장전 '주목'은 오늘 실제 발생·반응으로 해석."
+            ),
         )
         psych = _psych_block(impact_header=f"{next_trading_label} 한국 영향")
         outlook = _outlook_block(
@@ -2045,6 +2081,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {STRICT_RULE}
 {AUDIENCE_RULE}
 {CROSS_MARKET_RULE}
+{CLOSE_REPORT_RULE}
 {ENGINE_STRUCTURE_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
@@ -2209,6 +2246,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     # ###0 전망 인용 강제 주입 + 잘린 한줄요약 보정
     analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
+    analysis_clean = _normalize_brief_headers(analysis_clean)
     analysis_clean = _repair_truncated_brief_tail(analysis_clean)
 
     # created_at은 실제 생성 시각(재생성 시 최신으로 올라오게)
