@@ -1536,6 +1536,14 @@ def _find_verify_span(analysis: str) -> tuple[int, int] | None:
     return start, end
 
 
+def _get_ticker_data(market_data: dict, ticker: str) -> dict | None:
+    """TICKERS 중첩 구조에서 티커 데이터 조회 (미국/섹터/한국 등)."""
+    for region_data in (market_data or {}).values():
+        if isinstance(region_data, dict) and ticker in region_data:
+            return region_data[ticker]
+    return None
+
+
 def _inject_scored_verify(
     analysis: str,
     entries: list[dict],
@@ -1563,12 +1571,12 @@ def _inject_scored_verify(
             continue
 
         region, ticker, label = ent["bench"]
-        d = (market_data.get(region) or {}).get(ticker)
+        d = _get_ticker_data(market_data, ticker)
         signal = _parse_signal_from_cite(cite)
         result_parts = [_fmt_pct_metric(label, d)]
         extra_chgs: list[tuple[str, float]] = []
         for er, et, el in ent.get("extras") or []:
-            ed = (market_data.get(er) or {}).get(et)
+            ed = _get_ticker_data(market_data, et)
             result_parts.append(_fmt_pct_metric(el, ed))
             if ed and _is_finite(ed.get("change_pct")):
                 extra_chgs.append((el, float(ed["change_pct"])))
@@ -1577,6 +1585,10 @@ def _inject_scored_verify(
             bench_chg = float(d["change_pct"])
             verdict = _verdict_for_signal(signal, bench_chg)
             reason = _verdict_reason(signal, verdict, label, bench_chg, extra_chgs)
+            if verdict == "부분 적중" and extra_chgs:
+                strong = [n for n, c in extra_chgs if abs(c) >= 0.3]
+                if strong and signal == "BEAR" and bench_chg > -0.3:
+                    reason += f" {', '.join(strong)} 등은 약세 폭이 컸습니다."
         else:
             verdict = "검증 불가"
             reason = f"{label} 마감 수치가 없어 채점할 수 없습니다."
