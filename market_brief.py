@@ -1436,15 +1436,166 @@ def _replace_forecast_lines(block: str, cites: list[str]) -> tuple[str, int]:
         block,
         flags=re.MULTILINE,
     )
-    if idx == 0 and cites:
-        new_block = "\n".join(f"- 전망: {c}" for c in cites) + "\n" + new_block
-        idx = len(cites)
-    elif idx < len(cites):
+    if idx < len(cites):
         new_block = new_block.rstrip() + "\n" + "\n".join(
             f"- 전망: {c}" for c in cites[idx:]
         ) + "\n"
         idx = len(cites)
     return new_block, idx
+
+
+def _parse_signal_from_cite(cite: str) -> str:
+    m = re.search(r"SIGNAL:(BULL|BEAR|NEUTRAL)", cite or "", re.I)
+    return (m.group(1) if m else "NEUTRAL").upper()
+
+
+def _verdict_for_signal(signal: str, change_pct: float, band: float = 0.3) -> str:
+    """±band% 중립 밴드 — save_brief_performance와 동일 기준."""
+    sig = (signal or "NEUTRAL").upper()
+    chg = float(change_pct)
+    if sig == "BULL":
+        if chg >= band:
+            return "적중"
+        if abs(chg) < band:
+            return "부분 적중"
+        return "빗나감"
+    if sig == "BEAR":
+        if chg <= -band:
+            return "적중"
+        if abs(chg) < band:
+            return "부분 적중"
+        return "빗나감"
+    if abs(chg) < band:
+        return "적중"
+    return "부분 적중"
+
+
+def _fmt_pct_metric(label: str, d: dict | None) -> str:
+    if not d or not _is_finite(d.get("change_pct")):
+        return f"{label} —"
+    chg = float(d["change_pct"])
+    sign = "▲" if chg >= 0 else "▼"
+    stale = " (전일)" if d.get("stale") else ""
+    return f"{label} {sign}{abs(chg):.2f}%{stale}"
+
+
+def _verdict_reason(
+    signal: str,
+    verdict: str,
+    bench_label: str,
+    bench_chg: float,
+    extras: list[tuple[str, float]],
+) -> str:
+    sig = signal.upper()
+    parts: list[str] = []
+    if verdict == "적중":
+        parts.append(
+            f"{sig} 전망과 {bench_label} {bench_chg:+.2f}% 방향이 일치했습니다."
+        )
+    elif verdict == "부분 적중":
+        if abs(bench_chg) < 0.3:
+            parts.append(
+                f"{sig} 전망 대비 {bench_label} {bench_chg:+.2f}%는 "
+                f"중립 밴드(±0.3%) 안입니다."
+            )
+        else:
+            parts.append(
+                f"{sig} 전망과 {bench_label} {bench_chg:+.2f}%는 방향은 맞으나 "
+                f"폭이 약합니다."
+            )
+        aligned = [
+            f"{name} {c:+.2f}%"
+            for name, c in extras
+            if (sig == "BEAR" and c <= -0.3) or (sig == "BULL" and c >= 0.3)
+        ]
+        if aligned:
+            parts.append(f"보조 지표({', '.join(aligned)})는 전망 방향을 뒷받침합니다.")
+    else:
+        parts.append(
+            f"{sig} 전망과 {bench_label} {bench_chg:+.2f}% 방향이 어긋났습니다."
+        )
+    return " ".join(parts)
+
+
+def _find_verify_span(analysis: str) -> tuple[int, int] | None:
+    if not analysis:
+        return None
+    m = re.search(r"###\s*0\.\s*직전 전망 검증", analysis)
+    if not m:
+        m = re.search(r"^0\.\s*직전 전망 검증", analysis, re.MULTILINE)
+    if not m:
+        return None
+    start = m.start()
+    rest = analysis[m.end() :]
+    end_m = re.search(
+        r"\n(?:---\s*\n|###\s*[1-9]\.\s*|^[1-9]\.\s*[📖🇺🇸🇰🇷🔮💡])",
+        rest,
+        re.MULTILINE,
+    )
+    end = m.end() + (end_m.start() if end_m else len(rest))
+    return start, end
+
+
+def _inject_scored_verify(
+    analysis: str,
+    entries: list[dict],
+    market_data: dict,
+) -> str:
+    """마감 시황 ###0 — 수치·판정·이유를 코드로 확정 (LLM 오류·중복 방지)."""
+    span = _find_verify_span(analysis)
+    if not span or not entries:
+        return analysis
+
+    old = analysis[span[0] : span[1]]
+    next_m = re.search(
+        r"(?:다음\s*(?:전망\s*)?반영)\s*[:：]\s*(.+)",
+        old,
+        re.MULTILINE,
+    )
+    next_reflect = (next_m.group(1).strip() if next_m else "")[:220]
+
+    lines = ["### 0. 직전 전망 검증", ""]
+    for i, ent in enumerate(entries):
+        cite = _sanitize_full_cite(ent.get("cite") or "") or "전망 기록 없음"
+        if cite == "전망 기록 없음":
+            lines.append("- **전망**: 기록 없음 — 판정 불가")
+            lines.append("")
+            continue
+
+        region, ticker, label = ent["bench"]
+        d = (market_data.get(region) or {}).get(ticker)
+        signal = _parse_signal_from_cite(cite)
+        result_parts = [_fmt_pct_metric(label, d)]
+        extra_chgs: list[tuple[str, float]] = []
+        for er, et, el in ent.get("extras") or []:
+            ed = (market_data.get(er) or {}).get(et)
+            result_parts.append(_fmt_pct_metric(el, ed))
+            if ed and _is_finite(ed.get("change_pct")):
+                extra_chgs.append((el, float(ed["change_pct"])))
+
+        if d and _is_finite(d.get("change_pct")):
+            bench_chg = float(d["change_pct"])
+            verdict = _verdict_for_signal(signal, bench_chg)
+            reason = _verdict_reason(signal, verdict, label, bench_chg, extra_chgs)
+        else:
+            verdict = "검증 불가"
+            reason = f"{label} 마감 수치가 없어 채점할 수 없습니다."
+
+        title = ent.get("title") or ""
+        if title:
+            lines.append(f"#### {title}")
+        lines.extend([
+            f"- **전망** (장전): {cite}",
+            f"- **실제 결과**: {', '.join(result_parts)}",
+            f"- **판정**: {verdict}",
+            f"- **판정 이유**: {reason}",
+        ])
+        if i == 0 and next_reflect:
+            lines.append(f"- **다음 반영**: {next_reflect}")
+        lines.append("")
+
+    new_section = "\n".join(lines).rstrip() + "\n"
+    return analysis[: span[0]] + new_section + analysis[span[1] :]
 
 
 def _force_verify_citations(analysis: str, cites: list[str]) -> str:
@@ -1478,7 +1629,23 @@ def _force_verify_citations(analysis: str, cites: list[str]) -> str:
     body_end = start + header_len + (end_m.start() if end_m else len(rest))
     header = analysis[start : start + header_len]
     body = analysis[start + header_len : body_end]
-    new_body, _ = _replace_forecast_lines(body, cites)
+    new_body, used = _replace_forecast_lines(body, cites)
+    # 중복 '전망:' 줄 제거 — cite 1개만 유지
+    if cites and used:
+        cite_line = cites[0]
+        kept: list[str] = []
+        seen_forecast = False
+        for line in new_body.splitlines():
+            if re.match(r"^[ \t]*[-*•]?\s*전망\s*:", line):
+                if seen_forecast:
+                    continue
+                seen_forecast = True
+                kept.append(f"- **전망**: {cite_line}")
+                continue
+            kept.append(line)
+        new_body = "\n".join(kept)
+        if not seen_forecast:
+            new_body = f"- **전망**: {cite_line}\n" + new_body
     return analysis[:start] + header + new_body + analysis[body_end:]
 
 
@@ -1959,6 +2126,7 @@ async def generate_market_brief(
     brief_type_rule = _brief_type_rule(brief_type)
 
     verify_cites: list[str] = []
+    verify_entries: list[dict] = []
 
     if brief_type == "us_premarket":
         _, us_close_cite = _load_brief_cite("us_close")
@@ -2055,6 +2223,20 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         _, kr_pm_cite = _load_brief_cite("kr_premarket", prefer_date=today)
         _, us_close_cite = _load_brief_cite("us_close")  # 간밤 — 최근 us_close
         verify_cites = [c for c in (kr_pm_cite, us_close_cite) if c]
+        verify_entries = []
+        if kr_pm_cite:
+            verify_entries.append({
+                "cite": kr_pm_cite,
+                "bench": ("한국", "^KS11", "KOSPI"),
+                "extras": [("한국", "^KQ11", "KOSDAQ")],
+            })
+        if us_close_cite:
+            verify_entries.append({
+                "cite": us_close_cite,
+                "bench": ("한국", "^KS11", "KOSPI"),
+                "extras": [],
+                "title": "간밤 미국→한국 전망 (us_close)",
+            })
         secondary = []
         if us_close_cite:
             secondary.append(("간밤 미국→한국 전망 (us_close)", us_close_cite))
@@ -2145,6 +2327,16 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
                 f"###0 전망 인용 불가 (장전 시황 먼저 생성 권장)"
             )
         verify_cites = [c for c in (us_pm_cite,) if c]
+        verify_entries = [
+            {
+                "cite": us_pm_cite,
+                "bench": ("미국", "SPY", "SPY"),
+                "extras": [
+                    ("미국", "QQQ", "QQQ"),
+                    ("미국", "SMH", "SMH"),
+                ],
+            }
+        ] if us_pm_cite else []
         verify0 = _verify_block(
             bench="SPY",
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
@@ -2334,8 +2526,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
-    # ###0 전망 인용 강제 주입 + 잘린 한줄요약 보정
-    analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
+    # ###0 마감 검증 — 수치·판정 코드 확정 / 장전은 cite만 보정
+    if verify_entries:
+        analysis_clean = _inject_scored_verify(
+            analysis_clean, verify_entries, market_data
+        )
+    elif verify_cites:
+        analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
     analysis_clean = _normalize_brief_headers(analysis_clean)
     analysis_clean = _repair_truncated_brief_tail(analysis_clean)
 

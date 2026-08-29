@@ -3053,7 +3053,8 @@ function _extractVerifyChip(analysis) {
   if (!analysis) return null;
   const block = analysis.match(/###\s*0\.\s*직전 전망 검증[\s\S]*?(?=\n---|\n###\s*[1-9]|$)/);
   if (!block) return null;
-  const verdict = block[0].match(/판정:\s*(적중|부분 적중|빗나감|검증 불가|검증 보류)/);
+  const verdict = block[0].match(/\*\*판정\*\*:\s*(적중|부분 적중|빗나감|검증 불가|검증 보류)/)
+    || block[0].match(/판정:\s*(적중|부분 적중|빗나감|검증 불가|검증 보류)/);
   if (!verdict) return null;
   const label = verdict[1];
   const ok = label === "적중";
