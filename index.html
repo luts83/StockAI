@@ -621,8 +621,8 @@ header {
       align-items:center; gap:6px;"></div>
     <div style="padding:14px 18px;">
       <div id="banner-summary"
-        style="font-size:13px; color:var(--muted);
-        line-height:1.6;"></div>
+        style="font-size:14px; color:var(--text, #e2e8f0);
+        line-height:1.65; font-weight:500;"></div>
     </div>
     <div style="padding:0 18px 14px; display:flex;
       justify-content:space-between; align-items:center;">
@@ -3021,6 +3021,47 @@ const BRIEF_LABELS = {
   close:        "📈 마감 시황",
 };
 
+function _stripBriefMd(text) {
+  return (text || "")
+    .replace(/\*\*/g, "")
+    .replace(/^[-*\s]+/, "")
+    .trim();
+}
+
+function _extractBannerSummary(analysis) {
+  if (!analysis) return "";
+  const oneLine = analysis.match(
+    /###\s*(?:\d+\.\s*)?(?:💡\s*)?(?:오늘\s*)?한\s*줄\s*요약[\s\S]*?\n+([^\n#]+)/
+  );
+  if (oneLine) return _stripBriefMd(oneLine[1]);
+
+  const flow = analysis.match(
+    /###\s*1\.\s*[^\n]*\n+([\s\S]*?)(?=\n---|\n###\s*[2-9]|$)/
+  );
+  if (flow) {
+    for (const raw of flow[1].split("\n")) {
+      const line = _stripBriefMd(raw);
+      if (line.length >= 20 && !line.startsWith("전망:") && !line.includes("SIGNAL:")) {
+        return line.length > 160 ? `${line.slice(0, 157)}…` : line;
+      }
+    }
+  }
+  return "";
+}
+
+function _extractVerifyChip(analysis) {
+  if (!analysis) return null;
+  const block = analysis.match(/###\s*0\.\s*직전 전망 검증[\s\S]*?(?=\n---|\n###\s*[1-9]|$)/);
+  if (!block) return null;
+  const verdict = block[0].match(/판정:\s*(적중|부분 적중|빗나감|검증 불가|검증 보류)/);
+  if (!verdict) return null;
+  const label = verdict[1];
+  const ok = label === "적중";
+  const partial = label === "부분 적중" || label === "검증 보류";
+  const color = ok ? "var(--green)" : partial ? "var(--yellow, #f59e0b)" : "var(--red)";
+  return { text: `직전 전망 · ${label}`, color };
+}
+
 function _applyBriefToBanner(brief) {
   const s = SIGNAL_MAP[brief.signal] || SIGNAL_MAP.NEUTRAL;
   const typeLabel = BRIEF_LABELS[brief.type] || "📊 시황";
@@ -3044,32 +3085,21 @@ function _applyBriefToBanner(brief) {
       : `(${Math.floor(diff / 60)}시간 전)`;
   }
 
-  // 직전 전망 검증 한 줄 추출 (### 0. 섹션 첫 번째 내용 줄)
   const verifyEl = document.getElementById("banner-verify");
+  const chip = _extractVerifyChip(brief.analysis);
   if (verifyEl) {
-    const verifyMatch = brief.analysis.match(
-      /###\s*0\.\s*직전 전망 검증[\s\S]*?\n([^\n#]+)/
-    );
-    if (verifyMatch) {
-      const text = verifyMatch[1].replace(/^[-*\s]+/, "").trim();
-      const isCorrect = text.includes("✅");
+    if (chip) {
       verifyEl.style.display = "flex";
-      verifyEl.innerHTML = `<span style="font-size:11px; color:${isCorrect ? "var(--green)" : "var(--yellow, #f59e0b)"};">${text}</span>`;
+      verifyEl.innerHTML =
+        `<span style="font-size:11px; font-weight:600; color:${chip.color};">${chip.text}</span>`;
     } else {
       verifyEl.style.display = "none";
     }
   }
 
-  // 한 줄 요약 섹션 우선 추출, 없으면 마지막 줄 fallback
-  const _briefText = brief.analysis;
-  const summaryMatch = _briefText.match(
-    /###\s*\d+\.\s*(?:💡\s*)?(?:오늘의\s*)?한 줄 요약[\s\S]*?\n([^\n#]+)/
-  );
-  const summary = summaryMatch
-    ? summaryMatch[1].replace(/^[-*\s]+/, "").trim()
-    : _briefText.split("\n").filter(l => l.trim()).pop()
-                .replace(/^[#*\-\s]+/, "").trim();
-  document.getElementById("banner-summary").textContent = summary;
+  const summary = _extractBannerSummary(brief.analysis);
+  document.getElementById("banner-summary").textContent =
+    summary || "시황 요약을 불러오지 못했습니다. 전체 보기를 눌러주세요.";
 
   document.getElementById("market-banner").style.display = "block";
 }
