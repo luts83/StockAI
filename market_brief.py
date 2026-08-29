@@ -4,6 +4,7 @@ import time
 import asyncio
 import anthropic
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import pytz
 from news import fetch_macro_news, format_macro_news_for_brief
@@ -571,28 +572,36 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
-BRIEF_MAX_TOKENS = 8192
+BRIEF_MAX_TOKENS = 4096
 BRIEF_CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
+_YF_POOL_WORKERS = 12
 
 
-def _call_brief_claude(prompt: str, brief_type: str):
-    """동기 Claude 호출 — asyncio.to_thread에서 실행."""
-    client = anthropic.Anthropic()
+def _call_brief_claude(prompt: str, brief_type: str) -> str:
+    """Claude 스트리밍 호출 — 긴 응답에서 연결 끊김 방지."""
+    client = anthropic.Anthropic(timeout=600.0)
     last_err = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
-            return client.messages.create(
+            parts: list[str] = []
+            with client.messages.stream(
                 model=BRIEF_CLAUDE_MODEL,
                 max_tokens=BRIEF_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
-            )
+            ) as stream:
+                for chunk in stream.text_stream:
+                    parts.append(chunk)
+            text = "".join(parts).strip()
+            if text:
+                return text
+            raise RuntimeError("Claude empty response")
         except anthropic.APIConnectionError as e:
             last_err = e
-            if attempt < 2:
-                wait = 5 * (attempt + 1)
+            if attempt < 4:
+                wait = 10 * (attempt + 1)
                 print(
                     f"[market_brief] Claude 연결 실패 ({brief_type}) "
-                    f"— {wait}s 후 재시도 ({attempt + 1}/2)"
+                    f"— {wait}s 후 재시도 ({attempt + 1}/4)"
                 )
                 time.sleep(wait)
     raise last_err
@@ -686,7 +695,7 @@ CIRCULATION_FEED = {
 
 
 def _get_tomorrow_events(now) -> str:
-    """yfinance로 다음날 주요 실적발표 일정 수집"""
+    """yfinance로 다음날 주요 실적발표 일정 수집 (병렬)."""
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     lines = [f"[내일({tomorrow}) 주요 일정]"]
 
@@ -694,20 +703,25 @@ def _get_tomorrow_events(now) -> str:
         "ORCL", "CHWY", "AVGO", "ADBE", "FDX", "COST", "WMT", "TGT", "HD", "LOW",
         "BABA", "DE", "ROST", "AMAT", "MSFT", "NVDA", "CRM", "PANW",
     ]
-    earnings_tomorrow = []
-    for t in watch_tickers:
+
+    def _earn_on(t: str) -> str | None:
         try:
             cal = yf.Ticker(t).calendar
-            if cal is not None and not cal.empty:
-                earn_date = str(
-                    cal.columns[0].date()
-                    if hasattr(cal.columns[0], "date")
-                    else cal.columns[0]
-                )[:10]
-                if earn_date == tomorrow:
-                    earnings_tomorrow.append(t)
+            if cal is None or cal.empty:
+                return None
+            col0 = cal.columns[0]
+            earn_date = str(
+                col0.date() if hasattr(col0, "date") else col0
+            )[:10]
+            return t if earn_date == tomorrow else None
         except Exception:
-            continue
+            return None
+
+    earnings_tomorrow: list[str] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for sym in pool.map(_earn_on, watch_tickers):
+            if sym:
+                earnings_tomorrow.append(sym)
 
     if earnings_tomorrow:
         lines.append(f"실적발표: {', '.join(earnings_tomorrow)}")
@@ -907,17 +921,54 @@ def get_market_data(
     now_kst: datetime | None = None,
 ) -> dict:
     """now_et/now_kst를 주면 그 시점 기준으로 봉을 자른다(백필/재생성용)."""
-    result = {}
+    result = {region: {} for region in TICKERS}
+    jobs: list[tuple[str, str, str, datetime | None]] = []
     for region, tickers in TICKERS.items():
-        result[region] = {}
         now_ex = now_kst if region == "한국" else now_et
         for ticker, name in tickers.items():
-            d = _fetch_ticker(ticker, name, now_ex=now_ex)
+            jobs.append((region, ticker, name, now_ex))
+
+    with ThreadPoolExecutor(max_workers=_YF_POOL_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_ticker, ticker, name, now_ex=now_ex): (region, ticker)
+            for region, ticker, name, now_ex in jobs
+        }
+        for fut in as_completed(futures):
+            region, ticker = futures[fut]
+            try:
+                d = fut.result()
+            except Exception:
+                d = None
             if d:
                 result[region][ticker] = d
+
     total = sum(len(v) for v in result.values())
     print(f"[market_brief] 총 {total}개 지수 수집 완료")
     return result
+
+
+async def get_market_data_async(
+    now_et: datetime | None = None,
+    now_kst: datetime | None = None,
+) -> dict:
+    return await asyncio.to_thread(get_market_data, now_et=now_et, now_kst=now_kst)
+
+
+def _flatten_market_data(market_data: dict) -> dict[str, dict]:
+    """지수·섹터·크립토 등 flat dict — movers 중복 fetch 방지."""
+    flat: dict[str, dict] = {}
+    for region_data in (market_data or {}).values():
+        if isinstance(region_data, dict):
+            flat.update(region_data)
+    return flat
+
+
+def _mover_usable(d: dict | None) -> bool:
+    return bool(
+        d
+        and not d.get("stale")
+        and _is_finite(d.get("change_pct"))
+    )
 
 
 def fetch_fear_greed() -> dict | None:
@@ -1085,20 +1136,34 @@ async def fetch_movers_async(
     *,
     top: int = 5,
     bottom: int = 5,
+    prefetched: dict[str, dict] | None = None,
 ) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]]:
     """유니버스 스캔 → 당일 급등·급락 상위."""
+    prefetched = prefetched or {}
+    to_fetch = [
+        sym for sym in candidates
+        if not _mover_usable(prefetched.get(sym))
+    ]
     tasks = [
         asyncio.to_thread(_fetch_ticker, sym, candidates[sym], now_ex=now_ex)
-        for sym in candidates
+        for sym in to_fetch
     ]
-    fetched = await asyncio.gather(*tasks, return_exceptions=True)
+    fetched = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
     rows: list[tuple[str, dict]] = []
-    for sym, d in zip(candidates, fetched):
+    for sym, d in zip(to_fetch, fetched):
         if isinstance(d, Exception) or not d:
             continue
         if d.get("stale") or not _is_finite(d.get("change_pct")):
             continue
         rows.append((sym, d))
+    for sym in candidates:
+        if sym in prefetched and _mover_usable(prefetched[sym]):
+            cached = prefetched[sym]
+            if not any(t == sym for t, _ in rows):
+                rows.append((sym, cached))
+    skipped = len(candidates) - len(to_fetch)
+    if skipped:
+        print(f"[market_brief] movers 캐시 재사용 {skipped}종", flush=True)
     rows.sort(key=lambda x: x[1]["change_pct"], reverse=True)
     gainers = [(t, d) for t, d in rows if d["change_pct"] > 0][:top]
     losers = sorted(
@@ -1112,10 +1177,19 @@ async def fetch_movers_async(
     return gainers, losers
 
 
-async def collect_movers(now_et, now_kst) -> dict:
+async def collect_movers(
+    now_et,
+    now_kst,
+    prefetched: dict[str, dict] | None = None,
+) -> dict:
     """미국·한국 특징주 병렬 수집."""
-    us_g, us_l = await fetch_movers_async(US_MOVER_CANDIDATES, now_et)
-    kr_g, kr_l = await fetch_movers_async(KR_MOVER_CANDIDATES, now_kst)
+    prefetched = prefetched or {}
+    us_g, us_l = await fetch_movers_async(
+        US_MOVER_CANDIDATES, now_et, prefetched=prefetched
+    )
+    kr_g, kr_l = await fetch_movers_async(
+        KR_MOVER_CANDIDATES, now_kst, prefetched=prefetched
+    )
     return {
         "us_gainers": us_g,
         "us_losers": us_l,
@@ -1654,18 +1728,29 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         wd = WEEKDAY_KR[now_target.weekday()]
         raise RuntimeError(f"주말({wd}요일) — 시황 생성 안 함")
 
-    market_data = get_market_data(now_et=now_et, now_kst=now_kst)
-    macro_news, movers = await asyncio.gather(
-        asyncio.to_thread(fetch_macro_news, 5),
-        collect_movers(now_et, now_kst),
-    )
-    news_text = format_macro_news_for_brief(macro_news)
-    print(f"[market_brief] macro·movers 수집 완료 ({brief_type})")
-
-    fear_greed = None
+    t_collect = time.monotonic()
     if brief_type.startswith("us"):
-        fear_greed = await asyncio.to_thread(fetch_fear_greed)
-        print(f"[market_brief] fear_greed 수집 완료 ({brief_type})")
+        market_data, macro_news, tomorrow_events, fear_greed = await asyncio.gather(
+            get_market_data_async(now_et=now_et, now_kst=now_kst),
+            asyncio.to_thread(fetch_macro_news, 5),
+            asyncio.to_thread(_get_tomorrow_events, now),
+            asyncio.to_thread(fetch_fear_greed),
+        )
+    else:
+        market_data, macro_news, tomorrow_events = await asyncio.gather(
+            get_market_data_async(now_et=now_et, now_kst=now_kst),
+            asyncio.to_thread(fetch_macro_news, 5),
+            asyncio.to_thread(_get_tomorrow_events, now),
+        )
+        fear_greed = None
+
+    flat = _flatten_market_data(market_data)
+    movers = await collect_movers(now_et, now_kst, prefetched=flat)
+    news_text = format_macro_news_for_brief(macro_news)
+    print(
+        f"[market_brief] 데이터 수집 완료 ({brief_type}, "
+        f"{time.monotonic() - t_collect:.0f}s)"
+    )
 
     if not _has_minimum_data(market_data):
         raise RuntimeError("핵심 지수 데이터 수집 실패")
@@ -1751,12 +1836,6 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
             _build_circulation_context(brief_type),
         ) if x
     ).strip()
-
-    try:
-        tomorrow_events = _get_tomorrow_events(now)
-    except Exception as e:
-        print(f"[market_brief] 내일 일정 수집 실패: {e}")
-        tomorrow_events = ""
 
     # 적중률 저장 — 마감 시황이 같은 날 장전 전망을 채점
     # (+ 한국 마감 시 직전 us_close의 "다음 한국장" 전망도 KOSPI로 채점)
@@ -2221,13 +2300,16 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 
+    t_llm = time.monotonic()
     print(
         f"[market_brief] {brief_type} Claude 생성 시작 "
-        f"(prompt ~{len(prompt):,} chars)"
+        f"(prompt ~{len(prompt):,} chars, max_tokens={BRIEF_MAX_TOKENS})"
     )
-    message = await asyncio.to_thread(_call_brief_claude, prompt, brief_type)
-    print(f"[market_brief] {brief_type} Claude 응답 수신")
-    analysis = message.content[0].text
+    analysis = await asyncio.to_thread(_call_brief_claude, prompt, brief_type)
+    print(
+        f"[market_brief] {brief_type} Claude 응답 수신 "
+        f"({len(analysis)} chars, {time.monotonic() - t_llm:.0f}s)"
+    )
 
     signal = "NEUTRAL"
     if "SIGNAL:BULL" in analysis:
