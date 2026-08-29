@@ -54,7 +54,11 @@ from signal_engine import (
     resolve_display_signal,
     ENGINE_VERSION as SIGNAL_ENGINE_VERSION,
 )
-from market_brief import generate_market_brief, resolve_manual_brief_as_of
+from market_brief import (
+    generate_market_brief,
+    resolve_manual_brief_as_of,
+    resolve_brief_target_date,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from auth import (
@@ -1370,12 +1374,14 @@ async def brief_accuracy_api():
 async def generate_brief(
     brief_type: str = "us_close",
     as_of: Optional[str] = None,
+    force: bool = False,
     authorization: Optional[str] = Header(None),
     stockai_token: Optional[str] = Cookie(None),
 ):
     """수동 시황 생성 (관리자 전용)
     brief_type: kr_premarket | kr_close | us_premarket | us_close
-    as_of: YYYY-MM-DD — 해당일 기준으로 백필/재생성"""
+    as_of: YYYY-MM-DD — 해당일 기준으로 백필/재생성
+    force: true — 동일일 기존 시황이 있어도 재생성 (토큰 2배 소모)"""
     token = stockai_token or (
         authorization.replace("Bearer ", "") if authorization else None
     )
@@ -1389,20 +1395,38 @@ async def generate_brief(
     if effective_as_of and not as_of:
         print(f"[market_brief] 주말 수동 생성 → as_of={effective_as_of} 자동 지정 ({brief_type})")
 
+    from database import get_market_brief_by_date
+
+    target_date = resolve_brief_target_date(brief_type, effective_as_of)
+    existing = get_market_brief_by_date(brief_type, target_date)
+    if existing and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{brief_type}_{target_date} 시황이 이미 있습니다 "
+                f"(SIGNAL:{existing.get('signal', '—')}). "
+                f"재생성은 force=true — Sonnet 약 2만 토큰 추가 소모"
+            ),
+        )
+
     job_id = str(_uuid.uuid4())
     _brief_jobs[job_id] = BriefJob()
     asyncio.create_task(
-        _run_brief_generate_job(job_id, brief_type, effective_as_of)
+        _run_brief_generate_job(
+            job_id, brief_type, effective_as_of, rescore=not bool(existing)
+        )
     )
     return {
         "job_id": job_id,
         "status": "pending",
         "as_of": effective_as_of,
+        "target_date": target_date,
+        "replaced_existing": bool(existing),
     }
 
 
 async def _run_brief_generate_job(
-    job_id: str, brief_type: str, as_of: Optional[str]
+    job_id: str, brief_type: str, as_of: Optional[str], *, rescore: bool = True
 ):
     job = _brief_jobs.get(job_id)
     if not job:
@@ -1410,7 +1434,9 @@ async def _run_brief_generate_job(
     job.status = "running"
     t0 = asyncio.get_event_loop().time()
     try:
-        brief = await generate_market_brief(brief_type, as_of=as_of)
+        brief = await generate_market_brief(
+            brief_type, as_of=as_of, rescore_accuracy=rescore
+        )
         doc_id = save_market_brief(brief)
         job.result = {
             "ok": True,

@@ -21,7 +21,7 @@ from database import (
 )
 
 # yfinance 재조회 간격 (시간). 리포트마다 외부 호출하지 않음.
-SYNC_HOURS = int(os.getenv("EARNINGS_SYNC_HOURS", "24"))
+SYNC_HOURS = int(os.getenv("EARNINGS_SYNC_HOURS", "48"))
 
 # UI에서 '방금 나온 실적'을 크게 강조하는 기간(일). DB 보관과 무관.
 UI_HIGHLIGHT_RESULT_DAYS = int(os.getenv("EARNINGS_UI_HIGHLIGHT_DAYS", "14"))

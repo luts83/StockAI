@@ -3103,15 +3103,25 @@ async function pollBriefGenerate(jobId, maxWait = 600000) {
   );
 }
 
-async function generateBrief(type) {
+async function generateBrief(type, force = false) {
   const btn = document.getElementById(`brief-gen-${type}`);
   const originalText = btn?.textContent || "";
   if (btn) { btn.textContent = "생성 중..."; btn.disabled = true; }
   try {
-    const res = await fetch(`${API}/market/brief/generate?brief_type=${type}`, {
+    const q = force ? `&force=true` : "";
+    const res = await fetch(`${API}/market/brief/generate?brief_type=${type}${q}`, {
       method: "POST",
       headers: { ...authHeaders() }
     });
+    if (res.status === 409 && !force) {
+      const err = await res.json().catch(() => ({}));
+      const msg = err.detail || "이미 존재하는 시황입니다.";
+      if (confirm(`${msg}\n\n재생성하면 Sonnet 약 2만 토큰이 추가 소모됩니다. 계속할까요?`)) {
+        if (btn) { btn.textContent = originalText; btn.disabled = false; }
+        return generateBrief(type, true);
+      }
+      return;
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);

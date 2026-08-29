@@ -225,7 +225,7 @@ def format_macro_news_for_brief(news_items: List[Dict]) -> str:
         summary = (item.get("summary") or "").strip()
         line = f"  - {title}"
         if summary and len(summary) > 20:
-            line += f"\n    요약: {summary[:280]}"
+            line += f"\n    요약: {summary[:200]}"
         by_category[cat].append(line)
 
     lines = [
@@ -234,19 +234,37 @@ def format_macro_news_for_brief(news_items: List[Dict]) -> str:
     ]
     for cat, entries in by_category.items():
         lines.append(f"\n[{cat}]")
-        lines.extend(entries[:4])
+        lines.extend(entries[:3])
 
     return "\n".join(lines)
 
 
-def translate_titles(items: List[Dict]) -> List[Dict]:
-    """Claude API로 뉴스 제목들 일괄 한국어 번역 (핵심만, 간결하게)"""
+def translate_titles(items: List[Dict], max_translate: int = 12) -> List[Dict]:
+    """Claude API로 뉴스 제목 일괄 한국어 번역 — 카테고리 골고루, 상한 max_translate."""
     if not items:
         return items
     if not os.getenv("ANTHROPIC_API_KEY"):
         return items
 
-    titles = [item["title"] for item in items]
+    # 카테고리별 라운드로빈으로 번역 대상 선정 (Haiku 토큰 절감, 촉매 다양성 유지)
+    by_cat: dict[str, list[int]] = {}
+    for i, item in enumerate(items):
+        by_cat.setdefault(item.get("category", "기타"), []).append(i)
+    picked: list[int] = []
+    cats = list(by_cat.keys())
+    ci = 0
+    while len(picked) < min(max_translate, len(items)) and cats:
+        cat = cats[ci % len(cats)]
+        for idx in by_cat[cat]:
+            if idx not in picked:
+                picked.append(idx)
+                break
+        ci += 1
+        if ci > len(cats) * max(max_translate, 1) + 5:
+            break
+
+    subset = [items[i] for i in picked]
+    titles = [item["title"] for item in subset]
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
 
     prompt = f"""다음 영문 뉴스 제목들을 한국어로 번역해줘.
@@ -270,21 +288,20 @@ def translate_titles(items: List[Dict]) -> List[Dict]:
         msg = _claude_with_retry(
             client,
             model="claude-haiku-4-5-20251001",
-            max_tokens=800,
+            max_tokens=min(600, 40 * len(subset) + 80),
             messages=[{"role": "user", "content": prompt}]
         )
         if msg is None:
             return items  # 재시도 모두 실패 → 원문 그대로
         raw = msg.content[0].text.strip()
-        # "숫자. 번역" 형태로 한 줄씩 파싱 (특수문자에도 안전)
         translated = []
         for line in raw.splitlines():
             m = re.match(r"^\d+\.\s*(.+)$", line.strip())
             if m:
                 translated.append(m.group(1).strip())
-        for i, item in enumerate(items):
-            if i < len(translated) and translated[i]:
-                item["title_ko"] = translated[i]
+        for j, idx in enumerate(picked):
+            if j < len(translated) and translated[j]:
+                items[idx]["title_ko"] = translated[j]
     except Exception as e:
         print(f"제목 번역 오류: {e}")
 

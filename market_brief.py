@@ -573,6 +573,7 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 BRIEF_MAX_TOKENS = 4096
+BRIEF_MACRO_NEWS_PER_SOURCE = 3   # RSS 소스당 (기본 fetch_macro_news 5 대비 input·Haiku 절감)
 BRIEF_CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 _YF_POOL_WORKERS = 12
 
@@ -1659,32 +1660,37 @@ def _build_prev_context(brief_type: str, prefer_date: str | None = None) -> str:
     predict = BRIEF_TYPES.get(verify_type, {}).get("predict", "")
     forecast_text = _extract_forecast(prev.get("analysis", ""))
 
+    # verify0 블록에 cite가 이미 들어가므로 전망 본문 전체 재주입은 생략 (input 토큰 절감)
     head = (
         f"\n[검증 대상 — {prev.get('date')} {label} / SIGNAL:{prev.get('signal')}]\n"
         f"직전 전망 대상: {predict}\n"
         f"【###0 전망 칸 복붙용】{cite}\n"
-        f"{forecast_text}\n"
     )
+    if forecast_text and len(forecast_text) < 120:
+        head += f"{forecast_text}\n"
 
     if mode == "defer":
-        return (
-            head
-            + f"[중요] ###0 채점만 보류. 교차시장 데이터 활용은 필수.\n"
-            f"- '전망:'에는 위 복붙용 문구를 그대로 둘 것 (비우기/'-' 금지)\n"
-            f"- 적중/부분 적중/빗나감 판정 금지 (판정=검증 보류)\n"
-            f"- 미국 지수로 한국 전망을 채점하거나 그 반대 금지\n"
-            f"- 단, 한국 마감 수치·뉴스는 오늘 미국장 전망의 입력 변수로 적극 사용\n"
-            f"- '검증 보류'를 이유로 리포트 작성 불가/스냅샷 생략 금지\n"
-        )
+        return head + "[###0: 채점 보류 — 판정=검증 보류, 교차시장 수치는 전망 입력으로 활용]\n"
 
     return (
         head
-        + f"[이 전망({predict})을 오늘 실제 마감 수치와 비교해 판정할 것]\n"
-        f"- '전망:'에는 【복붙용】을 그대로 사용 — 비우거나 '-'만 쓰면 안 됨\n"
-        f"- 전망 인용 없이 적중/빗나감 판정 금지\n"
-        f"- 실제 결과: 벤치마크 등락률\n"
-        f"- 판정 이유 + 다음 전망 반영 규칙 1줄\n"
+        + f"[###0: 위 전망({predict})을 오늘 마감 수치로 채점 — 판정 이유 1~2문장]\n"
     )
+
+
+def resolve_brief_target_date(brief_type: str, as_of: str | None = None) -> str:
+    """시황 document date (YYYY-MM-DD) — as_of·시장 타임존 기준."""
+    cfg = BRIEF_TYPES.get(brief_type)
+    if not cfg:
+        raise RuntimeError(f"알 수 없는 시황 타입: {brief_type}")
+    target_market = cfg["market"]
+    if as_of:
+        _, now_et, now_kst = _clocks_for_as_of(brief_type, as_of)
+    else:
+        now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+    now_target = now_kst if target_market == "한국" else now_et
+    return now_target.strftime("%Y-%m-%d")
 
 
 def resolve_manual_brief_as_of(brief_type: str, as_of: str | None = None) -> str | None:
@@ -1703,7 +1709,12 @@ def resolve_manual_brief_as_of(brief_type: str, as_of: str | None = None) -> str
     return None
 
 
-async def generate_market_brief(brief_type: str, as_of: str | None = None) -> dict:
+async def generate_market_brief(
+    brief_type: str,
+    as_of: str | None = None,
+    *,
+    rescore_accuracy: bool = True,
+) -> dict:
     """as_of: 'YYYY-MM-DD' — 해당일 정규 시각 기준으로 백필/재생성."""
     from database import get_recent_market_briefs
 
@@ -1732,14 +1743,14 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     if brief_type.startswith("us"):
         market_data, macro_news, tomorrow_events, fear_greed = await asyncio.gather(
             get_market_data_async(now_et=now_et, now_kst=now_kst),
-            asyncio.to_thread(fetch_macro_news, 5),
+            asyncio.to_thread(fetch_macro_news, BRIEF_MACRO_NEWS_PER_SOURCE),
             asyncio.to_thread(_get_tomorrow_events, now),
             asyncio.to_thread(fetch_fear_greed),
         )
     else:
         market_data, macro_news, tomorrow_events = await asyncio.gather(
             get_market_data_async(now_et=now_et, now_kst=now_kst),
-            asyncio.to_thread(fetch_macro_news, 5),
+            asyncio.to_thread(fetch_macro_news, BRIEF_MACRO_NEWS_PER_SOURCE),
             asyncio.to_thread(_get_tomorrow_events, now),
         )
         fear_greed = None
@@ -1866,7 +1877,7 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         except Exception as e:
             print(f"[market_brief] 적중률 저장 실패: {e}")
 
-    if brief_type in ("kr_close", "us_close"):
+    if rescore_accuracy and brief_type in ("kr_close", "us_close"):
         verify_type = cfg["verify"]   # kr_premarket / us_premarket
         from database import get_market_brief_by_date
         prev_doc = get_market_brief_by_date(verify_type, today)
@@ -1897,14 +1908,11 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
     # 적중률 자기보정 컨텍스트
     from database import get_brief_accuracy
-    accuracy = get_brief_accuracy(limit=20, market=target_market)
+    accuracy = get_brief_accuracy(limit=10, market=target_market)
     accuracy_context = ""
     if accuracy["total"] >= 3:
-        error_text = (
-            ", ".join(accuracy["recent_errors"])
-            if accuracy["recent_errors"]
-            else "없음"
-        )
+        errs = (accuracy.get("recent_errors") or [])[:3]
+        error_text = ", ".join(errs) if errs else "없음"
         accuracy_context = f"""
 [최근 {target_market} 시황 적중률 — 자기보정 참고 / 판정 기준: 실제 지수 등락률 ±0.3%는 NEUTRAL]
 - 최근 {accuracy['total']}회 중 {accuracy['correct']}회 적중 ({accuracy['accuracy_pct']}%)
