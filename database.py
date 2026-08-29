@@ -418,6 +418,18 @@ def get_latest_market_brief(brief_type: str = None) -> dict | None:
         sort=[("created_at", -1)],
     )
 
+def get_market_brief_by_date(brief_type: str, date: str) -> dict | None:
+    """type+date 결정적 _id로 특정일 시황 조회 (마감→당일 장전 검증용)."""
+    db = get_db()
+    doc_id = f"{brief_type}_{date}"
+    doc = db["market_briefs"].find_one({"_id": doc_id})
+    if not doc:
+        doc = db["market_briefs"].find_one({"type": brief_type, "date": date})
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return _json_safe(doc)
+
 def get_recent_market_briefs(limit: int = 2, brief_type: str = None) -> list:
     """최근 시황 N개 반환 (최신순). brief_type 지정 시 해당 타입만 — 전망 검증용.
     market_data 포함(한국 stale 대체·검증 짝 조회에 필요)."""

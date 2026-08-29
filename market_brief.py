@@ -380,14 +380,16 @@ BRIEF_STYLE_RULE = """
 """
 
 ENGINE_STRUCTURE_RULE = """
-[시황 공통 구조]
+[시황 공통 구조 — 헤더는 반드시 ### N. 형식 (예: ### 0. 직전 전망 검증). "0." 단독 번호 금지]
 0. 직전 전망 검증
 1. 📖 오늘 장의 흐름 — 촉매·연쇄·시사점 (필수, 4~7문장)
 2. 핵심 수치 스냅샷 — 지수·섹터·시장폭
 3. 특징주 & 섹터 — 급등락 종목 + 의미 (재나열 금지)
 4. 📊 시장 심리 한 눈에
 5. 🔮 전망 + 대응 (강세/약세 조건, 신뢰도, 핵심 체크)
-6. 💡 한 줄 요약 — 오늘 장 핵심 + 내일/다음 세션 주목 포인트
+6. 💡 한 줄 요약 — 완전한 한 문장으로 끝낼 것 (중간에 끊기·미완성 ** 금지)
+
+[###0 전망 줄] 프롬프트 【복붙용】 문구(SIGNAL 포함)를 그대로 — 날짜만([YYYY-MM-DD]) 쓰지 말 것
 
 [가독성] 장을 못 본 사람이 스캔해도 흐름이 읽혀야 함. 표·불릿 활용, 긴 줄글 단락 지양
 """
@@ -554,7 +556,7 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 """
 
 
-WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+BRIEF_MAX_TOKENS = 8192
 
 # 시황 4종 서큘레이션
 # - 마감 리포트만 "같은 날 장전 전망"을 수치로 채점
@@ -1287,55 +1289,109 @@ def _forecast_citation(doc: dict | None) -> str:
     return f"[{date}] SIGNAL:{sig} — {body}"
 
 
-def _force_verify_citations(analysis: str, cites: list[str]) -> str:
-    """LLM이 ###0 '전망:'을 비우거나 날짜만 남기면 Mongo 인용으로 강제 교체.
+def _forecast_line_incomplete(value: str) -> bool:
+    v = (value or "").strip()
+    if not v or v in ("-", "—"):
+        return True
+    if "SIGNAL:" not in v:
+        return bool(re.match(r"^\[\d{4}-\d{2}-\d{2}\]\s*-?\s*$", v))
+    return len(v) < 35
 
-    Claude가 프롬프트의 복붙용 문구를 무시하고
-    `전망: [2026-08-20] -` 처럼 비우는 경우를 막는다.
-    """
-    cites = [_sanitize_full_cite(c) for c in (cites or []) if c and str(c).strip()]
-    cites = [c for c in cites if c]
-    if not analysis or not cites:
-        return analysis
 
-    m = re.search(
-        r"(###\s*0\.\s*직전 전망 검증)([\s\S]*?)(?=\n---\s*\n|\n###\s*[1-9]|\Z)",
-        analysis,
-    )
-    if not m:
-        return analysis
-
-    header, body = m.group(1), m.group(2)
+def _replace_forecast_lines(block: str, cites: list[str]) -> tuple[str, int]:
+    """블록 내 '전망:' 줄을 Mongo 인용으로 교체. 사용한 cite 개수 반환."""
     idx = 0
 
     def _repl(match: re.Match) -> str:
         nonlocal idx
         prefix = match.group(1)
         after = match.group(2) or ""
-        # 같은 줄에 '실제 결과:'가 붙었으면 분리
         glued = re.search(r"\s+[-–]?\s*(실제\s*결과\s*:.*)$", after)
         suffix = f"\n- {glued.group(1).strip()}" if glued else ""
+        if not _forecast_line_incomplete(after):
+            return match.group(0)
         if idx >= len(cites):
             return match.group(0)
         cite = cites[idx]
         idx += 1
         return f"{prefix}{cite}{suffix}"
 
-    new_body, n = re.subn(
+    new_block, _ = re.subn(
         r"(^[ \t]*[-*•]?\s*전망\s*:\s*)(.*)$",
         _repl,
-        body,
+        block,
         flags=re.MULTILINE,
     )
-    if n == 0:
-        insert = "\n".join(f"- 전망: {c}" for c in cites) + "\n"
-        new_body = insert + body
+    if idx == 0 and cites:
+        new_block = "\n".join(f"- 전망: {c}" for c in cites) + "\n" + new_block
+        idx = len(cites)
     elif idx < len(cites):
-        # 전망 줄이 cite보다 적으면 남은 인용 추가
-        extra = "\n".join(f"- 전망: {c}" for c in cites[idx:])
-        new_body = new_body.rstrip() + "\n" + extra + "\n"
+        new_block = new_block.rstrip() + "\n" + "\n".join(
+            f"- 전망: {c}" for c in cites[idx:]
+        ) + "\n"
+        idx = len(cites)
+    return new_block, idx
 
-    return analysis[: m.start()] + header + new_body + analysis[m.end() :]
+
+def _force_verify_citations(analysis: str, cites: list[str]) -> str:
+    """LLM이 ###0 '전망:'을 비우거나 날짜만 남기면 Mongo 인용으로 강제 교체."""
+    cites = [_sanitize_full_cite(c) for c in (cites or []) if c and str(c).strip()]
+    cites = [c for c in cites if c]
+    if not analysis or not cites:
+        return analysis
+
+    header_patterns = [
+        r"###\s*0\.\s*직전 전망 검증",
+        r"^0\.\s*직전 전망 검증",
+    ]
+    start = None
+    header_len = 0
+    for pat in header_patterns:
+        m = re.search(pat, analysis, re.MULTILINE)
+        if m:
+            start = m.start()
+            header_len = len(m.group(0))
+            break
+    if start is None:
+        return analysis
+
+    rest = analysis[start + header_len :]
+    end_m = re.search(
+        r"\n(?:---\s*\n|###\s*[1-9]\.\s*|^[1-9]\.\s*[📖🇺🇸🇰🇷🔮💡])",
+        rest,
+        re.MULTILINE,
+    )
+    body_end = start + header_len + (end_m.start() if end_m else len(rest))
+    header = analysis[start : start + header_len]
+    body = analysis[start + header_len : body_end]
+    new_body, _ = _replace_forecast_lines(body, cites)
+    return analysis[:start] + header + new_body + analysis[body_end:]
+
+
+def _repair_truncated_brief_tail(analysis: str) -> str:
+    """한 줄 요약·미완성 마크다운 잘림 보정."""
+    if not analysis:
+        return analysis
+    m = re.search(r"(###\s*[💡\s]*한\s*줄\s*요약\s*\n+|💡\s*한\s*줄\s*요약\s*\n+)([\s\S]*)$", analysis)
+    if not m:
+        return analysis
+    body = (m.group(2) or "").strip()
+    if len(body) >= 40 and body.count("**") % 2 == 0 and not re.search(
+        r'[\(\[\{"\'""]$', body
+    ):
+        return analysis
+
+    fb = ""
+    cm = re.search(r"\*\*결론\s*:\s*([^\n*]+)", analysis)
+    if cm:
+        fb = cm.group(1).strip()
+    if not fb:
+        fm = re.search(r"(?:###\s*)?1\.\s*[^\n]*\n([\s\S]{60,500})", analysis)
+        if fm:
+            fb = re.sub(r"\s+", " ", fm.group(1).strip())[:140]
+    if not fb:
+        return analysis
+    return analysis[: m.start(2)] + fb + "\n"
 
 
 def _sanitize_full_cite(cite: str) -> str:
@@ -1357,13 +1413,19 @@ def _sanitize_full_cite(cite: str) -> str:
     return body
 
 
-def _load_brief_cite(brief_type: str) -> tuple[dict | None, str]:
-    """최근 해당 타입 시황 + 전망 인용 문구."""
-    from database import get_recent_market_briefs
-    docs = get_recent_market_briefs(limit=1, brief_type=brief_type)
-    if not docs:
+def _load_brief_cite(brief_type: str, prefer_date: str | None = None) -> tuple[dict | None, str]:
+    """해당 타입 시황 + 전망 인용 문구. prefer_date 있으면 그날 문서 우선(마감 검증용)."""
+    from database import get_recent_market_briefs, get_market_brief_by_date
+
+    doc = None
+    if prefer_date:
+        doc = get_market_brief_by_date(brief_type, prefer_date)
+    if not doc:
+        docs = get_recent_market_briefs(limit=1, brief_type=brief_type)
+        doc = docs[0] if docs else None
+    if not doc:
         return None, ""
-    return docs[0], _forecast_citation(docs[0])
+    return doc, _forecast_citation(doc)
 
 
 def _extract_one_liner(analysis: str) -> str:
@@ -1444,10 +1506,11 @@ def _build_circulation_context(brief_type: str) -> str:
     return "\n".join(blocks)
 
 
-def _build_prev_context(brief_type: str) -> str:
+def _build_prev_context(brief_type: str, prefer_date: str | None = None) -> str:
     """검증 짝 시황을 가져와 직전 전망 검증에 사용.
     verify_mode=defer → 인용만, 수치 채점 금지
     verify_mode=score → 같은 세션 장전 전망을 마감 수치로 채점
+    prefer_date: 마감 시황 생성 시 당일 장전 문서 우선 조회
     """
     cfg = BRIEF_TYPES.get(brief_type)
     if not cfg:
@@ -1455,7 +1518,8 @@ def _build_prev_context(brief_type: str) -> str:
     verify_type = cfg["verify"]
     mode = cfg.get("verify_mode", "score")
 
-    prev, cite = _load_brief_cite(verify_type)
+    cite_date = prefer_date if mode == "score" else None
+    prev, cite = _load_brief_cite(verify_type, prefer_date=cite_date)
     if not prev:
         return ""
 
@@ -1604,9 +1668,10 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
     featured_text = build_featured_context(
         market_data, brief_type=brief_type, fear_greed=fear_greed, movers=movers
     )
+    verify_pref_date = today if brief_type in ("kr_close", "us_close") else None
     prev_context = "\n".join(
         x for x in (
-            _build_prev_context(brief_type),
+            _build_prev_context(brief_type, prefer_date=verify_pref_date),
             _build_circulation_context(brief_type),
         ) if x
     ).strip()
@@ -1648,14 +1713,18 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 
     if brief_type in ("kr_close", "us_close"):
         verify_type = cfg["verify"]   # kr_premarket / us_premarket
-        prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
-        if prev_list:
+        from database import get_market_brief_by_date
+        prev_doc = get_market_brief_by_date(verify_type, today)
+        if not prev_doc:
+            prev_list = get_recent_market_briefs(limit=1, brief_type=verify_type)
+            prev_doc = prev_list[0] if prev_list else None
+        if prev_doc:
             if target_market == "한국":
                 idx = market_data.get("한국", {}).get("^KS11", {})
             else:
                 idx = market_data.get("미국", {}).get("SPY", {})
             if idx and not idx.get("stale") and idx.get("change_pct") is not None:
-                _score_brief_vs_index(prev_list[0], float(idx["change_pct"]), "same-day")
+                _score_brief_vs_index(prev_doc, float(idx["change_pct"]), "same-day")
 
         # 한국 마감: 직전 미국 마감의 한국장 전망도 오늘 KOSPI로 채점
         if brief_type == "kr_close":
@@ -1820,8 +1889,8 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "kr_close":
-        _, kr_pm_cite = _load_brief_cite("kr_premarket")
-        _, us_close_cite = _load_brief_cite("us_close")
+        _, kr_pm_cite = _load_brief_cite("kr_premarket", prefer_date=today)
+        _, us_close_cite = _load_brief_cite("us_close")  # 간밤 — 최근 us_close
         verify_cites = [c for c in (kr_pm_cite, us_close_cite) if c]
         secondary = []
         if us_close_cite:
@@ -1905,8 +1974,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     elif brief_type == "us_close":
-        us_pm_cite = _load_brief_cite("us_premarket")[1]
-        verify_cites = [us_pm_cite]
+        _, us_pm_cite = _load_brief_cite("us_premarket", prefer_date=today)
+        if not us_pm_cite:
+            print(
+                f"[market_brief] us_close: 당일({today}) us_premarket 없음 — "
+                f"###0 전망 인용 불가 (장전 시황 먼저 생성 권장)"
+            )
+        verify_cites = [c for c in (us_pm_cite,) if c]
         verify0 = _verify_block(
             bench="SPY",
             result_metrics="SPY ▲/▼X.XX%, QQQ ▲/▼X.XX% (제공 수치)",
@@ -2069,7 +2143,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     client = anthropic.Anthropic()
     message = client.messages.create(
         model="claude-sonnet-4-5-20250929",
-        max_tokens=4096,
+        max_tokens=BRIEF_MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
     )
     analysis = message.content[0].text
@@ -2089,8 +2163,9 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
-    # ###0 전망 인용 강제 주입 (LLM이 비우거나 날짜만 남기는 경우 보정)
+    # ###0 전망 인용 강제 주입 + 잘린 한줄요약 보정
     analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
+    analysis_clean = _repair_truncated_brief_tail(analysis_clean)
 
     # created_at은 실제 생성 시각(재생성 시 최신으로 올라오게)
     created = datetime.now(pytz.timezone("Europe/London")).isoformat()

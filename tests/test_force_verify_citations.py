@@ -99,6 +99,36 @@ def test_sanitize_nested_cite_body():
     assert "RSP" in cleaned
 
 
+def test_force_fixes_numbered_header_without_hash():
+    """LLM이 '0.' 헤더만 쓴 경우에도 전망 인용 보정."""
+    analysis = """0. 직전 전망 검증
+직전 전망
+전망: [2026-08-28]
+실제 결과: SPY ▼0.23%, QQQ ▼0.65%
+판정: 부분 적중
+
+1. 📖 오늘 미국장의 흐름
+본문 시작
+"""
+    cite = "[2026-08-28] SIGNAL:NEUTRAL — 워시 매파 발언 전 기술주 조정 우려"
+    out = _force_verify_citations(analysis, [cite])
+    assert cite in out
+    assert "전망: [2026-08-28]\n" not in out or cite in out
+
+
+def test_repair_truncated_summary():
+    from market_brief import _repair_truncated_brief_tail
+    broken = """### 🔮 다음 거래일 전망
+**결론: 약세 우위 (조건부 중립)**
+
+### 💡 한 줄 요약
+📰 **워시 "
+"""
+    out = _repair_truncated_brief_tail(broken)
+    assert "워시 \"" not in out or "약세" in out
+    assert len(out.split("### 💡 한 줄 요약")[-1].strip()) >= 15
+
+
 if __name__ == "__main__":
     test_force_replaces_empty_date_only_cite()
     test_force_splits_glued_actual_result()
