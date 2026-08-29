@@ -1,5 +1,6 @@
 import math
 import re
+import time
 import asyncio
 import anthropic
 import yfinance as yf
@@ -558,6 +559,30 @@ def _outlook_block(*, title: str, condition_examples: str) -> str:
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 BRIEF_MAX_TOKENS = 8192
+BRIEF_CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
+
+
+def _call_brief_claude(prompt: str, brief_type: str):
+    """동기 Claude 호출 — asyncio.to_thread에서 실행."""
+    client = anthropic.Anthropic()
+    last_err = None
+    for attempt in range(3):
+        try:
+            return client.messages.create(
+                model=BRIEF_CLAUDE_MODEL,
+                max_tokens=BRIEF_MAX_TOKENS,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.APIConnectionError as e:
+            last_err = e
+            if attempt < 2:
+                wait = 5 * (attempt + 1)
+                print(
+                    f"[market_brief] Claude 연결 실패 ({brief_type}) "
+                    f"— {wait}s 후 재시도 ({attempt + 1}/2)"
+                )
+                time.sleep(wait)
+    raise last_err
 
 # 시황 4종 서큘레이션
 # - 마감 리포트만 "같은 날 장전 전망"을 수치로 채점
@@ -1603,10 +1628,12 @@ async def generate_market_brief(brief_type: str, as_of: str | None = None) -> di
         collect_movers(now_et, now_kst),
     )
     news_text = format_macro_news_for_brief(macro_news)
+    print(f"[market_brief] macro·movers 수집 완료 ({brief_type})")
 
     fear_greed = None
     if brief_type.startswith("us"):
         fear_greed = await asyncio.to_thread(fetch_fear_greed)
+        print(f"[market_brief] fear_greed 수집 완료 ({brief_type})")
 
     if not _has_minimum_data(market_data):
         raise RuntimeError("핵심 지수 데이터 수집 실패")
@@ -2157,12 +2184,12 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
 
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model="claude-sonnet-4-5-20250929",
-        max_tokens=BRIEF_MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
+    print(
+        f"[market_brief] {brief_type} Claude 생성 시작 "
+        f"(prompt ~{len(prompt):,} chars)"
     )
+    message = await asyncio.to_thread(_call_brief_claude, prompt, brief_type)
+    print(f"[market_brief] {brief_type} Claude 응답 수신")
     analysis = message.content[0].text
 
     signal = "NEUTRAL"

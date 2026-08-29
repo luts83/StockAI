@@ -274,6 +274,16 @@ class AnalyzeJob:
         self.result = None
         self.error  = None
 
+
+class BriefJob:
+    def __init__(self):
+        self.status = "pending"
+        self.result = None
+        self.error = None
+
+
+_brief_jobs: dict = {}
+
 def get_current_user(
     token: Optional[str] = None,
     authorization: Optional[str] = None,
@@ -1379,19 +1389,81 @@ async def generate_brief(
     if effective_as_of and not as_of:
         print(f"[market_brief] 주말 수동 생성 → as_of={effective_as_of} 자동 지정 ({brief_type})")
 
-    try:
-        brief = await generate_market_brief(brief_type, as_of=effective_as_of)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-
-    doc_id = save_market_brief(brief)
+    job_id = str(_uuid.uuid4())
+    _brief_jobs[job_id] = BriefJob()
+    asyncio.create_task(
+        _run_brief_generate_job(job_id, brief_type, effective_as_of)
+    )
     return {
-        "ok": True,
-        "id": doc_id,
-        "signal": brief["signal"],
-        "date": brief["date"],
+        "job_id": job_id,
+        "status": "pending",
         "as_of": effective_as_of,
     }
+
+
+async def _run_brief_generate_job(
+    job_id: str, brief_type: str, as_of: Optional[str]
+):
+    job = _brief_jobs.get(job_id)
+    if not job:
+        return
+    job.status = "running"
+    t0 = asyncio.get_event_loop().time()
+    try:
+        brief = await generate_market_brief(brief_type, as_of=as_of)
+        doc_id = save_market_brief(brief)
+        job.result = {
+            "ok": True,
+            "id": doc_id,
+            "signal": brief["signal"],
+            "date": brief["date"],
+            "as_of": as_of,
+        }
+        job.status = "done"
+        elapsed = asyncio.get_event_loop().time() - t0
+        print(
+            f"[market_brief] 수동 생성 완료: {doc_id} "
+            f"(SIGNAL:{brief['signal']}, {elapsed:.0f}s)"
+        )
+    except RuntimeError as e:
+        job.status = "error"
+        job.error = str(e)
+        elapsed = asyncio.get_event_loop().time() - t0
+        print(f"[market_brief] 수동 생성 스킵 ({elapsed:.0f}s): {e}")
+    except Exception as e:
+        job.status = "error"
+        job.error = str(e)
+        elapsed = asyncio.get_event_loop().time() - t0
+        print(f"[market_brief] 수동 생성 오류 ({elapsed:.0f}s): {e}")
+    finally:
+        await asyncio.sleep(3600)
+        _brief_jobs.pop(job_id, None)
+
+
+@app.get("/market/brief/generate/status/{job_id}")
+async def brief_generate_status(
+    job_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """수동 시황 생성 진행 상태 (관리자 전용)"""
+    token = stockai_token or (
+        authorization.replace("Bearer ", "") if authorization else None
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="로그인 필요")
+    user = decode_jwt(token)
+    if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
+        raise HTTPException(status_code=403, detail="관리자 전용")
+
+    job = _brief_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status == "done":
+        return {"status": "done", "result": job.result}
+    if job.status == "error":
+        return {"status": "error", "error": job.error}
+    return {"status": job.status}
 
 
 @app.delete("/market/brief/{doc_id}")
