@@ -33,7 +33,7 @@ PURPLE   = "#a371f7"
 
 
 def _draw_volume_profile_levels(ax, df: pd.DataFrame, label_size: int = 9) -> None:
-    """POC / 최근접 지지·저항 매물대 수평선."""
+    """POC / 최근접 지지·저항 매물대 수평선 — 라벨은 우측 범례 박스로 분리."""
     try:
         from volume_profile import compute_volume_profile
         vp = compute_volume_profile(df)
@@ -42,28 +42,39 @@ def _draw_volume_profile_levels(ax, df: pd.DataFrame, label_size: int = 9) -> No
     if not vp or not vp.get("ok"):
         return
 
-    def _hline(price, color, label, ls="--", lw=1.1, alpha=0.85):
-        if price is None:
-            return
-        ax.axhline(float(price), color=color, linewidth=lw, linestyle=ls, alpha=alpha)
-        ax.text(
-            0.995, float(price), f" {label} ${float(price):.2f}",
-            transform=ax.get_yaxis_transform(),
-            color=color, fontsize=label_size, va="center", ha="right",
-            fontweight="bold", alpha=0.95,
-        )
+    levels: list[tuple[float, str, str, str, float]] = []
 
     poc = vp.get("poc")
-    _hline(poc, PURPLE, "POC", ls=":", lw=1.3, alpha=0.9)
+    if poc is not None:
+        levels.append((float(poc), PURPLE, "POC", ":", 1.3))
 
     ns = vp.get("nearest_support") or {}
     nr = vp.get("nearest_resistance") or {}
     if ns.get("price") is not None:
         tag = "VP-S↑" if ns.get("flipped") else "VP-S"
-        _hline(ns["price"], GREEN, tag, ls="-", lw=1.2 if ns.get("flipped") else 1.0)
+        levels.append((float(ns["price"]), GREEN, tag, "-", 1.2 if ns.get("flipped") else 1.0))
     if nr.get("price") is not None:
         tag = "VP-R↓" if nr.get("flipped") else "VP-R"
-        _hline(nr["price"], RED, tag, ls="-", lw=1.2 if nr.get("flipped") else 1.0)
+        levels.append((float(nr["price"]), RED, tag, "-", 1.2 if nr.get("flipped") else 1.0))
+
+    for price, color, _label, ls, lw in levels:
+        ax.axhline(price, color=color, linewidth=lw, linestyle=ls, alpha=0.85)
+
+    if not levels:
+        return
+
+    y_pos = 0.97
+    line_h = 0.038
+    for price, color, label, _ls, _lw in sorted(levels, key=lambda x: x[0], reverse=True):
+        ax.text(
+            0.985, y_pos, f"{label}  ${price:.2f}",
+            transform=ax.transAxes,
+            color=color, fontsize=label_size, va="top", ha="right",
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor=PANEL_BG, edgecolor=color, alpha=0.88),
+            zorder=10,
+        )
+        y_pos -= line_h
 
 
 def generate_chart(df: pd.DataFrame, ticker: str) -> str:

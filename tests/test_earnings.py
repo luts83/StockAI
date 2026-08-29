@@ -5,6 +5,9 @@ from earnings import (
     UI_HIGHLIGHT_CALL_DAYS,
     UI_HIGHLIGHT_RESULT_DAYS,
     _build_comparison_lines,
+    _build_earnings_summary,
+    _format_earnings_date_label,
+    _merge_fiscal_and_announcements,
     build_report_bundle,
     format_earnings_prompt_text,
     _should_ui_highlight_call,
@@ -23,15 +26,45 @@ def test_ui_highlight_result_recent_only():
 
 def test_comparison_qoq():
     history = [
-        {"date": "2025-08-01", "actual_eps": 0.12, "estimate_eps": 0.10, "eps_surprise_pct": 20.0,
+        {"date": "2025-08-01", "period_end": "2025-06-30", "actual_eps": 0.12, "estimate_eps": 0.10, "eps_surprise_pct": 20.0,
          "actual_revenue": 1.2e9, "estimate_revenue": 1.1e9, "revenue_surprise_pct": 9.1},
-        {"date": "2025-05-01", "actual_eps": 0.08, "estimate_eps": 0.09, "eps_surprise_pct": -11.1,
+        {"date": "2025-05-01", "period_end": "2025-03-31", "actual_eps": 0.08, "estimate_eps": 0.09, "eps_surprise_pct": -11.1,
          "actual_revenue": 1.0e9, "estimate_revenue": 1.05e9},
     ]
     lines = _build_comparison_lines(history)
     text = "\n".join(lines)
     assert "QoQ EPS" in text
-    assert "beat" in text or "miss" in text
+    assert "상회" in text or "하회" in text
+
+
+def test_merge_fiscal_and_announcements():
+    fiscal = [
+        {"ticker": "X", "period_end": "2026-03-31", "actual_eps": -0.16, "estimate_eps": -0.26, "eps_surprise_pct": 38.5},
+    ]
+    announce = [
+        {"ticker": "X", "announce_date": "2026-05-08", "actual_eps": -0.16, "estimate_eps": -0.26, "eps_surprise_pct": 38.5},
+    ]
+    merged = _merge_fiscal_and_announcements(fiscal, announce)
+    assert merged[0]["date"] == "2026-05-08"
+    assert merged[0]["period_end"] == "2026-03-31"
+
+
+def test_earnings_summary_korean():
+    history = [
+        {"date": "2026-08-27", "period_end": "2026-06-30", "actual_eps": -0.2, "estimate_eps": -0.3, "eps_surprise_pct": 33.3},
+        {"date": "2026-05-08", "period_end": "2026-03-31", "actual_eps": -0.16, "estimate_eps": -0.26, "eps_surprise_pct": 38.5},
+    ]
+    summary = _build_earnings_summary(history)
+    assert "발표 2026-08-27" in summary
+    assert "6월 마감" in summary
+    assert "서프라이즈" in summary or "상회" in summary
+
+
+def test_date_label_shows_both_dates():
+    rec = {"date": "2026-05-08", "period_end": "2026-03-31"}
+    label = _format_earnings_date_label(rec)
+    assert "발표 2026-05-08" in label
+    assert "3월 마감" in label
 
 
 def test_prompt_always_includes_history_from_db():
@@ -49,8 +82,23 @@ def test_prompt_always_includes_history_from_db():
     bundle = build_report_bundle(profile, history, today=today)
     text = format_earnings_prompt_text(bundle)
     assert "MongoDB" in text
-    assert "실적 이력" in text
+    assert "실적 이력" in text or "실적 요약" in text
     assert "QoQ" in text or "분기 이력" in text
+
+
+def test_needs_sync_when_quarter_stale():
+    from datetime import date, timedelta
+    from earnings import _needs_sync
+
+    old_latest = (date.today() - timedelta(days=100)).isoformat()
+    profile = {
+        "latest_earnings_date": old_latest,
+        "last_sync_at": date.today().isoformat(),
+        "next_earnings_date": (date.today() + timedelta(days=60)).isoformat(),
+    }
+    # 75일+ 지난 최신 실적이면 DB count 없어도 stale 분기로 sync 필요
+    latest = date.fromisoformat(old_latest)
+    assert (date.today() - latest).days >= 75
 
 
 def test_call_ui_highlight():

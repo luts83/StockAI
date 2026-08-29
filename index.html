@@ -1067,6 +1067,19 @@ function fmtRevBillions(v) {
   return "$" + b.toFixed(2) + "B";
 }
 
+function fmtEarningsPeriod(le) {
+  if (!le) return "";
+  const announce = le.date || "";
+  const periodEnd = le.period_end || "";
+  if (periodEnd && periodEnd.slice(0, 10) !== announce.slice(0, 10)) {
+    const pe = periodEnd.slice(0, 10);
+    const ym = pe.split("-");
+    const monthLabel = ym.length >= 2 ? `${ym[0]}년 ${parseInt(ym[1], 10)}월 마감` : pe;
+    return `발표 ${announce} · ${monthLabel} 분기`;
+  }
+  return `발표 ${announce}`;
+}
+
 function renderEarningsPanel(earnings) {
   const panel = document.getElementById("earnings-panel");
   const badge = document.getElementById("res-earnings-badge");
@@ -1079,7 +1092,8 @@ function renderEarningsPanel(earnings) {
   const hasCall = e.show_call && e.earnings_call;
   const hasHistory = (e.history_count || 0) >= 1 || (e.history || []).length >= 1;
   const comp = e.comparison_text || [];
-  if (!hasNext && !hasResult && !hasCall && !hasHistory) {
+  const summary = e.summary_text || "";
+  if (!hasNext && !hasResult && !hasCall && !hasHistory && !summary) {
     panel.style.display = "none";
     panel.innerHTML = "";
     return;
@@ -1106,6 +1120,14 @@ function renderEarningsPanel(earnings) {
 
   const blocks = [];
 
+  if (summary) {
+    blocks.push(`
+      <div style="flex:2;min-width:240px">
+        <div style="font-size:10px;color:var(--dim)">📋 실적 해설</div>
+        <div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.55">${summary}</div>
+      </div>`);
+  }
+
   if (hasNext) {
     const days = e.days_to_earnings;
     let note = "다음 실적 발표 일정";
@@ -1122,34 +1144,39 @@ function renderEarningsPanel(earnings) {
     const le = e.last_earnings;
     const sp = le.eps_surprise_pct;
     const spColor = sp == null ? "var(--muted)" : sp >= 0 ? "var(--green)" : "var(--red)";
-    const spLabel = sp == null ? "" : (sp >= 0 ? "서프라이즈" : "쇼크");
+    const spLabel = sp == null ? "" : (sp >= 0 ? "예상 상회" : "예상 하회");
+    const periodLabel = fmtEarningsPeriod(le);
     blocks.push(`
       <div style="flex:1;min-width:160px">
-        <div style="font-size:10px;color:var(--dim)">최신 실적 (${le.date}) · 발표 직후 강조</div>
+        <div style="font-size:10px;color:var(--dim)">최신 실적 · ${periodLabel}</div>
         <div style="font-size:13px;margin-top:4px;color:var(--text)">
           EPS <strong>$${le.actual_eps ?? "—"}</strong> / 예상 $${le.estimate_eps ?? "—"}
           ${sp != null ? `<span style="color:${spColor};margin-left:6px">${fmtEarningsSurprise(sp)} ${spLabel}</span>` : ""}
         </div>
         ${le.actual_revenue != null ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">매출 ${fmtRevBillions(le.actual_revenue)} / 예상 ${fmtRevBillions(le.estimate_revenue)}</div>` : ""}
+        ${le.date_note ? `<div style="font-size:10px;color:var(--yellow);margin-top:4px">${le.date_note}</div>` : ""}
       </div>`);
   } else if (e.last_earnings) {
     const le = e.last_earnings;
+    const periodLabel = fmtEarningsPeriod(le);
     blocks.push(`
       <div style="flex:1;min-width:160px">
-        <div style="font-size:10px;color:var(--dim)">최신 실적 (DB · ${le.date})</div>
+        <div style="font-size:10px;color:var(--dim)">최신 실적 · ${periodLabel}</div>
         <div style="font-size:12px;margin-top:4px;color:var(--muted)">
-          EPS $${le.actual_eps ?? "—"}${le.eps_surprise_pct != null ? ` · 컨센서스 ${fmtEarningsSurprise(le.eps_surprise_pct)}` : ""}
+          EPS $${le.actual_eps ?? "—"}${le.eps_surprise_pct != null ? ` · ${fmtEarningsSurprise(le.eps_surprise_pct)} (${le.eps_surprise_pct >= 0 ? "예상 상회" : "예상 하회"})` : ""}
         </div>
+        ${le.date_note ? `<div style="font-size:10px;color:var(--yellow);margin-top:4px">${le.date_note}</div>` : ""}
       </div>`);
   }
 
-  if (comp.length >= 2) {
-    const compHtml = comp.slice(0, 6).map((ln) =>
+  if (comp.length >= 1) {
+    const compHtml = comp.slice(0, 8).map((ln) =>
       `<div style="font-size:11px;color:var(--muted);line-height:1.45">${ln.replace(/^  /, "")}</div>`
     ).join("");
     blocks.push(`
       <div style="flex:2;min-width:220px">
-        <div style="font-size:10px;color:var(--dim)">📈 분기 비교 (DB ${e.history_count || comp.length}분기)</div>
+        <div style="font-size:10px;color:var(--dim)">📈 분기 비교 (${e.history_count || 0}분기)</div>
+        <div style="font-size:10px;color:var(--dim);margin-top:2px">QoQ=직전 분기 대비 · YoY=1년 전 같은 분기 대비 · 상회=컨센서스 beat</div>
         <div style="margin-top:4px">${compHtml}</div>
       </div>`);
   }

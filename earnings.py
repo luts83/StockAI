@@ -97,9 +97,25 @@ def _yf_frame(obj):
 
 
 def _is_etf_like(ticker: str, stock=None) -> bool:
-    from analyzer import _is_etf_like as _check
-
-    return _check(ticker, stock)
+    """ETF/지수 여부 — analyzer import 없이 판별 (pandas_ta 부작용 방지)."""
+    t = (ticker or "").upper()
+    if t.startswith("^"):
+        return True
+    known = {
+        "SPY", "QQQ", "IWM", "DIA", "RSP", "SMH", "XLK", "XLF", "XLE", "XLV",
+        "TQQQ", "SQQQ", "SPCX", "VOO", "VTI", "ARKK",
+    }
+    if t in known:
+        return True
+    try:
+        if stock is not None:
+            info = getattr(stock, "info", None) or {}
+            qt = str(info.get("quoteType") or info.get("typeDisp") or "").upper()
+            if qt in ("ETF", "MUTUALFUND", "INDEX", "CURRENCY"):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _migrate_legacy_profile(profile: dict) -> None:
@@ -117,6 +133,227 @@ def _migrate_legacy_profile(profile: dict) -> None:
     if profile.get("earnings_call"):
         rec["earnings_call"] = profile["earnings_call"]
     upsert_earnings_record(rec)
+
+
+def _eps_close(a, b, tol: float = 0.03) -> bool:
+    fa, fb = _safe_float(a), _safe_float(b)
+    if fa is None or fb is None:
+        return False
+    return abs(fa - fb) <= tol
+
+
+def _ts_to_date(value) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and value > 1e9:
+        try:
+            return datetime.utcfromtimestamp(value).date()
+        except (TypeError, ValueError, OSError):
+            return None
+    return _parse_date(value)
+
+
+def _period_end_label(period_end: str | None) -> str:
+    d = _parse_date(period_end)
+    if d is None:
+        return ""
+    return f"{d.year}년 {d.month}월 마감 분기"
+
+
+def _format_earnings_date_label(rec: dict) -> str:
+    """UI·프롬프트용 — 발표일과 회계분기 마감을 구분."""
+    announce = rec.get("date") or ""
+    period_end = rec.get("period_end") or ""
+    if period_end and period_end[:10] != announce[:10]:
+        return f"발표 {announce} · {_period_end_label(period_end)}"
+    return f"발표 {announce}"
+
+
+def _fetch_fiscal_quarter_rows(stock, ticker: str) -> list[dict]:
+    """yfinance earnings_history — 회계분기 마감일 기준 EPS."""
+    eh = _yf_frame(getattr(stock, "earnings_history", None))
+    if eh is None:
+        return []
+    rows: list[dict] = []
+    for ts, row in eh.iterrows():
+        period_end = _parse_date(ts)
+        if period_end is None:
+            continue
+        actual = row.get("epsActual") if "epsActual" in eh.columns else None
+        est = row.get("epsEstimate") if "epsEstimate" in eh.columns else None
+        sp = row.get("surprisePercent") if "surprisePercent" in eh.columns else None
+        sp_pct = round(float(sp) * 100, 1) if sp is not None and sp == sp else None
+        rows.append({
+            "ticker": ticker,
+            "period_end": period_end.isoformat(),
+            "actual_eps": _safe_float(actual),
+            "estimate_eps": _safe_float(est),
+            "eps_surprise_pct": sp_pct if sp_pct is not None else _surprise_pct(actual, est),
+            "source": "yfinance_fiscal",
+        })
+    rows.sort(key=lambda r: r["period_end"], reverse=True)
+    return rows
+
+
+def _fetch_announcement_rows(stock, ticker: str, limit: int = 16) -> list[dict]:
+    """yfinance earnings_dates — 실적 발표일(시장 기준) 기준 EPS."""
+    import pandas as pd
+
+    ed = _yf_frame(stock.earnings_dates)
+    if ed is None:
+        return []
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if getattr(ed.index, "tz", None) is None:
+        try:
+            ed = ed.copy()
+            ed.index = pd.to_datetime(ed.index).tz_localize("UTC")
+        except Exception:
+            ed.index = pd.to_datetime(ed.index, utc=True)
+    past = ed[ed.index <= now_utc].head(limit)
+    rows: list[dict] = []
+    for ts, row in past.iterrows():
+        actual_eps = row.get("Reported EPS") if "Reported EPS" in past.columns else None
+        est_eps = row.get("EPS Estimate") if "EPS Estimate" in past.columns else None
+        actual_rev = row.get("Reported Revenue") if "Reported Revenue" in past.columns else None
+        est_rev = row.get("Revenue Estimate") if "Revenue Estimate" in past.columns else None
+        if _safe_float(actual_eps) is None and _safe_float(est_eps) is None:
+            continue
+        rows.append({
+            "ticker": ticker,
+            "announce_date": ts.strftime("%Y-%m-%d"),
+            "actual_eps": _safe_float(actual_eps),
+            "estimate_eps": _safe_float(est_eps),
+            "eps_surprise_pct": _surprise_pct(actual_eps, est_eps),
+            "actual_revenue": _safe_float(actual_rev),
+            "estimate_revenue": _safe_float(est_rev),
+            "revenue_surprise_pct": _surprise_pct(actual_rev, est_rev),
+            "source": "yfinance_announce",
+        })
+    return rows
+
+
+def _merge_fiscal_and_announcements(fiscal_rows: list[dict], announce_rows: list[dict]) -> list[dict]:
+    """회계분기 EPS와 발표일 EPS를 매칭 — date=발표일, period_end=분기마감."""
+    used_ann: set[int] = set()
+    merged: list[dict] = []
+
+    for f in fiscal_rows:
+        rec = dict(f)
+        match_i = None
+        for i, a in enumerate(announce_rows):
+            if i in used_ann:
+                continue
+            if _eps_close(f.get("actual_eps"), a.get("actual_eps")):
+                match_i = i
+                break
+        if match_i is not None:
+            used_ann.add(match_i)
+            a = announce_rows[match_i]
+            rec.update({
+                "date": a["announce_date"],
+                "actual_revenue": a.get("actual_revenue"),
+                "estimate_revenue": a.get("estimate_revenue"),
+                "revenue_surprise_pct": a.get("revenue_surprise_pct"),
+                "source": "yfinance_merged",
+            })
+            if rec.get("estimate_eps") is None:
+                rec["estimate_eps"] = a.get("estimate_eps")
+            if rec.get("eps_surprise_pct") is None:
+                rec["eps_surprise_pct"] = a.get("eps_surprise_pct")
+        else:
+            rec["date"] = f["period_end"]
+            rec["date_note"] = "발표일 미확인 — 분기 마감일 기준"
+        merged.append(rec)
+
+    known_dates = {m.get("date") for m in merged}
+    for i, a in enumerate(announce_rows):
+        if i in used_ann:
+            continue
+        if a["announce_date"] in known_dates:
+            continue
+        merged.append({
+            "ticker": a["ticker"],
+            "date": a["announce_date"],
+            "period_end": None,
+            "actual_eps": a.get("actual_eps"),
+            "estimate_eps": a.get("estimate_eps"),
+            "eps_surprise_pct": a.get("eps_surprise_pct"),
+            "actual_revenue": a.get("actual_revenue"),
+            "estimate_revenue": a.get("estimate_revenue"),
+            "revenue_surprise_pct": a.get("revenue_surprise_pct"),
+            "source": "yfinance_announce",
+        })
+        known_dates.add(a["announce_date"])
+
+    merged.sort(key=lambda r: r.get("date") or "", reverse=True)
+    return merged[:12]
+
+
+def _eps_from_income_stmt(stock, period_end: date) -> float | None:
+    qs = _yf_frame(stock.quarterly_income_stmt)
+    if qs is None:
+        return None
+    target = period_end.isoformat()
+    for col in qs.columns:
+        col_date = _parse_date(col)
+        if col_date is None:
+            continue
+        if col_date.isoformat() == target or str(col)[:10] == target:
+            for key in ("Diluted EPS", "Basic EPS"):
+                if key in qs.index:
+                    v = _safe_float(qs.loc[key, col])
+                    if v is not None:
+                        return round(v, 4)
+    return None
+
+
+def _supplement_recent_from_info(stock, ticker: str, history: list[dict]) -> list[dict]:
+    """earnings_dates 지연 시 info.earningsTimestamp + mostRecentQuarter로 최신 발표 보강."""
+    try:
+        info = stock.info or {}
+    except Exception:
+        return history
+
+    announce = _ts_to_date(info.get("earningsTimestamp"))
+    period_end = _ts_to_date(info.get("mostRecentQuarter"))
+    if announce is None or period_end is None:
+        return history
+    if announce > date.today():
+        return history
+
+    period_key = period_end.isoformat()
+    for h in history:
+        if h.get("period_end") == period_key:
+            return history
+        h_ann = _parse_date(h.get("date"))
+        if h_ann and abs((h_ann - announce).days) <= 2:
+            return history
+
+    actual = _eps_from_income_stmt(stock, period_end)
+    est = None
+    sp = None
+    for f in _fetch_fiscal_quarter_rows(stock, ticker):
+        if f.get("period_end") == period_key:
+            est = f.get("estimate_eps")
+            sp = f.get("eps_surprise_pct")
+            if actual is None:
+                actual = f.get("actual_eps")
+            break
+
+    rec: dict[str, Any] = {
+        "ticker": ticker,
+        "date": announce.isoformat(),
+        "period_end": period_key,
+        "actual_eps": actual,
+        "estimate_eps": est,
+        "eps_surprise_pct": sp if sp is not None else _surprise_pct(actual, est),
+        "source": "yfinance_info",
+    }
+    if actual is None:
+        rec["date_note"] = "최신 실적 발표 확인 — EPS·컨센서스 동기화 대기"
+    history = [rec] + history
+    history.sort(key=lambda r: r.get("date") or "", reverse=True)
+    return history[:12]
 
 
 def fetch_yfinance_earnings(ticker: str) -> dict:
@@ -182,41 +419,15 @@ def fetch_yfinance_earnings(ticker: str) -> dict:
             print(f"[earnings] {t} 재무제표 오류: {e}")
 
         try:
-            import pandas as pd
-
-            ed = _yf_frame(stock.earnings_dates)
-            if ed is not None:
-                now_utc = pd.Timestamp.now(tz="UTC")
-                if getattr(ed.index, "tz", None) is None:
-                    try:
-                        ed = ed.copy()
-                        ed.index = pd.to_datetime(ed.index).tz_localize("UTC")
-                    except Exception:
-                        ed.index = pd.to_datetime(ed.index, utc=True)
-                past = ed[ed.index <= now_utc].head(12)
-                history = []
-                for i, (ts, row) in enumerate(past.iterrows()):
-                    actual_eps = row.get("Reported EPS") if "Reported EPS" in past.columns else None
-                    est_eps = row.get("EPS Estimate") if "EPS Estimate" in past.columns else None
-                    actual_rev = row.get("Reported Revenue") if "Reported Revenue" in past.columns else None
-                    est_rev = row.get("Revenue Estimate") if "Revenue Estimate" in past.columns else None
-                    rec = {
-                        "ticker": t,
-                        "date": ts.strftime("%Y-%m-%d"),
-                        "actual_eps": _safe_float(actual_eps),
-                        "estimate_eps": _safe_float(est_eps),
-                        "eps_surprise_pct": _surprise_pct(actual_eps, est_eps),
-                        "actual_revenue": _safe_float(actual_rev),
-                        "estimate_revenue": _safe_float(est_rev),
-                        "revenue_surprise_pct": _surprise_pct(actual_rev, est_rev),
-                        "source": "yfinance",
-                    }
-                    if i == 0 and latest_financials:
-                        rec["financials"] = latest_financials
-                    history.append(rec)
+            fiscal_rows = _fetch_fiscal_quarter_rows(stock, t)
+            announce_rows = _fetch_announcement_rows(stock, t)
+            history = _merge_fiscal_and_announcements(fiscal_rows, announce_rows)
+            history = _supplement_recent_from_info(stock, t, history)
+            if history:
+                if latest_financials:
+                    history[0]["financials"] = latest_financials
                 result["history"] = history
-                if history:
-                    result["available"] = True
+                result["available"] = True
         except Exception as e:
             msg = str(e)
             if "lxml" in msg.lower():
@@ -352,6 +563,13 @@ def _needs_sync(ticker: str, profile: dict | None) -> bool:
     except (TypeError, ValueError):
         return True
     nd = _parse_date(profile.get("next_earnings_date"))
+    if nd and (date.today() - nd).days >= 0:
+        latest = _parse_date(profile.get("latest_earnings_date"))
+        if latest is None or latest < nd:
+            return True
+    latest = _parse_date(profile.get("latest_earnings_date"))
+    if latest and (date.today() - latest).days >= 75:
+        return True
     if nd and (date.today() - nd).days > 1 and count_earnings_history(t) == 0:
         return True
     return False
@@ -416,6 +634,58 @@ def _sync_from_yfinance(ticker: str, claude_client=None) -> dict:
     return profile
 
 
+def _surprise_label(sp: float | None) -> str:
+    if sp is None:
+        return "컨센서스 비교 불가"
+    if sp >= 0:
+        return f"예상 대비 {abs(sp):.1f}% 상회(서프라이즈)"
+    return f"예상 대비 {abs(sp):.1f}% 하회(쇼크)"
+
+
+def _streak_label(sp: float | None) -> str:
+    if sp is None:
+        return "—"
+    return "상회" if sp >= 0 else "하회"
+
+
+def _build_earnings_summary(history: list[dict]) -> str:
+    """UI·리포트용 한글 해설 — 숫자만 나열하지 않고 의미 설명."""
+    if not history:
+        return ""
+    latest = history[0]
+    prev = history[1] if len(history) > 1 else None
+    parts: list[str] = []
+
+    label = _format_earnings_date_label(latest)
+    parts.append(f"{label} 실적입니다.")
+
+    if latest.get("date_note"):
+        parts.append(latest["date_note"] + ".")
+
+    actual = latest.get("actual_eps")
+    est = latest.get("estimate_eps")
+    sp = latest.get("eps_surprise_pct")
+    if actual is not None:
+        est_txt = f"${est}" if est is not None else "—"
+        parts.append(f"주당순이익(EPS) ${actual}(애널리스트 예상 {est_txt}). {_surprise_label(sp)}.")
+    elif latest.get("period_end"):
+        parts.append("EPS·컨센서스 수치는 아직 동기화 중입니다.")
+
+    if prev and actual is not None and prev.get("actual_eps") is not None:
+        chg = _pct_change(actual, prev["actual_eps"])
+        if chg is not None:
+            direction = "개선" if actual >= prev["actual_eps"] else "악화"
+            parts.append(
+                f"직전 분기(QoQ) ${prev['actual_eps']}→${actual} ({chg:+.1f}%)로 EPS {direction}."
+            )
+
+    streak = [_streak_label(h.get("eps_surprise_pct")) for h in history[:4] if h.get("eps_surprise_pct") is not None]
+    if len(streak) >= 2:
+        parts.append(f"최근 {len(streak)}분기 컨센서스 대비: {' → '.join(streak)} (최신→과거).")
+
+    return " ".join(parts)
+
+
 def _build_comparison_lines(history: list[dict]) -> list[str]:
     """DB 이력 기반 QoQ·YoY·서프라이즈 추세."""
     if len(history) < 1:
@@ -425,15 +695,17 @@ def _build_comparison_lines(history: list[dict]) -> list[str]:
     prev = history[1] if len(history) > 1 else None
     yoy = history[4] if len(history) > 4 else None
 
+    lines.append(f"📌 {_format_earnings_date_label(latest)}")
+
     if latest.get("actual_eps") is not None:
         sp = latest.get("eps_surprise_pct")
-        sp_txt = f" ({'+' if (sp or 0) >= 0 else ''}{sp}% vs 컨센서스)" if sp is not None else ""
+        sp_txt = f" — {_surprise_label(sp)}" if sp is not None else ""
         lines.append(
-            f"최신 ({latest['date']}): EPS ${latest['actual_eps']} / 예상 ${latest.get('estimate_eps', '—')}{sp_txt}"
+            f"  EPS ${latest['actual_eps']} / 예상 ${latest.get('estimate_eps', '—')}{sp_txt}"
         )
     if latest.get("actual_revenue") is not None:
         rsp = latest.get("revenue_surprise_pct")
-        rsp_txt = f" ({'+' if (rsp or 0) >= 0 else ''}{rsp}%)" if rsp is not None else ""
+        rsp_txt = f" ({'+' if (rsp or 0) >= 0 else ''}{rsp}% vs 예상)" if rsp is not None else ""
         lines.append(
             f"  매출 ${_rev_billions(latest['actual_revenue'])}B / 예상 ${_rev_billions(latest.get('estimate_revenue'))}B{rsp_txt}"
         )
@@ -441,8 +713,9 @@ def _build_comparison_lines(history: list[dict]) -> list[str]:
     if prev and latest.get("actual_eps") is not None and prev.get("actual_eps") is not None:
         chg = _pct_change(latest["actual_eps"], prev["actual_eps"])
         if chg is not None:
+            prev_label = _period_end_label(prev.get("period_end")) or f"직전({prev['date']})"
             lines.append(
-                f"  QoQ EPS: ${prev['actual_eps']} → ${latest['actual_eps']} ({chg:+.1f}%)"
+                f"  QoQ EPS ({prev_label}): ${prev['actual_eps']} → ${latest['actual_eps']} ({chg:+.1f}%)"
             )
     if prev and latest.get("actual_revenue") and prev.get("actual_revenue"):
         chg = _pct_change(latest["actual_revenue"], prev["actual_revenue"])
@@ -454,8 +727,9 @@ def _build_comparison_lines(history: list[dict]) -> list[str]:
     if yoy and latest.get("actual_eps") is not None and yoy.get("actual_eps") is not None:
         chg = _pct_change(latest["actual_eps"], yoy["actual_eps"])
         if chg is not None:
+            yoy_label = _period_end_label(yoy.get("period_end")) or f"4분기 전({yoy['date']})"
             lines.append(
-                f"  YoY EPS (4분기 전): ${yoy['actual_eps']} → ${latest['actual_eps']} ({chg:+.1f}%)"
+                f"  YoY EPS ({yoy_label}): ${yoy['actual_eps']} → ${latest['actual_eps']} ({chg:+.1f}%)"
             )
 
     streak = []
@@ -463,17 +737,18 @@ def _build_comparison_lines(history: list[dict]) -> list[str]:
         sp = h.get("eps_surprise_pct")
         if sp is None:
             continue
-        streak.append("beat" if sp >= 0 else "miss")
+        streak.append(_streak_label(sp))
     if len(streak) >= 2:
-        lines.append(f"  최근 EPS vs 컨센서스: {' → '.join(streak)} (최신→과거)")
+        lines.append(f"  컨센서스 추세: {' → '.join(streak)} (최신→과거, 상회=서프라이즈)")
 
     if len(history) >= 2:
         lines.append("  분기 이력:")
         for h in history[:6]:
             sp = h.get("eps_surprise_pct")
-            sp_s = f" {'+' if (sp or 0) >= 0 else ''}{sp}%" if sp is not None else ""
+            sp_s = f" · {_streak_label(sp)}" if sp is not None else ""
             eps = h.get("actual_eps")
-            lines.append(f"    · {h['date']}: EPS ${eps if eps is not None else '—'}{sp_s}")
+            when = _format_earnings_date_label(h)
+            lines.append(f"    · {when}: EPS ${eps if eps is not None else '—'}{sp_s}")
 
     return lines
 
@@ -538,6 +813,9 @@ def build_report_bundle(profile: dict, history: list[dict] | None = None, today:
         bundle["earnings_call"] = call
 
     bundle["comparison_text"] = _build_comparison_lines(history)
+    bundle["summary_text"] = _build_earnings_summary(history)
+    if latest:
+        bundle["date_label"] = _format_earnings_date_label(latest)
     return bundle
 
 
@@ -565,6 +843,9 @@ def format_earnings_prompt_text(bundle: dict) -> str:
             lines.append(f"📅 다음 실적: {nd}")
 
     comp = bundle.get("comparison_text") or []
+    summary = bundle.get("summary_text") or ""
+    if summary:
+        lines.append(f"📋 실적 요약: {summary}")
     if comp:
         lines.append(f"📈 실적 이력 ({bundle.get('history_count', 0)}분기 DB 보관 — QoQ/YoY 비교):")
         lines.extend(f"  {ln}" if not ln.startswith("  ") else ln for ln in comp)
@@ -611,8 +892,18 @@ def get_earnings_for_report(ticker: str, claude_client=None, *, force_sync: bool
 
 
 def get_earnings_display_bundle(ticker: str, snapshot: dict | None = None) -> dict:
-    """캐시된 분석 UI — DB만 사용 (외부 호출 없음)."""
-    return get_earnings_for_report(ticker, claude_client=None, force_sync=False)
+    """UI용 실적 — DB 조회, 분기 실적 누락 시 자동 동기화."""
+    t = (ticker or "").upper()
+    profile = get_ticker_earnings(t) or {}
+    force = _needs_sync(t, profile)
+    snap_date = _parse_date(
+        (snapshot or {}).get("last_earnings_date")
+        or ((snapshot or {}).get("last_earnings") or {}).get("date")
+    )
+    db_latest = _parse_date(profile.get("latest_earnings_date"))
+    if snap_date and db_latest and db_latest < snap_date:
+        force = True
+    return get_earnings_for_report(ticker, claude_client=None, force_sync=force)
 
 
 # 하위 호환
