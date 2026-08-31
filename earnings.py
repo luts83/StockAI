@@ -307,53 +307,117 @@ def _eps_from_income_stmt(stock, period_end: date) -> float | None:
     return None
 
 
-def _supplement_recent_from_info(stock, ticker: str, history: list[dict]) -> list[dict]:
-    """earnings_dates 지연 시 info.earningsTimestamp + mostRecentQuarter로 최신 발표 보강."""
+def _read_info_announce_meta(stock) -> tuple[date | None, date | None]:
+    """yfinance Ticker.info — 최근 실적 발표일·회계분기 마감."""
     try:
         info = stock.info or {}
     except Exception:
-        return history
-
+        return None, None
     announce = _ts_to_date(info.get("earningsTimestamp"))
     period_end = _ts_to_date(info.get("mostRecentQuarter"))
+    if announce is not None and announce > date.today():
+        return None, None
+    return announce, period_end
+
+
+def _fiscal_eps_for_period(stock, ticker: str, period_end: date) -> tuple[float | None, float | None, float | None]:
+    """분기 EPS·예상·서프라이즈 — earnings_history → income_stmt 순."""
+    period_key = period_end.isoformat()
+    actual = est = sp = None
+    for f in _fetch_fiscal_quarter_rows(stock, ticker):
+        if f.get("period_end") == period_key:
+            actual = f.get("actual_eps")
+            est = f.get("estimate_eps")
+            sp = f.get("eps_surprise_pct")
+            break
+    if actual is None:
+        actual = _eps_from_income_stmt(stock, period_end)
+    if sp is None:
+        sp = _surprise_pct(actual, est)
+    return actual, est, sp
+
+
+def _apply_latest_from_info(stock, ticker: str, history: list[dict]) -> list[dict]:
+    """earnings_dates 지연 시 info.earningsTimestamp로 발표일 보정·보강.
+
+    yfinance earnings_history는 분기 마감(period_end)만 먼저 올라오고
+    earnings_dates에 발표일(예: 8/27)이 늦게 반영되는 경우가 있어,
+    date=period_end 로 잘못 저장된 행을 발표일로 덮어쓴다.
+    """
+    announce, period_end = _read_info_announce_meta(stock)
     if announce is None or period_end is None:
-        return history
-    if announce > date.today():
         return history
 
     period_key = period_end.isoformat()
+    announce_key = announce.isoformat()
+
     for h in history:
-        if h.get("period_end") == period_key:
-            return history
         h_ann = _parse_date(h.get("date"))
-        if h_ann and abs((h_ann - announce).days) <= 2:
+        if h_ann and h.get("period_end") == period_key and h_ann == announce:
+            return history
+        if h_ann and abs((h_ann - announce).days) <= 2 and h.get("period_end") in (period_key, None):
             return history
 
-    actual = _eps_from_income_stmt(stock, period_end)
-    est = None
-    sp = None
-    for f in _fetch_fiscal_quarter_rows(stock, ticker):
-        if f.get("period_end") == period_key:
-            est = f.get("estimate_eps")
-            sp = f.get("eps_surprise_pct")
-            if actual is None:
-                actual = f.get("actual_eps")
+    idx = None
+    for i, h in enumerate(history):
+        pe = h.get("period_end")
+        d = h.get("date")
+        if pe == period_key or d == period_key:
+            idx = i
             break
 
-    rec: dict[str, Any] = {
-        "ticker": ticker,
-        "date": announce.isoformat(),
-        "period_end": period_key,
-        "actual_eps": actual,
-        "estimate_eps": est,
-        "eps_surprise_pct": sp if sp is not None else _surprise_pct(actual, est),
-        "source": "yfinance_info",
-    }
-    if actual is None:
-        rec["date_note"] = "최신 실적 발표 확인 — EPS·컨센서스 동기화 대기"
-    history = [rec] + history
+    actual, est, sp = _fiscal_eps_for_period(stock, ticker, period_end)
+
+    if idx is not None:
+        rec = dict(history[idx])
+        old_date = rec.get("date")
+        had_wrong_note = str(rec.get("date_note") or "").startswith("발표일 미확인")
+        rec["date"] = announce_key
+        rec["period_end"] = period_key
+        rec["ticker"] = ticker
+        rec["source"] = "yfinance_info"
+        if actual is not None and rec.get("actual_eps") is None:
+            rec["actual_eps"] = actual
+        if est is not None and rec.get("estimate_eps") is None:
+            rec["estimate_eps"] = est
+        if sp is not None and rec.get("eps_surprise_pct") is None:
+            rec["eps_surprise_pct"] = sp
+        elif rec.get("eps_surprise_pct") is None:
+            rec["eps_surprise_pct"] = _surprise_pct(rec.get("actual_eps"), rec.get("estimate_eps"))
+        if old_date == period_key or had_wrong_note:
+            rec.pop("date_note", None)
+        if rec.get("actual_eps") is None:
+            rec["date_note"] = "EPS·컨센서스 — yfinance 반영 대기 (발표일은 IR 기준)"
+        history[idx] = rec
+    else:
+        rec = {
+            "ticker": ticker,
+            "date": announce_key,
+            "period_end": period_key,
+            "actual_eps": actual,
+            "estimate_eps": est,
+            "eps_surprise_pct": sp,
+            "source": "yfinance_info",
+        }
+        if actual is None:
+            rec["date_note"] = "EPS·컨센서스 — yfinance 반영 대기 (발표일은 IR 기준)"
+        history.append(rec)
+
     history.sort(key=lambda r: r.get("date") or "", reverse=True)
-    return history[:12]
+    deduped: list[dict] = []
+    seen_period: set[str] = set()
+    for h in history:
+        pe = h.get("period_end") or h.get("date")
+        if pe in seen_period:
+            continue
+        seen_period.add(pe)
+        deduped.append(h)
+    return deduped[:12]
+
+
+# 하위 호환 별칭
+def _supplement_recent_from_info(stock, ticker: str, history: list[dict]) -> list[dict]:
+    return _apply_latest_from_info(stock, ticker, history)
 
 
 def fetch_yfinance_earnings(ticker: str) -> dict:
@@ -814,6 +878,12 @@ def build_report_bundle(profile: dict, history: list[dict] | None = None, today:
 
     bundle["comparison_text"] = _build_comparison_lines(history)
     bundle["summary_text"] = _build_earnings_summary(history)
+    bundle["data_sources"] = [
+        "yfinance earnings_dates (발표일·EPS)",
+        "yfinance earnings_history (분기 마감·EPS)",
+        "yfinance info.earningsTimestamp (최신 발표일 보정)",
+        "MongoDB earnings_history",
+    ]
     if latest:
         bundle["date_label"] = _format_earnings_date_label(latest)
     return bundle

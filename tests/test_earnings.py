@@ -86,6 +86,33 @@ def test_prompt_always_includes_history_from_db():
     assert "QoQ" in text or "분기 이력" in text
 
 
+def test_apply_latest_from_info_fixes_period_end_date():
+    """분기 마감일(6/30)이 date로 잘못 들어온 경우 info로 8/27 발표일 보정."""
+    from datetime import datetime, timezone
+    announce_ts = int(datetime(2026, 8, 27, 20, 0, 0, tzinfo=timezone.utc).timestamp())
+    period_ts = 1782777600  # 2026-06-30 UTC (yfinance mostRecentQuarter)
+
+    class FakeStock:
+        info = {"earningsTimestamp": announce_ts, "mostRecentQuarter": period_ts}
+        earnings_history = None
+        quarterly_income_stmt = None
+
+    from earnings import _apply_latest_from_info
+
+    history = [{
+        "ticker": "IREN",
+        "date": "2026-06-30",
+        "period_end": "2026-06-30",
+        "actual_eps": None,
+        "date_note": "발표일 미확인 — 분기 마감일 기준",
+        "source": "yfinance_fiscal",
+    }]
+    out = _apply_latest_from_info(FakeStock(), "IREN", history)
+    assert out[0]["date"] == "2026-08-27"
+    assert out[0]["period_end"] == "2026-06-30"
+    assert "발표일 미확인" not in (out[0].get("date_note") or "")
+
+
 def test_needs_sync_when_quarter_stale():
     from datetime import date, timedelta
     from earnings import _needs_sync
