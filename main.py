@@ -31,7 +31,7 @@ from database import (
     get_all_history, get_history_count, append_chat, delete_analysis,
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
-    get_recent_market_briefs, delete_market_brief, migrate_brief_types,
+    get_market_brief_by_id, get_recent_market_briefs, delete_market_brief, migrate_brief_types,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
@@ -1358,9 +1358,24 @@ async def latest_brief():
 
 
 @app.get("/market/brief/list")
-async def brief_list():
-    """시황 목록 조회"""
-    return get_market_briefs(limit=10)
+async def brief_list(brief_type: Optional[str] = None, limit: int = 40):
+    """시황 히스토리 목록 — 타입별·날짜순 preview"""
+    if brief_type and brief_type not in (
+        "kr_premarket", "kr_close", "us_premarket", "us_close",
+        "premarket", "close", "korea_close",
+    ):
+        raise HTTPException(status_code=400, detail="invalid brief_type")
+    cap = max(1, min(limit, 60))
+    return get_market_briefs(limit=cap, brief_type=brief_type or None)
+
+
+@app.get("/market/brief/item/{doc_id}")
+async def brief_item(doc_id: str):
+    """시황 전문 조회 (히스토리에서 선택 시)"""
+    doc = get_market_brief_by_id(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="시황을 찾을 수 없습니다")
+    return doc
 
 
 @app.get("/market/brief/accuracy")

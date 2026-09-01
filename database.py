@@ -547,16 +547,42 @@ def migrate_brief_types() -> dict:
         print(f"[db] 시황 타입 마이그레이션: {result}")
     return result
 
-def get_market_briefs(limit: int = 10) -> list:
+def get_market_briefs(limit: int = 30, brief_type: str | None = None) -> list:
+    """시황 목록 — preview만 포함 (전문은 get_market_brief_by_id)."""
     db = get_db()
-    cursor = db["market_briefs"].find(
-        {},
-        {"market_data": 0},
-    ).sort("created_at", -1).limit(limit)
-    items = list(cursor)
-    for item in items:
-        item["_id"] = str(item["_id"])
-    return items
+    q: dict = {}
+    if brief_type:
+        q["type"] = brief_type
+    cursor = (
+        db["market_briefs"]
+        .find(
+            q,
+            {"market_data": 0, "type": 1, "date": 1, "signal": 1, "created_at": 1, "analysis": 1},
+        )
+        .sort([("date", -1), ("created_at", -1)])
+        .limit(limit)
+    )
+    items = []
+    for doc in cursor:
+        text = (doc.get("analysis") or "").replace("\n", " ").strip()
+        items.append({
+            "_id": str(doc["_id"]),
+            "type": doc.get("type"),
+            "date": doc.get("date"),
+            "signal": doc.get("signal"),
+            "created_at": doc.get("created_at"),
+            "preview": text[:160] + ("…" if len(text) > 160 else ""),
+        })
+    return _json_safe(items)
+
+
+def get_market_brief_by_id(doc_id: str) -> dict | None:
+    db = get_db()
+    doc = db["market_briefs"].find_one({"_id": doc_id}, {"market_data": 0})
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return _json_safe(doc)
 
 
 # ── Signal outcomes (Phase 1 Baseline) ──────────────────

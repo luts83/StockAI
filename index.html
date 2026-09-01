@@ -274,6 +274,47 @@ header {
 .signal-sub  { font-size:12px; color:var(--muted); margin-top:2px; }
 
 /* ANALYSIS MARKDOWN */
+.brief-modal-box {
+  background:var(--card); border:1px solid var(--border2); border-radius:16px;
+  max-width:920px; width:94%; max-height:85vh; display:flex; flex-direction:column;
+  overflow:hidden;
+}
+.brief-modal-tabs {
+  display:flex; flex-wrap:wrap; gap:6px; padding:0 20px 12px;
+  border-bottom:1px solid var(--border);
+}
+.brief-tab-btn {
+  font-size:11px; padding:5px 10px; border-radius:6px; cursor:pointer;
+  font-family:'JetBrains Mono',monospace; border:1px solid var(--border2);
+  background:transparent; color:var(--muted); transition:all 0.15s;
+}
+.brief-tab-btn.active {
+  color:var(--blue); border-color:var(--blue); background:rgba(77,159,255,0.08);
+}
+.brief-modal-body { display:flex; flex:1; min-height:0; }
+#brief-history-list {
+  width:250px; flex-shrink:0; overflow-y:auto;
+  border-right:1px solid var(--border); background:rgba(0,0,0,0.15);
+}
+.brief-history-item {
+  padding:10px 14px; cursor:pointer; border-bottom:1px solid var(--border);
+  transition:background 0.12s;
+}
+.brief-history-item:hover { background:rgba(255,255,255,0.03); }
+.brief-history-item.active {
+  background:rgba(77,159,255,0.1); border-left:3px solid var(--blue); padding-left:11px;
+}
+.brief-history-date { font-size:12px; font-weight:600; color:var(--text); }
+.brief-history-meta { font-size:10px; color:var(--dim); margin-top:3px; }
+.brief-history-preview { font-size:10px; color:var(--muted); margin-top:4px; line-height:1.4;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+#modal-brief-content-wrap { flex:1; overflow-y:auto; padding:20px 24px; min-width:0; }
+#brief-history-empty { padding:24px 14px; font-size:12px; color:var(--dim); text-align:center; }
+@media (max-width: 640px) {
+  .brief-modal-body { flex-direction:column; }
+  #brief-history-list { width:100%; max-height:150px; border-right:none; border-bottom:1px solid var(--border); }
+}
+
 .analysis-md { font-size:13.5px; line-height:1.8; color:#c8d8e8; }
 .analysis-md h1 { font-size:15px; font-weight:700; color:var(--text); margin:0 0 16px; padding-bottom:10px; border-bottom:1px solid var(--border); }
 .analysis-md h2 { font-size:11px; font-weight:700; color:var(--blue); text-transform:uppercase; letter-spacing:0.8px; margin:22px 0 10px; display:flex; align-items:center; gap:8px; }
@@ -660,7 +701,7 @@ header {
         style="font-size:11px; color:var(--blue);
         background:none; border:none; cursor:pointer;
         font-family:'JetBrains Mono',monospace;">
-        전체 보기 →
+        시황 히스토리 →
       </button>
     </div>
   </div>
@@ -3042,6 +3083,19 @@ const SIGNAL_MAP = {
   NEUTRAL: { icon: "⚪", text: "중립", color: "var(--muted)", bg: "var(--border)" },
 };
 
+const BRIEF_TYPES = ["kr_premarket", "kr_close", "us_premarket", "us_close"];
+const BRIEF_TAB_LABELS = {
+  kr_premarket: "🇰🇷 장전",
+  kr_close:     "🇰🇷 마감",
+  us_premarket: "🇺🇸 장전",
+  us_close:     "🇺🇸 마감",
+};
+
+let briefHistoryType = null;
+let briefHistoryItems = [];
+let briefHistorySelectedId = null;
+let briefHistoryCache = {};
+
 const BRIEF_LABELS = {
   kr_premarket: "🇰🇷 한국장 전 시황",
   kr_close:     "🇰🇷 한국장 마감 시황",
@@ -3131,7 +3185,7 @@ function _applyBriefToBanner(brief) {
 
   const summary = _extractBannerSummary(brief.analysis);
   document.getElementById("banner-summary").textContent =
-    summary || "시황 요약을 불러오지 못했습니다. 전체 보기를 눌러주세요.";
+    summary || "시황 요약을 불러오지 못했습니다. 시황 히스토리를 눌러주세요.";
 
   document.getElementById("market-banner").style.display = "block";
 }
@@ -3205,25 +3259,134 @@ async function generateBrief(type, force = false) {
   }
 }
 
-function showMarketBriefModal() {
-  // NEW 뱃지 제거
+function _renderBriefMarkdown(text) {
+  return typeof marked !== "undefined"
+    ? marked.parse(text || "")
+    : (text || "").replace(/\n/g, "<br>");
+}
+
+function _briefWeekday(dateStr) {
+  const weekdayKr = ["일", "월", "화", "수", "목", "금", "토"];
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (!dateStr || Number.isNaN(d.getTime())) return dateStr || "";
+  return `${dateStr} (${weekdayKr[d.getDay()]})`;
+}
+
+function _renderBriefHistoryTabs(activeType) {
+  const el = document.getElementById("brief-history-tabs");
+  if (!el) return;
+  el.innerHTML = BRIEF_TYPES.map((t) => {
+    const cls = t === activeType ? "brief-tab-btn active" : "brief-tab-btn";
+    return `<button type="button" class="${cls}" onclick="switchBriefHistoryType('${t}')">${BRIEF_TAB_LABELS[t]}</button>`;
+  }).join("");
+}
+
+function _renderBriefHistoryList(items, selectedId) {
+  const el = document.getElementById("brief-history-list");
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = `<div id="brief-history-empty">저장된 시황이 없습니다.</div>`;
+    return;
+  }
+  el.innerHTML = items.map((b) => {
+    const s = SIGNAL_MAP[b.signal] || SIGNAL_MAP.NEUTRAL;
+    const active = b._id === selectedId ? "brief-history-item active" : "brief-history-item";
+    const preview = (b.preview || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `
+      <div class="${active}" onclick="selectBriefHistoryItem('${b._id}')">
+        <div class="brief-history-date">${_briefWeekday(b.date)}</div>
+        <div class="brief-history-meta">${s.icon} ${s.text}${b.created_at ? " · " + b.created_at.slice(0, 16).replace("T", " ") : ""}</div>
+        ${preview ? `<div class="brief-history-preview">${preview}</div>` : ""}
+      </div>`;
+  }).join("");
+}
+
+function _setBriefModalContent(brief) {
+  if (!brief) return;
+  document.getElementById("modal-brief-title").textContent =
+    `${BRIEF_LABELS[brief.type] || "📊 시황"} · ${_briefWeekday(brief.date)}`;
+  document.getElementById("modal-brief-content").innerHTML =
+    _renderBriefMarkdown(brief.analysis);
+}
+
+async function loadBriefHistoryList(briefType) {
+  briefHistoryType = briefType;
+  _renderBriefHistoryTabs(briefType);
+  const listEl = document.getElementById("brief-history-list");
+  if (listEl) listEl.innerHTML = `<div id="brief-history-empty">불러오는 중…</div>`;
+  try {
+    const res = await fetch(`${API}/market/brief/list?brief_type=${encodeURIComponent(briefType)}&limit=40`);
+    if (!res.ok) throw new Error("목록 조회 실패");
+    briefHistoryItems = await res.json();
+    _renderBriefHistoryList(briefHistoryItems, briefHistorySelectedId);
+  } catch (e) {
+    console.error("[brief-history]", e);
+    if (listEl) listEl.innerHTML = `<div id="brief-history-empty">목록을 불러오지 못했습니다.</div>`;
+    briefHistoryItems = [];
+  }
+}
+
+async function selectBriefHistoryItem(docId) {
+  briefHistorySelectedId = docId;
+  _renderBriefHistoryList(briefHistoryItems, docId);
+  const cached = briefHistoryCache[docId];
+  if (cached?.analysis) {
+    _setBriefModalContent(cached);
+    return;
+  }
+  const contentEl = document.getElementById("modal-brief-content");
+  if (contentEl) contentEl.innerHTML = `<p style="color:var(--dim);font-size:13px">불러오는 중…</p>`;
+  try {
+    const res = await fetch(`${API}/market/brief/item/${encodeURIComponent(docId)}`);
+    if (!res.ok) throw new Error("시황 조회 실패");
+    const brief = await res.json();
+    briefHistoryCache[docId] = brief;
+    _setBriefModalContent(brief);
+  } catch (e) {
+    console.error("[brief-history]", e);
+    if (contentEl) contentEl.innerHTML = `<p style="color:var(--red);font-size:13px">시황을 불러오지 못했습니다.</p>`;
+  }
+}
+
+async function switchBriefHistoryType(briefType) {
+  briefHistorySelectedId = null;
+  await loadBriefHistoryList(briefType);
+  if (briefHistoryItems.length) {
+    await selectBriefHistoryItem(briefHistoryItems[0]._id);
+  } else {
+    document.getElementById("modal-brief-title").textContent = BRIEF_LABELS[briefType] || "시황";
+    document.getElementById("modal-brief-content").innerHTML =
+      `<p style="color:var(--dim);font-size:13px">이 타입의 저장된 시황이 없습니다.</p>`;
+  }
+}
+
+async function showMarketBriefModal() {
   const newBadge = document.getElementById("new-brief-badge");
   if (newBadge) newBadge.style.display = "none";
 
-  if (!marketBriefData) return;
-  const weekdayKr = ["일", "월", "화", "수", "목", "금", "토"];
-  const briefDate = marketBriefData.date || "";
-  const d = new Date(`${briefDate}T00:00:00`);
-  const dateLabel = briefDate && !Number.isNaN(d.getTime())
-    ? `${briefDate} ${weekdayKr[d.getDay()]}요일`
-    : briefDate;
-  document.getElementById("modal-brief-title").textContent =
-    `${BRIEF_LABELS[marketBriefData.type] || "📊 시황"} (${dateLabel})`;
-  document.getElementById("modal-brief-content").innerHTML =
-    typeof marked !== "undefined"
-      ? marked.parse(marketBriefData.analysis)
-      : marketBriefData.analysis.replace(/\n/g, "<br>");
   document.getElementById("market-brief-modal").style.display = "flex";
+
+  const initialType = marketBriefData?.type || "us_close";
+  const initialId = marketBriefData?._id || null;
+  briefHistorySelectedId = initialId;
+
+  if (marketBriefData?.analysis && initialId) {
+    briefHistoryCache[initialId] = marketBriefData;
+  }
+
+  await loadBriefHistoryList(initialType);
+
+  if (initialId && briefHistoryItems.some((b) => b._id === initialId)) {
+    await selectBriefHistoryItem(initialId);
+  } else if (briefHistoryItems.length) {
+    await selectBriefHistoryItem(briefHistoryItems[0]._id);
+  } else if (marketBriefData?.analysis) {
+    _setBriefModalContent(marketBriefData);
+  } else {
+    document.getElementById("modal-brief-title").textContent = "시황 히스토리";
+    document.getElementById("modal-brief-content").innerHTML =
+      `<p style="color:var(--dim);font-size:13px">저장된 시황이 없습니다.</p>`;
+  }
 }
 
 function closeMarketBriefModal() {
@@ -3258,27 +3421,28 @@ startMarketPolling();
 
 </script>
 
-<!-- 시황 전체 모달 -->
+<!-- 시황 히스토리 모달 -->
 <div id="market-brief-modal"
   style="display:none; position:fixed; inset:0;
   background:rgba(0,0,0,0.8); z-index:500;
   align-items:center; justify-content:center;"
   onclick="if(event.target===this)closeMarketBriefModal()">
-  <div style="background:var(--card);
-    border:1px solid var(--border2); border-radius:16px;
-    max-width:600px; width:90%; max-height:80vh;
-    overflow-y:auto; padding:28px;">
-    <div style="display:flex; justify-content:space-between;
-      align-items:center; margin-bottom:20px;">
-      <h3 style="font-size:16px; font-weight:700;"
-        id="modal-brief-title">시황 분석</h3>
+  <div class="brief-modal-box" onclick="event.stopPropagation()">
+    <div style="display:flex; justify-content:space-between; align-items:center;
+      padding:20px 20px 12px; flex-shrink:0;">
+      <h3 style="font-size:16px; font-weight:700; margin:0;" id="modal-brief-title">시황 분석</h3>
       <button onclick="closeMarketBriefModal()"
-        style="background:none; border:none;
-        color:var(--muted); font-size:20px; cursor:pointer;">
+        style="background:none; border:none; color:var(--muted); font-size:22px; cursor:pointer; line-height:1;">
         ×
       </button>
     </div>
-    <div class="analysis-md" id="modal-brief-content"></div>
+    <div class="brief-modal-tabs" id="brief-history-tabs"></div>
+    <div class="brief-modal-body">
+      <div id="brief-history-list"></div>
+      <div id="modal-brief-content-wrap">
+        <div class="analysis-md" id="modal-brief-content"></div>
+      </div>
+    </div>
   </div>
 </div>
 
