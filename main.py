@@ -32,6 +32,7 @@ from database import (
     upsert_user,
     save_market_brief, get_latest_market_brief, get_market_briefs,
     get_market_brief_by_id, get_recent_market_briefs, delete_market_brief, migrate_brief_types,
+    refresh_fact_audit,
     get_today_analysis, update_analysis_news,
     get_today_public_analysis, save_public_analysis,
     ensure_indexes,
@@ -1376,6 +1377,22 @@ async def brief_item(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="시황을 찾을 수 없습니다")
     return doc
+
+
+@app.post("/market/brief/audit/{doc_id}")
+async def brief_audit(
+    doc_id: str,
+    authorization: Optional[str] = Header(None),
+    stockai_token: Optional[str] = Cookie(None),
+):
+    """시황 팩트 검증 재실행 (관리자 전용) — market_data vs 본문 수치"""
+    user = get_current_user(token=stockai_token, authorization=authorization)
+    if not user or user.get("email", "").strip().lower() != ADMIN_EMAIL.strip().lower():
+        raise HTTPException(status_code=403, detail="관리자만 사용할 수 있습니다")
+    audit = refresh_fact_audit(doc_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="시황 또는 market_data를 찾을 수 없습니다")
+    return {"doc_id": doc_id, "fact_audit": audit}
 
 
 @app.get("/market/brief/accuracy")

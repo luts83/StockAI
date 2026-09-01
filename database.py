@@ -481,12 +481,31 @@ def delete_analysis(doc_id: str):
 
 
 # ── 시황 저장/조회 ──────────────────────────────────────
+def _attach_fact_audit(doc: dict, db=None) -> dict:
+    """fact_audit 없으면 analysis+market_data로 lazy 검증."""
+    if doc.get("fact_audit") or not doc.get("analysis"):
+        return doc
+    market_data = doc.get("market_data")
+    if market_data is None:
+        if db is None:
+            db = get_db()
+        full = db["market_briefs"].find_one({"_id": doc["_id"]}, {"market_data": 1})
+        market_data = full.get("market_data") if full else None
+    if market_data:
+        from brief_fact_audit import audit_brief_facts
+        doc["fact_audit"] = audit_brief_facts(doc["analysis"], market_data)
+    return doc
+
+
 def save_market_brief(brief: dict) -> str:
+    from brief_fact_audit import audit_brief_facts
+
     db = get_db()
-    # type+date 기반 결정적 _id (중복 방지 + upsert 안전)
     doc_id = f"{brief['type']}_{brief['date']}"
     doc = {k: v for k, v in brief.items() if k != "_id"}
     doc["_id"] = doc_id
+    if doc.get("analysis") and doc.get("market_data"):
+        doc["fact_audit"] = audit_brief_facts(doc["analysis"], doc.get("market_data"))
     doc = _json_safe(doc)
     db["market_briefs"].replace_one({"_id": doc_id}, doc, upsert=True)
     return doc_id
@@ -526,6 +545,7 @@ def get_recent_market_briefs(limit: int = 2, brief_type: str = None) -> list:
     items = list(cursor)
     for item in items:
         item["_id"] = str(item["_id"])
+        _attach_fact_audit(item, db)
     return _json_safe(items)
 
 
@@ -557,7 +577,18 @@ def get_market_briefs(limit: int = 30, brief_type: str | None = None) -> list:
         db["market_briefs"]
         .find(
             q,
-            {"type": 1, "date": 1, "signal": 1, "created_at": 1, "analysis": 1},
+            {
+                "type": 1,
+                "date": 1,
+                "signal": 1,
+                "created_at": 1,
+                "analysis": 1,
+                "fact_audit.status": 1,
+                "fact_audit.summary": 1,
+                "fact_audit.pass_count": 1,
+                "fact_audit.fail_count": 1,
+                "fact_audit.warn_count": 1,
+            },
         )
         .sort([("date", -1), ("created_at", -1)])
         .limit(limit)
@@ -572,6 +603,7 @@ def get_market_briefs(limit: int = 30, brief_type: str | None = None) -> list:
             "signal": doc.get("signal"),
             "created_at": doc.get("created_at"),
             "preview": text[:160] + ("…" if len(text) > 160 else ""),
+            "fact_audit": doc.get("fact_audit"),
         })
     return _json_safe(items)
 
@@ -582,7 +614,23 @@ def get_market_brief_by_id(doc_id: str) -> dict | None:
     if not doc:
         return None
     doc["_id"] = str(doc["_id"])
+    _attach_fact_audit(doc, db)
     return _json_safe(doc)
+
+
+def refresh_fact_audit(doc_id: str) -> dict | None:
+    """기존 시황 fact_audit 재계산 후 Mongo 저장."""
+    db = get_db()
+    doc = db["market_briefs"].find_one({"_id": doc_id})
+    if not doc or not doc.get("analysis") or not doc.get("market_data"):
+        return None
+    from brief_fact_audit import audit_brief_facts
+    audit = audit_brief_facts(doc["analysis"], doc["market_data"])
+    db["market_briefs"].update_one(
+        {"_id": doc_id},
+        {"$set": {"fact_audit": _json_safe(audit)}},
+    )
+    return _json_safe(audit)
 
 
 # ── Signal outcomes (Phase 1 Baseline) ──────────────────

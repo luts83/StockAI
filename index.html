@@ -3148,6 +3148,47 @@ function _extractVerifyChip(analysis) {
   return { text: `직전 전망 · ${label}`, color };
 }
 
+function _factAuditChip(audit) {
+  if (!audit || audit.status === "skip") return null;
+  const map = {
+    pass: { icon: "✅", label: "팩트 일치", color: "var(--green)" },
+    warn: { icon: "⚠️", label: "팩트 주의", color: "var(--yellow, #f59e0b)" },
+    fail: { icon: "❌", label: "팩트 불일치", color: "var(--red)" },
+  };
+  const m = map[audit.status];
+  if (!m) return null;
+  const counts = [];
+  if (audit.pass_count) counts.push(`일치 ${audit.pass_count}`);
+  if (audit.fail_count) counts.push(`불일치 ${audit.fail_count}`);
+  if (audit.warn_count) counts.push(`주의 ${audit.warn_count}`);
+  const detail = audit.summary || counts.join(" · ");
+  return {
+    icon: m.icon,
+    label: m.label,
+    color: m.color,
+    title: detail,
+    text: counts.length ? `${m.label} · ${counts.join(" · ")}` : m.label,
+  };
+}
+
+function _renderBriefChips(brief) {
+  const chips = [];
+  const verify = _extractVerifyChip(brief.analysis);
+  if (verify) chips.push(verify);
+  const fact = _factAuditChip(brief.fact_audit);
+  if (fact) {
+    chips.push({
+      text: `${fact.icon} ${fact.text}`,
+      color: fact.color,
+      title: fact.title,
+    });
+  }
+  if (!chips.length) return "";
+  return chips.map((c) =>
+    `<span style="font-size:11px; font-weight:600; color:${c.color};" title="${(c.title || c.text || "").replace(/"/g, "&quot;")}">${c.text}</span>`
+  ).join(`<span style="color:var(--dim); margin:0 6px;">·</span>`);
+}
+
 function _applyBriefToBanner(brief) {
   const s = SIGNAL_MAP[brief.signal] || SIGNAL_MAP.NEUTRAL;
   const typeLabel = BRIEF_LABELS[brief.type] || "📊 시황";
@@ -3172,12 +3213,11 @@ function _applyBriefToBanner(brief) {
   }
 
   const verifyEl = document.getElementById("banner-verify");
-  const chip = _extractVerifyChip(brief.analysis);
+  const chipsHtml = _renderBriefChips(brief);
   if (verifyEl) {
-    if (chip) {
+    if (chipsHtml) {
       verifyEl.style.display = "flex";
-      verifyEl.innerHTML =
-        `<span style="font-size:11px; font-weight:600; color:${chip.color};">${chip.text}</span>`;
+      verifyEl.innerHTML = chipsHtml;
     } else {
       verifyEl.style.display = "none";
     }
@@ -3292,9 +3332,13 @@ function _renderBriefHistoryList(items, selectedId) {
     const s = SIGNAL_MAP[b.signal] || SIGNAL_MAP.NEUTRAL;
     const active = b._id === selectedId ? "brief-history-item active" : "brief-history-item";
     const preview = (b.preview || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const fact = _factAuditChip(b.fact_audit);
+    const factBadge = fact
+      ? `<span style="margin-left:6px; font-size:10px; color:${fact.color};" title="${(fact.title || "").replace(/"/g, "&quot;")}">${fact.icon}</span>`
+      : "";
     return `
       <div class="${active}" onclick="selectBriefHistoryItem('${b._id}')">
-        <div class="brief-history-date">${_briefWeekday(b.date)}</div>
+        <div class="brief-history-date">${_briefWeekday(b.date)}${factBadge}</div>
         <div class="brief-history-meta">${s.icon} ${s.text}${b.created_at ? " · " + b.created_at.slice(0, 16).replace("T", " ") : ""}</div>
         ${preview ? `<div class="brief-history-preview">${preview}</div>` : ""}
       </div>`;
@@ -3305,8 +3349,12 @@ function _setBriefModalContent(brief) {
   if (!brief) return;
   document.getElementById("modal-brief-title").textContent =
     `${BRIEF_LABELS[brief.type] || "📊 시황"} · ${_briefWeekday(brief.date)}`;
+  const chipsHtml = _renderBriefChips(brief);
+  const auditBanner = chipsHtml
+    ? `<div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:12px; padding:8px 10px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:8px;">${chipsHtml}</div>`
+    : "";
   document.getElementById("modal-brief-content").innerHTML =
-    _renderBriefMarkdown(brief.analysis);
+    auditBanner + _renderBriefMarkdown(brief.analysis);
 }
 
 async function loadBriefHistoryList(briefType) {
