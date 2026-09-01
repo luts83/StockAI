@@ -3321,7 +3321,9 @@ async function loadBriefHistoryList(briefType) {
     _renderBriefHistoryList(briefHistoryItems, briefHistorySelectedId);
   } catch (e) {
     console.error("[brief-history]", e);
-    if (listEl) listEl.innerHTML = `<div id="brief-history-empty">목록을 불러오지 못했습니다.</div>`;
+    if (listEl) {
+      listEl.innerHTML = `<div id="brief-history-empty">목록을 불러오지 못했습니다.<br><span style="font-size:10px;color:var(--dim)">잠시 후 다시 시도해 주세요.</span></div>`;
+    }
     briefHistoryItems = [];
   }
 }

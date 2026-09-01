@@ -557,7 +557,7 @@ def get_market_briefs(limit: int = 30, brief_type: str | None = None) -> list:
         db["market_briefs"]
         .find(
             q,
-            {"market_data": 0, "type": 1, "date": 1, "signal": 1, "created_at": 1, "analysis": 1},
+            {"type": 1, "date": 1, "signal": 1, "created_at": 1, "analysis": 1},
         )
         .sort([("date", -1), ("created_at", -1)])
         .limit(limit)
