@@ -123,9 +123,57 @@ def test_needs_sync_when_quarter_stale():
         "last_sync_at": date.today().isoformat(),
         "next_earnings_date": (date.today() + timedelta(days=60)).isoformat(),
     }
-    # 75일+ 지난 최신 실적이면 DB count 없어도 stale 분기로 sync 필요
     latest = date.fromisoformat(old_latest)
     assert (date.today() - latest).days >= 75
+
+
+def test_is_suspect_fiscal_date_record():
+    from earnings import _is_suspect_fiscal_date_record
+
+    assert _is_suspect_fiscal_date_record({
+        "date": "2026-06-30",
+        "period_end": "2026-06-30",
+        "source": "yfinance_fiscal",
+    })
+    assert not _is_suspect_fiscal_date_record({
+        "date": "2026-08-27",
+        "period_end": "2026-06-30",
+        "source": "yfinance_info",
+    })
+
+
+def test_collapse_period_duplicates_prefers_announce_date():
+    from earnings import _collapse_period_duplicates
+
+    history = [
+        {"date": "2026-06-30", "period_end": "2026-06-30", "source": "yfinance_fiscal",
+         "date_note": "발표일 미확인 — 분기 마감일 기준"},
+        {"date": "2026-08-27", "period_end": "2026-06-30", "source": "yfinance_info"},
+        {"date": "2026-05-08", "period_end": "2026-03-31", "source": "yfinance_merged"},
+    ]
+    out = _collapse_period_duplicates(history)
+    assert out[0]["date"] == "2026-08-27"
+    assert len(out) == 2
+
+
+def test_needs_sync_when_suspect_in_db(monkeypatch):
+    from earnings import _needs_sync
+
+    monkeypatch.setattr(
+        "earnings.list_earnings_history",
+        lambda t, limit=8: [{
+            "date": "2026-06-30",
+            "period_end": "2026-06-30",
+            "source": "yfinance_fiscal",
+            "date_note": "발표일 미확인 — 분기 마감일 기준",
+        }],
+    )
+    monkeypatch.setattr("earnings.count_earnings_history", lambda t: 5)
+    profile = {
+        "last_sync_at": "2026-09-02T08:00:00",
+        "latest_earnings_date": "2026-06-30",
+    }
+    assert _needs_sync("IREN", profile) is True
 
 
 def test_call_ui_highlight():

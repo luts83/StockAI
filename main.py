@@ -2121,6 +2121,23 @@ async def start_scheduler():
     for j in scheduler.get_jobs():
         print(f"[scheduler] {j.id} → next: {j.next_run_time}")
 
+    async def _suspect_earnings_reconcile_job():
+        from earnings import reconcile_all_suspect_earnings
+        try:
+            n = await asyncio.to_thread(reconcile_all_suspect_earnings, 40)
+            if n:
+                print(f"[scheduler] suspect earnings reconciled: {n} tickers")
+        except Exception as e:
+            print(f"[scheduler] suspect earnings reconcile failed: {e}")
+
+    scheduler.add_job(
+        _suspect_earnings_reconcile_job,
+        CronTrigger(hour=6, minute=15, day_of_week="mon-sun", timezone="America/New_York"),
+        id="earnings_suspect_reconcile",
+        replace_existing=True,
+    )
+    asyncio.create_task(_suspect_earnings_reconcile_job())
+
     # ── 재배포 후 누락된 오늘 시황 자동 보완 (현지 시각 기준) ──
     from datetime import timezone, timedelta as _td
 

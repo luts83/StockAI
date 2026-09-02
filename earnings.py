@@ -13,9 +13,11 @@ import yfinance as yf
 
 from database import (
     count_earnings_history,
+    delete_earnings_record,
     get_earnings_record,
     get_ticker_earnings,
     list_earnings_history,
+    list_earnings_tickers_with_suspect_records,
     upsert_earnings_record,
     upsert_ticker_earnings,
 )
@@ -609,11 +611,123 @@ def generate_earnings_call_summary(
         return None
 
 
+def _is_suspect_fiscal_date_record(rec: dict | None) -> bool:
+    """분기 마감일을 발표일(date)로 잘못 저장한 레코드."""
+    if not rec:
+        return False
+    d = (rec.get("date") or "")[:10]
+    pe = (rec.get("period_end") or "")[:10]
+    if not d or not pe or d != pe:
+        return False
+    src = rec.get("source") or ""
+    note = rec.get("date_note") or ""
+    if src == "yfinance_fiscal":
+        return True
+    if "발표일 미확인" in note or "분기 마감일 기준" in note:
+        return True
+    return False
+
+
+def _earnings_record_rank(rec: dict) -> int:
+    """동일 period_end 중복 시 우선순위 — 높을수록 canonical."""
+    score = 0
+    d = (rec.get("date") or "")[:10]
+    pe = (rec.get("period_end") or "")[:10]
+    if d and pe and d != pe:
+        score += 100
+    src = rec.get("source") or ""
+    if src == "yfinance_info":
+        score += 50
+    elif src == "yfinance_merged":
+        score += 40
+    elif src == "yfinance_announce":
+        score += 30
+    if _is_suspect_fiscal_date_record(rec):
+        score -= 200
+    if rec.get("earnings_call"):
+        score += 5
+    if rec.get("actual_eps") is not None:
+        score += 2
+    return score
+
+
+def _collapse_period_duplicates(history: list[dict]) -> list[dict]:
+    """같은 period_end에 발표일·마감일 레코드가 둘 다 있으면 발표일 쪽만 유지."""
+    if not history:
+        return []
+    buckets: dict[str, dict] = {}
+    for rec in history:
+        pe = (rec.get("period_end") or rec.get("date") or "")[:10]
+        if not pe:
+            continue
+        prev = buckets.get(pe)
+        if prev is None or _earnings_record_rank(rec) > _earnings_record_rank(prev):
+            buckets[pe] = rec
+    out = list(buckets.values())
+    out.sort(key=lambda r: r.get("date") or "", reverse=True)
+    return out
+
+
+def _history_needs_announce_correction(ticker: str) -> bool:
+    """DB 최신 실적이 발표일 미확인(마감일=date) 상태인지."""
+    raw = list_earnings_history(ticker, limit=8)
+    if not raw:
+        return False
+    collapsed = _collapse_period_duplicates(raw)
+    if collapsed and raw and collapsed[0].get("date") != raw[0].get("date"):
+        return True
+    if any(_is_suspect_fiscal_date_record(r) for r in raw[:3]):
+        return True
+    return False
+
+
+def _purge_fiscal_date_duplicates(ticker: str, canonical: list[dict]) -> int:
+    """동기화 후 period_end=date 오저장 레코드 삭제 — canonical 발표일 레코드가 있을 때만."""
+    t = (ticker or "").upper()
+    if not t:
+        return 0
+    announce_by_period: dict[str, str] = {}
+    for rec in canonical or []:
+        pe = (rec.get("period_end") or "")[:10]
+        ann = (rec.get("date") or "")[:10]
+        if pe and ann and pe != ann:
+            announce_by_period[pe] = ann
+
+    removed = 0
+    for rec in list_earnings_history(t, limit=20):
+        if not _is_suspect_fiscal_date_record(rec):
+            continue
+        pe = (rec.get("period_end") or rec.get("date") or "")[:10]
+        canon_ann = announce_by_period.get(pe)
+        if not canon_ann:
+            continue
+        stale_date = (rec.get("date") or "")[:10]
+        if stale_date and stale_date != canon_ann:
+            removed += delete_earnings_record(t, stale_date)
+    return removed
+
+
+def reconcile_all_suspect_earnings(limit: int = 40, claude_client=None) -> int:
+    """플랫폼 전체 — 발표일 오류 suspected 티커 yfinance 재동기화."""
+    tickers = list_earnings_tickers_with_suspect_records(limit=limit)
+    done = 0
+    for t in tickers:
+        try:
+            _sync_from_yfinance(t, claude_client)
+            done += 1
+            print(f"[earnings] suspect reconcile OK: {t}")
+        except Exception as e:
+            print(f"[earnings] suspect reconcile fail {t}: {e}")
+    return done
+
+
 def _needs_sync(ticker: str, profile: dict | None) -> bool:
     t = (ticker or "").upper()
     profile = profile or {}
     if profile.get("skip_reason") == "etf_or_index":
         return False
+    if _history_needs_announce_correction(t):
+        return True
     if count_earnings_history(t) == 0 and not profile.get("next_earnings_date"):
         return True
     last_sync = profile.get("last_sync_at") or profile.get("updated_at")
@@ -660,7 +774,11 @@ def _sync_from_yfinance(ticker: str, claude_client=None) -> dict:
     for rec in raw.get("history") or []:
         upsert_earnings_record(rec)
 
-    history = list_earnings_history(t, limit=1)
+    purged = _purge_fiscal_date_duplicates(t, raw.get("history") or [])
+    if purged:
+        print(f"[earnings] {t} 분기 마감일 오저장 {purged}건 삭제")
+
+    history = _collapse_period_duplicates(list_earnings_history(t, limit=12))
     latest_date = history[0].get("date") if history else None
 
     if latest_date:
@@ -696,6 +814,11 @@ def _sync_from_yfinance(ticker: str, claude_client=None) -> dict:
     }
     upsert_ticker_earnings(profile)
     return profile
+
+
+def load_earnings_history(ticker: str, limit: int = 8) -> list[dict]:
+    """UI·리포트용 — period_end 중복 collapse 적용."""
+    return _collapse_period_duplicates(list_earnings_history(ticker, limit=limit))
 
 
 def _surprise_label(sp: float | None) -> str:
@@ -955,7 +1078,7 @@ def get_earnings_for_report(ticker: str, claude_client=None, *, force_sync: bool
             profile["days_to_earnings"] = (d - date.today()).days
             profile["is_earnings_week"] = abs(profile["days_to_earnings"]) <= 3
 
-    history = list_earnings_history(t, limit=8)
+    history = load_earnings_history(t, limit=8)
     bundle = build_report_bundle(profile, history)
     bundle["prompt_text"] = format_earnings_prompt_text(bundle)
     return bundle

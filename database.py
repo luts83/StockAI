@@ -112,6 +112,39 @@ def upsert_earnings_record(record: dict) -> str:
     return rid
 
 
+def delete_earnings_record(ticker: str, earnings_date: str) -> int:
+    """실적 이력 1건 삭제 — 분기 마감일 오저장 중복 제거용."""
+    rid = _earnings_record_id(ticker, earnings_date)
+    res = get_db()["earnings_history"].delete_one({"_id": rid})
+    return res.deleted_count
+
+
+def list_earnings_tickers_with_suspect_records(limit: int = 50) -> list[str]:
+    """date=period_end(발표일 미확인) 오류 가능 티커 목록."""
+    db = get_db()
+    cursor = db["earnings_history"].find(
+        {
+            "$expr": {"$eq": ["$date", "$period_end"]},
+            "$or": [
+                {"source": "yfinance_fiscal"},
+                {"date_note": {"$regex": "발표일 미확인"}},
+            ],
+        },
+        {"ticker": 1},
+    )
+    out: list[str] = []
+    seen: set[str] = set()
+    for doc in cursor:
+        t = (doc.get("ticker") or "").upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def get_earnings_record(ticker: str, earnings_date: str) -> dict | None:
     rid = _earnings_record_id(ticker, earnings_date)
     doc = get_db()["earnings_history"].find_one({"_id": rid})
