@@ -382,8 +382,8 @@ BRIEF_STYLE_RULE = """
 """
 
 ENGINE_STRUCTURE_RULE = """
-[시황 공통 구조 — 헤더는 반드시 ### N. 형식 (예: ### 0. 직전 전망 검증). "0." 단독 번호 금지]
-0. 직전 전망 검증
+[시황 공통 구조 — 헤더는 반드시 ### N. 형식. "0." 단독 번호 금지]
+0. (마감) 직전 전망 검증 / (장전) 직전 시장 전망 (참고) — 타입별 프롬프트 지시 따름
 1. 📖 오늘 장의 흐름 — 촉매·연쇄·시사점 (필수, 4~7문장)
 2. 핵심 수치 스냅샷 — 지수·섹터·시장폭
 3. 특징주 & 섹터 — 급등락 종목 + 의미 (재나열 금지)
@@ -394,6 +394,13 @@ ENGINE_STRUCTURE_RULE = """
 [###0 전망 줄] 프롬프트 【복붙용】 문구(SIGNAL 포함)를 그대로 — 날짜만([YYYY-MM-DD]) 쓰지 말 것
 
 [가독성] 장을 못 본 사람이 스캔해도 흐름이 읽혀야 함. 표·불릿 활용, 긴 줄글 단락 지양
+"""
+
+PREMARKET_SECTION0_RULE = """
+[장전 ###0 — 마감 리포트와 다름]
+- 헤더: **### 0. 직전 시장 전망 (참고)** (「직전 전망 검증」 금지)
+- 적중/빗나감·「검증 보류」·「실제 결과」·「판정」 항목 **작성 금지**
+- 출처 / 전망 / 오늘 활용 / 채점 예정 4항만 — 프롬프트 【복붙용】 전망 줄 그대로
 """
 
 BREADTH_RULE = """
@@ -443,7 +450,7 @@ def _brief_type_rule(brief_type: str) -> str:
 - 시간축: **간밤 미국 마감(확정) + 프리/애프터·뉴스·크립토 + 금리/환율** → 오늘 KOSPI 전망
 - 마감 리포트(kr_close)처럼 "오늘 한국장이 어땠는지" 쓰지 말 것 — 아직 장 시작 전
 - ###1 흐름: 미국 촉매 → SMH·금리 → 삼성·하이닉스 **개장 시 주목** (미국→한국 경로 우선, 역방향 신호 있으면 병기)
-- ###0: 직전 us_close 한국장 전망은 **인용만**, 채점은 kr_close에서
+- ###0: 직전 us_close 한국장 전망 **참고 인용만** — 채점은 kr_close에서
 """,
         "kr_close": """
 [이 리포트 = 🇰🇷 한국 **마감** — 장전과 목표가 다름]
@@ -460,7 +467,7 @@ def _brief_type_rule(brief_type: str) -> str:
 - 마감(us_close)처럼 "오늘 미국장이 어땠는지" 쓰지 말 것 — 아직 미국 장 시작 전
 - ###1 흐름: **한국 마감(삼성·하이닉스·KOSPI)을 오늘 미국장 핵심 입력**으로 — 예전 일방향보다 양방향
 - 반도체: 한국 ▲ + 미국 직전 SMH ▼ 같은 괴리면 "오늘 미국 반도체 주목"으로 연결
-- ###0: us_close 한국장 전망은 인용만 (채점은 kr_close)
+- ###0: us_close 한국장 전망은 **참고 인용만** (채점은 kr_close)
 """,
         "us_close": """
 [이 리포트 = 🇺🇸 미국 **마감** — 장전과 목표가 다름]
@@ -477,34 +484,31 @@ def _brief_type_rule(brief_type: str) -> str:
 
 def _verify_block(
     *,
-    bench: str,
-    result_metrics: str,
+    bench: str = "—",
+    result_metrics: str = "",
     mode: str = "score",
     extra: str = "",
     cite: str = "",
+    source: str = "",
+    score_when: str = "",
     secondary: list[tuple[str, str]] | None = None,
 ) -> str:
-    """공통 직전 전망 검증 섹션.
-    mode=score: 벤치마크로 적중 판정
-    mode=defer: 전망 대상이 아직이라 검증 보류 (SPY로 한국전망 채점 금지 등)
-    cite: Mongo에서 만든 '전망:' 복붙 문구 (SIGNAL + 근거)
-    secondary: [(소제목, 인용문구), ...] — kr_close의 us_close 추가 검증 등
+    """공통 ###0 섹션.
+    mode=score: 마감 — 벤치마크로 적중 판정
+    mode=defer: 장전 — 직전 전망 참고 인용 (채점 없음)
+    cite: Mongo '전망:' 복붙 문구 (SIGNAL + 근거)
     """
     cite_line = (cite or "").strip() or "전망 기록 없음 (SIGNAL/본문 미확인)"
     if mode == "defer":
-        return f"""### 0. 직전 전망 검증
+        return f"""### 0. 직전 시장 전망 (참고)
 (직전 시황 없으면 생략)
-이 시점에서는 **SIGNAL 채점만 하지 말고 검증 보류**한다. 교차시장 숫자는 전망에 쓴다.
+**장전 리포트** — 개장 전 참고용입니다. 적중/빗나감 판정은 하지 않습니다.
 
-- 전망: {cite_line}
-  ※ 위 전망 줄을 삭제·'-'·공백으로 바꾸지 말 것 (그대로 두고 판정만 보류)
-- 실제 결과: {result_metrics}
-- 판정: **검증 보류**
-- 판정 이유: {extra or "전망 대상 시장 채점 시점이 아님 (교차시장 입력 활용과 무관)"}
-- 다음 전망 반영: 직전 요지 + 오늘 확정된 교차시장 마감을 오늘 전망 입력으로 연결
-※ 미국 SPY로 한국장 전망을 채점하거나, 한국 KOSPI로 미국장 전망을 **채점**하는 것만 금지
-※ 한국 급락/급등·거래량·뉴스를 미국 장전 전망 근거로 쓰는 것은 필수 (유기적 연결)
-※ '검증 보류'·일부 지표 지연만으로 "스냅샷 작성 불가/리포트 불가" 금지 — 있는 수치로 작성
+- **출처**: {source or "직전 마감 시황"}
+- **전망**: {cite_line}
+  ※ Mongo 인용 그대로 — 수정·삭제 금지
+- **오늘 활용**: {extra or "간밤 확정 수치·뉴스와 연결해 오늘 개장 전 전망 근거로 서술"}
+- **채점 예정**: {score_when or "해당 시장 마감 시황에서 벤치마크 등락률로 판정"}
 """
 
     blocks = [f"""### 0. 직전 전망 검증
@@ -1302,9 +1306,9 @@ def _extract_forecast(analysis: str) -> str:
     """직전 시황 분석에서 '전망 섹션'을 추출 — ###0 검증 섹션 제외."""
     if not analysis:
         return ""
-    # ###0 직전 전망 검증은 '전망' 글자 때문에 오매칭 → 제거 후 탐색
+    # ###0 섹션은 '전망' 글자 때문에 오매칭 → 제거 후 탐색
     cleaned = re.sub(
-        r"###\s*0\.\s*직전 전망 검증[\s\S]*?(?=\n###\s*[1-9]|\n---\s*\n|\Z)",
+        r"###\s*0\.\s*직전 (?:전망 검증|시장 전망\s*\(참고\))[\s\S]*?(?=\n###\s*[1-9]|\n---\s*\n|\Z)",
         "",
         analysis,
         count=1,
@@ -1321,7 +1325,7 @@ def _extract_forecast(analysis: str) -> str:
         if not m:
             continue
         block = m.group(0).strip()
-        if "직전 전망 검증" in block or re.match(r"###\s*0\.", block):
+        if "직전 전망 검증" in block or "직전 시장 전망" in block or re.match(r"###\s*0\.", block):
             continue
         return block[:500]
     # fallback — 한 줄 요약 근처 / 후반부 (검증 블록 제외본)
@@ -1517,6 +1521,34 @@ def _verdict_reason(
     return " ".join(parts)
 
 
+def _find_section0_span(analysis: str) -> tuple[int, int] | None:
+    """###0 블록 위치 (마감 검증 + 장전 참고)."""
+    if not analysis:
+        return None
+    patterns = [
+        r"###\s*0\.\s*직전 전망 검증",
+        r"###\s*0\.\s*직전 시장 전망\s*\(참고\)",
+        r"^0\.\s*직전 전망 검증",
+        r"^0\.\s*직전 시장 전망",
+    ]
+    m = None
+    for pat in patterns:
+        m = re.search(pat, analysis, re.MULTILINE)
+        if m:
+            break
+    if not m:
+        return None
+    start = m.start()
+    rest = analysis[m.end() :]
+    end_m = re.search(
+        r"\n(?:---\s*\n|###\s*[1-9]\.\s*|^[1-9]\.\s*[📖🇺🇸🇰🇷🔮💡])",
+        rest,
+        re.MULTILINE,
+    )
+    end = m.end() + (end_m.start() if end_m else len(rest))
+    return start, end
+
+
 def _find_verify_span(analysis: str) -> tuple[int, int] | None:
     if not analysis:
         return None
@@ -1534,6 +1566,32 @@ def _find_verify_span(analysis: str) -> tuple[int, int] | None:
     )
     end = m.end() + (end_m.start() if end_m else len(rest))
     return start, end
+
+
+def _inject_premarket_context(
+    analysis: str,
+    *,
+    cite: str,
+    source: str,
+    score_when: str,
+    usage_hint: str,
+) -> str:
+    """장전 시황 ###0 — 참고 인용 블록을 코드로 확정."""
+    block = _verify_block(
+        mode="defer",
+        cite=cite,
+        source=source,
+        score_when=score_when,
+        extra=usage_hint,
+    ).rstrip() + "\n"
+    span = _find_section0_span(analysis)
+    if span:
+        tail = analysis[span[1] :].lstrip("\n")
+        return analysis[: span[0]] + block + ("\n" + tail if tail else "")
+    ins = re.search(r"\n---\s*\n|\n###\s*1\.", analysis)
+    if ins:
+        return analysis[: ins.start()] + "\n\n" + block + analysis[ins.start() :]
+    return block + "\n\n" + analysis
 
 
 def _get_ticker_data(market_data: dict, ticker: str) -> dict | None:
@@ -1619,7 +1677,9 @@ def _force_verify_citations(analysis: str, cites: list[str]) -> str:
 
     header_patterns = [
         r"###\s*0\.\s*직전 전망 검증",
+        r"###\s*0\.\s*직전 시장 전망\s*\(참고\)",
         r"^0\.\s*직전 전망 검증",
+        r"^0\.\s*직전 시장 전망",
     ]
     start = None
     header_len = 0
@@ -1666,6 +1726,12 @@ def _normalize_brief_headers(analysis: str) -> str:
     if not analysis:
         return analysis
     text = analysis
+    text = re.sub(
+        r"(?:^|\n)(?:###\s*)?0\.\s*직전\s*시장\s*전망\s*\(참고\)\s*[-–—]?\s*",
+        "\n### 0. 직전 시장 전망 (참고)\n\n",
+        text,
+        count=1,
+    )
     text = re.sub(
         r"(?:^|\n)(?:###\s*)?0\.\s*직전\s*전망\s*검증\s*[-–—]?\s*",
         "\n### 0. 직전 전망 검증\n\n",
@@ -1849,7 +1915,7 @@ def _build_prev_context(brief_type: str, prefer_date: str | None = None) -> str:
         head += f"{forecast_text}\n"
 
     if mode == "defer":
-        return head + "[###0: 채점 보류 — 판정=검증 보류, 교차시장 수치는 전망 입력으로 활용]\n"
+        return head + "[###0: 참고 인용만 — 판정·검증 보류 문구 금지, 오늘 활용·채점 예정만 작성]\n"
 
     return (
         head
@@ -2139,24 +2205,25 @@ async def generate_market_brief(
 
     verify_cites: list[str] = []
     verify_entries: list[dict] = []
+    verify_premarket: dict | None = None
 
     if brief_type == "us_premarket":
         _, us_close_cite = _load_brief_cite("us_close")
-        verify_cites = [us_close_cite]
-        verify0 = _verify_block(
-            bench="—",
-            result_metrics=(
-                "채점 대상 아님 — 직전 us_close의 '다음 한국장' 전망은 "
-                "한국 마감(kr_close)에서 KOSPI로 채점. "
-                "여기선 한국 마감 수치를 인용만"
+        verify_premarket = {
+            "cite": us_close_cite or "",
+            "source": "직전 미국 마감 시황 (us_close)",
+            "score_when": "한국 마감 시황(kr_close) · KOSPI 등락률",
+            "usage_hint": (
+                "직전 us_close의 한국장 전망 요지와 오늘 한국 마감(코스피·삼성·하이닉스)을 "
+                "오늘 미국장 개장 전 전망(###5) 선행 신호로 연결"
             ),
+        }
+        verify0 = _verify_block(
             mode="defer",
             cite=us_close_cite,
-            extra=(
-                "직전 us_close SIGNAL은 한국장 전망이다. "
-                "채점은 kr_close에서 하고, 여기서는 한국 마감(코스피/코스닥 등락·거래량)을 "
-                "오늘 미국장 전망의 선행 신호로 연결할 것."
-            ),
+            source=verify_premarket["source"],
+            score_when=verify_premarket["score_when"],
+            extra=verify_premarket["usage_hint"],
         )
         psych = _psych_block(impact_header="오늘 미국장 영향")
         outlook = _outlook_block(
@@ -2172,6 +2239,7 @@ async def generate_market_brief(
 {AUDIENCE_RULE}
 {CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
+{PREMARKET_SECTION0_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
@@ -2431,17 +2499,21 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 
     else:  # kr_premarket
         us_close_cite = _load_brief_cite("us_close")[1]
-        verify_cites = [us_close_cite]
+        verify_premarket = {
+            "cite": us_close_cite or "",
+            "source": "직전 미국 마감 시황 (us_close)",
+            "score_when": "오늘 한국 마감 시황(kr_close) · KOSPI 등락률",
+            "usage_hint": (
+                "간밤 SMH·금리·VIX와 연결해 오늘 한국장 개장 전 전망(###5) 근거로 활용. "
+                "간밤 미국 수치 상세는 아래 스냅샷(###2)에서 서술"
+            ),
+        }
         verify0 = _verify_block(
-            bench="—",
-            result_metrics="해당 없음 (직전 us_close 전망 대상=다음/오늘 한국장, 아직 장전)",
             mode="defer",
             cite=us_close_cite,
-            extra=(
-                "직전 미국 마감의 한국장 전망을 인용만 하고 판정은 보류. "
-                "실제 채점은 오늘 kr_close에서 KOSPI로 한다. "
-                "간밤 미국 수치는 스냅샷 섹션에서 다룰 것."
-            ),
+            source=verify_premarket["source"],
+            score_when=verify_premarket["score_when"],
+            extra=verify_premarket["usage_hint"],
         )
         psych = _psych_block(impact_header="오늘 한국장 영향")
         outlook = _outlook_block(
@@ -2457,6 +2529,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 {AUDIENCE_RULE}
 {CROSS_MARKET_RULE}
 {ENGINE_STRUCTURE_RULE}
+{PREMARKET_SECTION0_RULE}
 {BREADTH_RULE}
 {BRIEF_STYLE_RULE}
 {NEWS_RULE}
@@ -2538,11 +2611,13 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
-    # ###0 마감 검증 — 수치·판정 코드 확정 / 장전은 cite만 보정
+    # ###0 — 마감: 수치·판정 코드 확정 / 장전: 참고 인용 블록 확정
     if verify_entries:
         analysis_clean = _inject_scored_verify(
             analysis_clean, verify_entries, market_data
         )
+    elif verify_premarket:
+        analysis_clean = _inject_premarket_context(analysis_clean, **verify_premarket)
     elif verify_cites:
         analysis_clean = _force_verify_citations(analysis_clean, verify_cites)
     analysis_clean = _normalize_brief_headers(analysis_clean)

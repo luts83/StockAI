@@ -3134,8 +3134,19 @@ function _extractBannerSummary(analysis) {
   return "";
 }
 
-function _extractVerifyChip(analysis) {
+const PREMARKET_BRIEF_TYPES = new Set(["kr_premarket", "us_premarket"]);
+
+function _extractVerifyChip(analysis, briefType) {
   if (!analysis) return null;
+  const premarketBlock = analysis.match(
+    /###\s*0\.\s*직전 시장 전망\s*\(참고\)[\s\S]*?(?=\n---|\n###\s*[1-9]|$)/
+  );
+  if (premarketBlock || PREMARKET_BRIEF_TYPES.has(briefType)) {
+    if (premarketBlock) {
+      return { text: "직전 전망 · 참고", color: "var(--muted)" };
+    }
+    return null;
+  }
   const block = analysis.match(/###\s*0\.\s*직전 전망 검증[\s\S]*?(?=\n---|\n###\s*[1-9]|$)/);
   if (!block) return null;
   const verdict = block[0].match(/\*\*판정\*\*:\s*(적중|부분 적중|빗나감|검증 불가|검증 보류)/)
@@ -3173,7 +3184,7 @@ function _factAuditChip(audit) {
 
 function _renderBriefChips(brief) {
   const chips = [];
-  const verify = _extractVerifyChip(brief.analysis);
+  const verify = _extractVerifyChip(brief.analysis, brief.type);
   if (verify) chips.push(verify);
   const fact = _factAuditChip(brief.fact_audit);
   if (fact) {
