@@ -286,6 +286,25 @@ TICKERS = {
 KR_INDEX_TICKERS = ("^KS11", "^KQ11")
 KR_MEGA_TICKERS = ("005930.KS", "000660.KS")
 
+# 장전 시황 선물 — yfinance continuous contract (24h 근사)
+FUTURES_TICKERS: dict[str, dict[str, str]] = {
+    "미국": {
+        "ES=F": "S&P500 선물",
+        "NQ=F": "나스닥100 선물",
+        "YM=F": "다우 선물",
+        "RTY=F": "러셀2000 선물",
+    },
+}
+FUTURES_FOR_BRIEF: dict[str, dict[str, tuple[str, ...]]] = {
+    "kr_premarket": {"미국": ("ES=F", "NQ=F", "YM=F")},
+    "us_premarket": {"미국": ("ES=F", "NQ=F", "YM=F", "RTY=F")},
+}
+FUTURES_REGION_LABEL = {
+    ("kr_premarket", "미국"): "간밤 미국 선물",
+    ("us_premarket", "미국"): "미국 장전 선물",
+}
+FUTURES_FLAT_TOL_PCT = 0.05
+
 # 특징주 스캔 유니버스 (유동성·섹터 대표 — 제공 목록 밖 종목 언급 금지)
 US_MOVER_CANDIDATES: dict[str, str] = {
     "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "AMD": "AMD",
@@ -337,6 +356,182 @@ def _format_quote_line(ticker: str, d: dict) -> str:
     vol = d.get("volume_ratio")
     vol_s = f"거래량 {vol}%" if vol not in (None, 0, 0.0) else "거래량 —"
     return f"{d.get('name', ticker)}({ticker}) {level} / {arrow}{abs(chg)}% / {vol_s}"
+
+
+def _futures_direction(change_pct: float, *, flat_tol: float = FUTURES_FLAT_TOL_PCT) -> str:
+    if not _is_finite(change_pct):
+        return "보합"
+    chg = float(change_pct)
+    if chg > flat_tol:
+        return "상승"
+    if chg < -flat_tol:
+        return "하락"
+    return "보합"
+
+
+def _futures_direction_label(direction: str) -> str:
+    return {"상승": "상승중", "하락": "하락중", "보합": "보합권"}.get(direction, "보합권")
+
+
+def _futures_group_tone(quotes: list[dict]) -> str:
+    if not quotes:
+        return "보합세"
+    ups = sum(1 for q in quotes if q.get("direction") == "상승")
+    downs = sum(1 for q in quotes if q.get("direction") == "하락")
+    if ups > downs:
+        return "상승세"
+    if downs > ups:
+        return "하락세"
+    return "보합세"
+
+
+def _pack_futures_quote(
+    ticker: str,
+    name: str,
+    last: float,
+    prev: float,
+    *,
+    as_of: str,
+) -> dict:
+    chg = (float(last) - float(prev)) / float(prev) * 100 if prev else 0.0
+    direction = _futures_direction(chg)
+    return {
+        "ticker": ticker,
+        "name": name,
+        "price": round(float(last), 2),
+        "ref_price": round(float(prev), 2),
+        "change_pct": round(chg, 2),
+        "direction": direction,
+        "direction_label": _futures_direction_label(direction),
+        "as_of": as_of,
+    }
+
+
+def _fetch_futures_quote(ticker: str, name: str, *, as_of: str) -> dict | None:
+    """선물 현재가 vs 전일 정산가 — 장전 실시간 방향."""
+    for attempt in range(3):
+        try:
+            t = yf.Ticker(ticker)
+            fi = t.fast_info
+            last = getattr(fi, "last_price", None)
+            prev = getattr(fi, "previous_close", None)
+            if not _is_finite(prev):
+                prev = getattr(fi, "regular_market_previous_close", None)
+            if _is_finite(last) and _is_finite(prev) and float(prev) != 0:
+                return _pack_futures_quote(ticker, name, float(last), float(prev), as_of=as_of)
+            hist = t.history(period="3d", interval="1h")
+            if hist is not None and not hist.empty:
+                hist = hist[hist["Close"].apply(_is_finite)]
+                if len(hist) >= 2:
+                    last_v = float(hist["Close"].iloc[-1])
+                    prev_v = float(hist["Close"].iloc[-2])
+                    return _pack_futures_quote(ticker, name, last_v, prev_v, as_of=as_of)
+        except Exception as e:
+            print(f"[market_brief] 선물 {ticker} 수집 실패 ({attempt + 1}/3): {e}")
+        time.sleep(2 ** attempt)
+    print(f"[market_brief] ⚠️ 선물 {ticker} 수집 실패")
+    return None
+
+
+def collect_futures_snapshot(brief_type: str, *, as_of: str | None = None) -> dict | None:
+    """장전 시황용 선물 스냅샷."""
+    spec = FUTURES_FOR_BRIEF.get(brief_type)
+    if not spec:
+        return None
+    ts = as_of or datetime.now(pytz.UTC).isoformat()
+    markets: list[dict] = []
+    for region, tickers in spec.items():
+        names = FUTURES_TICKERS.get(region, {})
+        quotes: list[dict] = []
+        jobs = [(tk, names.get(tk, tk)) for tk in tickers if tk in names]
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs) or 1)) as pool:
+            futs = {
+                pool.submit(_fetch_futures_quote, tk, nm, as_of=ts): tk
+                for tk, nm in jobs
+            }
+            for fut in as_completed(futs):
+                try:
+                    q = fut.result()
+                except Exception:
+                    q = None
+                if q:
+                    quotes.append(q)
+        quotes.sort(key=lambda q: tickers.index(q["ticker"]) if q["ticker"] in tickers else 99)
+        if not quotes:
+            continue
+        label = FUTURES_REGION_LABEL.get((brief_type, region), f"{region} 선물")
+        markets.append({
+            "region": region,
+            "label": label,
+            "tone": _futures_group_tone(quotes),
+            "quotes": quotes,
+        })
+    if not markets:
+        return None
+    return {"brief_type": brief_type, "as_of": ts, "markets": markets}
+
+
+def format_futures_prompt_text(snapshot: dict | None) -> str:
+    if not snapshot or not snapshot.get("markets"):
+        return ""
+    lines = ["[선물 지수 — 전일 정산 대비, 장전 리포트 상단에 코드 주입됨]"]
+    for mkt in snapshot["markets"]:
+        lines.append(f"\n▶ {mkt['label']} — {mkt.get('tone', '보합세')}")
+        for q in mkt.get("quotes") or []:
+            chg = q.get("change_pct")
+            arrow = "▲" if chg and chg > 0 else ("▼" if chg and chg < 0 else "→")
+            lines.append(
+                f"  · {q['name']}({q['ticker']}) {q.get('price')} "
+                f"{arrow}{abs(chg or 0):.2f}% · {q.get('direction_label')}"
+            )
+    return "\n".join(lines)
+
+
+def format_futures_header_block(snapshot: dict | None, brief_type: str) -> str:
+    """장전 본문 최상단 마크다운."""
+    if not snapshot or not snapshot.get("markets"):
+        return ""
+    tz_name = "Asia/Seoul" if brief_type.startswith("kr") else "America/New_York"
+    try:
+        as_of_dt = datetime.fromisoformat(snapshot["as_of"].replace("Z", "+00:00"))
+        local = as_of_dt.astimezone(pytz.timezone(tz_name))
+        as_of_label = local.strftime("%Y-%m-%d %H:%M") + (" KST" if tz_name == "Asia/Seoul" else " ET")
+    except (TypeError, ValueError):
+        as_of_label = snapshot.get("as_of", "")
+
+    lines = [
+        "### 📡 선물 지수 스냅샷",
+        f"*기준: {as_of_label} · 전일 정산 대비*",
+        "",
+    ]
+    flag = "🇺🇸" if brief_type.startswith("kr") else "🇺🇸"
+    for mkt in snapshot["markets"]:
+        tone = mkt.get("tone", "보합세")
+        lines.append(f"{flag} **{mkt['label']} — {tone}**")
+        for q in mkt.get("quotes") or []:
+            chg = q.get("change_pct")
+            if not _is_finite(chg):
+                continue
+            chg_f = float(chg)
+            arrow = "▲" if chg_f > 0 else ("▼" if chg_f < 0 else "→")
+            lines.append(
+                f"- {q['name']}({q['ticker']}) "
+                f"{q.get('price'):,.2f} {arrow}{abs(chg_f):.2f}% · **{q.get('direction_label')}**"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _inject_futures_header(analysis: str, block: str) -> str:
+    if not block:
+        return analysis
+    text = re.sub(
+        r"###\s*📡[^\n]*선물[\s\S]*?(?=\n---\s*\n|\n###\s*0\.|\n###\s*1\.)",
+        "",
+        analysis,
+        count=1,
+    ).strip()
+    return block.rstrip() + "\n\n---\n\n" + text
 
 
 def _is_kr_symbol(ticker: str) -> bool:
@@ -401,6 +596,7 @@ PREMARKET_SECTION0_RULE = """
 - 헤더: **### 0. 직전 시장 전망 (참고)** (「직전 전망 검증」 금지)
 - 적중/빗나감·「검증 보류」·「실제 결과」·「판정」 항목 **작성 금지**
 - 출처 / 전망 / 오늘 활용 / 채점 예정 4항만 — 프롬프트 【복붙용】 전망 줄 그대로
+- **### 📡 선물 지수 스냅샷** 은 코드가 본문 최상단에 주입 — 중복 작성·수치 창작 금지
 """
 
 BREADTH_RULE = """
@@ -2085,6 +2281,10 @@ async def generate_market_brief(
     featured_text = build_featured_context(
         market_data, brief_type=brief_type, fear_greed=fear_greed, movers=movers
     )
+    futures_snapshot = None
+    if brief_type in FUTURES_FOR_BRIEF:
+        futures_snapshot = await asyncio.to_thread(collect_futures_snapshot, brief_type)
+    futures_text = format_futures_prompt_text(futures_snapshot)
     verify_pref_date = today if brief_type in ("kr_close", "us_close") else None
     prev_context = "\n".join(
         x for x in (
@@ -2250,6 +2450,8 @@ async def generate_market_brief(
 [제공 데이터]
 {data_text}
 
+{futures_text}
+
 {featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
@@ -2355,6 +2557,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 [제공 데이터]
 {data_text}
 
+{futures_text}
+
 {featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 시황 전망에 반드시 반영할 것)
@@ -2452,6 +2656,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 [제공 데이터]
 {data_text}
 
+{futures_text}
+
 {featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
@@ -2540,6 +2746,8 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
 [제공 데이터]
 {data_text}
 
+{futures_text}
+
 {featured_text}
 {tomorrow_events}
 (내일 실적발표 종목이 있으면 해당 섹터 영향을 전망에 반영할 것)
@@ -2611,6 +2819,10 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
     # 첫 줄이 ## 제목이면 제거 (배너 제목과 중복 방지)
     analysis_clean = re.sub(r'^#{1,3}[^\n]*\n', '', analysis_clean).strip()
 
+    if futures_snapshot:
+        futures_block = format_futures_header_block(futures_snapshot, brief_type)
+        analysis_clean = _inject_futures_header(analysis_clean, futures_block)
+
     # ###0 — 마감: 수치·판정 코드 확정 / 장전: 참고 인용 블록 확정
     if verify_entries:
         analysis_clean = _inject_scored_verify(
@@ -2631,6 +2843,7 @@ SIGNAL:BULL 또는 SIGNAL:NEUTRAL 또는 SIGNAL:BEAR"""
         "date":        today,
         "market_data": market_data,
         "fear_greed":  fear_greed,
+        "futures_snapshot": futures_snapshot,
         "analysis":    analysis_clean,
         "signal":      signal,
         "created_at":  created,

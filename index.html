@@ -660,6 +660,10 @@ header {
       style="display:none; padding:6px 18px;
       border-bottom:1px solid var(--border);
       align-items:center; gap:6px;"></div>
+    <div id="banner-futures"
+      style="display:none; padding:8px 18px;
+      border-bottom:1px solid var(--border);
+      font-size:11px; line-height:1.55;"></div>
     <div style="padding:14px 18px;">
       <div id="banner-summary"
         style="font-size:14px; color:var(--text, #e2e8f0);
@@ -3136,6 +3140,34 @@ function _extractBannerSummary(analysis) {
 
 const PREMARKET_BRIEF_TYPES = new Set(["kr_premarket", "us_premarket"]);
 
+function _futuresDirectionColor(direction) {
+  if (direction === "상승") return "var(--green)";
+  if (direction === "하락") return "var(--red)";
+  return "var(--muted)";
+}
+
+function _renderFuturesBanner(snapshot) {
+  if (!snapshot?.markets?.length) return "";
+  const parts = snapshot.markets.map((mkt) => {
+    const rows = (mkt.quotes || []).map((q) => {
+      const chg = Number(q.change_pct);
+      const arrow = chg > 0 ? "▲" : chg < 0 ? "▼" : "→";
+      const color = _futuresDirectionColor(q.direction);
+      return `<span style="margin-right:10px; white-space:nowrap;">
+        <span style="color:var(--dim);">${q.name}</span>
+        <span style="color:${color}; font-weight:600;"> ${arrow}${Math.abs(chg).toFixed(2)}%</span>
+        <span style="color:${color};"> · ${q.direction_label || q.direction}</span>
+      </span>`;
+    }).join("");
+    return `<div style="margin-bottom:4px;">
+      <span style="font-weight:700; color:var(--text);">📡 ${mkt.label}</span>
+      <span style="color:var(--muted); margin-left:6px;">(${mkt.tone || "보합세"})</span>
+      <div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px 0;">${rows}</div>
+    </div>`;
+  });
+  return parts.join("");
+}
+
 function _extractVerifyChip(analysis, briefType) {
   if (!analysis) return null;
   const premarketBlock = analysis.match(
@@ -3231,6 +3263,20 @@ function _applyBriefToBanner(brief) {
       verifyEl.innerHTML = chipsHtml;
     } else {
       verifyEl.style.display = "none";
+    }
+  }
+
+  const futuresEl = document.getElementById("banner-futures");
+  if (futuresEl) {
+    const futuresHtml = PREMARKET_BRIEF_TYPES.has(brief.type)
+      ? _renderFuturesBanner(brief.futures_snapshot)
+      : "";
+    if (futuresHtml) {
+      futuresEl.style.display = "block";
+      futuresEl.innerHTML = futuresHtml;
+    } else {
+      futuresEl.style.display = "none";
+      futuresEl.innerHTML = "";
     }
   }
 
