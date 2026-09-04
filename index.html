@@ -1108,8 +1108,11 @@ function fmtEarningsSurprise(pct) {
 
 function fmtRevBillions(v) {
   if (typeof v !== "number" || !Number.isFinite(v)) return "—";
-  const b = v > 1e6 ? v / 1e9 : v;
-  return "$" + b.toFixed(2) + "B";
+  if (v > 1e6) {
+    if (v >= 1e9) return "$" + (v / 1e9).toFixed(2) + "B";
+    return "$" + (v / 1e6).toFixed(1) + "M";
+  }
+  return "$" + Number(v).toFixed(2) + "B";
 }
 
 function fmtEarningsPeriod(le) {
@@ -1200,6 +1203,7 @@ function renderEarningsPanel(earnings) {
         </div>
         ${le.actual_revenue != null ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">매출 ${fmtRevBillions(le.actual_revenue)} / 예상 ${fmtRevBillions(le.estimate_revenue)}</div>` : ""}
         ${le.date_note ? `<div style="font-size:10px;color:var(--yellow);margin-top:4px">${le.date_note}</div>` : ""}
+        ${le.post_earnings_move?.label ? `<div style="font-size:11px;color:${((le.post_earnings_move.reaction_pct ?? le.post_earnings_move.next_day_pct) ?? 0) < 0 ? "var(--red)" : "var(--green)"};margin-top:4px;font-weight:600">📉 ${le.post_earnings_move.label}</div>` : ""}
       </div>`);
   } else if (e.last_earnings) {
     const le = e.last_earnings;
@@ -1234,6 +1238,7 @@ function renderEarningsPanel(earnings) {
         <div style="font-size:10px;color:var(--dim)">🎙️ 어닝콜 요약 (${call.earnings_date}) · D-${e.call_days_left ?? "?"}</div>
         <div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.5">${call.summary || ""}</div>
         ${highlights ? `<ul style="margin:6px 0 0 16px;padding:0;font-size:11px;color:var(--muted)">${highlights}</ul>` : ""}
+        ${call.market_reaction_note ? `<div style="font-size:11px;color:var(--muted);margin-top:6px">${call.market_reaction_note}</div>` : ""}
         ${call.guidance_note ? `<div style="font-size:11px;color:var(--yellow);margin-top:4px">가이던스: ${call.guidance_note}</div>` : ""}
       </div>`);
   }
@@ -1793,6 +1798,7 @@ async function runAnalysis(force = false) {
   stepTimer = setInterval(advanceStep, 1600);
   updateLoadingHint();
 
+  const analyzeStartedAt = Date.now();
   try {
     // 1단계: 분석 요청 (캐시 히트 시 즉시 반환, 신규 분석 시 job_id 반환)
     const res = await fetch(`${API}/analyze`, {
@@ -1809,24 +1815,64 @@ async function runAnalysis(force = false) {
     if (initData.job_id) {
       // 신규 분석 — 서버 백그라운드에서 실행 중, 폴링으로 결과 대기
       saveGuestPending(initData.job_id, ticker, period);
-      data = await pollAnalysis(initData.job_id);
+      try {
+        data = await pollAnalysis(initData.job_id);
+      } catch (pollErr) {
+        // 서버는 완료됐는데 결과 수신만 실패한 경우 히스토리에서 복구
+        console.warn("[analyze] poll failed, try recover", pollErr);
+        let recovered = null;
+        if (pollErr.docId) {
+          try {
+            const full = await fetch(`${API}/analysis/${pollErr.docId}`, { headers: { ...authHeaders() } });
+            if (full.ok) recovered = analysisDocToRenderData(await full.json());
+          } catch (_) { /* ignore */ }
+        }
+        if (!recovered) {
+          recovered = await recoverAnalysisFromHistory(ticker, period, analyzeStartedAt);
+        }
+        if (recovered) {
+          data = recovered;
+        } else {
+          throw pollErr;
+        }
+      }
     } else {
       // 캐시 히트 — 즉시 결과 반환
       data = initData;
+    }
+
+    if (!data || !data.analysis) {
+      throw new Error("분석 결과를 불러오지 못했습니다.");
     }
 
     clearInterval(stepTimer);
     document.querySelectorAll(".step-pill").forEach(p => p.className = "step-pill done");
     notifyAnalysisDone(ticker);
     saveGuestLastReport(data);
-    setTimeout(() => renderResults(data), 200);
+    clearGuestPending();
+    try {
+      renderResults(data);
+    } catch (renderErr) {
+      console.error("[analyze] renderResults failed", renderErr);
+      // 데이터는 있는데 화면만 깨진 경우 — 히스토리 안내
+      document.getElementById("loading").style.display = "none";
+      document.getElementById("error-msg").innerHTML =
+        `<strong>결과는 저장됐습니다</strong><br>화면 표시 중 문제가 있었습니다. 히스토리에서 "${ticker}" 분석을 열어 주세요.<br><small style="color:var(--dim);margin-top:8px;display:block">${renderErr.message || ""}</small>`;
+      document.getElementById("error-msg").style.display = "block";
+      if (currentUser) loadHomeHistory();
+      return;
+    }
 
   } catch (err) {
     clearInterval(stepTimer);
     document.getElementById("loading").style.display = "none";
     document.getElementById("error-msg").innerHTML =
-      `<strong>오류 발생</strong><br>${err.message}<br><small style="color:var(--dim);margin-top:8px;display:block">${IS_LOCAL ? "로컬 API 서버(localhost:8000)가 실행 중인지 확인하세요" : "서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해주세요."}</small>`;
+      `<strong>오류 발생</strong><br>${formatFetchError(err)}<br><small style="color:var(--dim);margin-top:8px;display:block">${IS_LOCAL ? "로컬 API 서버(localhost:8000)가 실행 중인지 확인하세요" : "서버에서 이미 완료됐을 수 있습니다. 히스토리를 확인해 보세요."}</small>`;
     document.getElementById("error-msg").style.display = "block";
+    // 로그인 유저면 히스토리 새로고침 (백그라운드 완료분 반영)
+    if (currentUser) {
+      try { loadHomeHistory(); } catch (_) {}
+    }
   } finally {
     document.getElementById("analyze-btn").disabled = false;
   }
@@ -1986,21 +2032,117 @@ function notifyAnalysisDone(ticker) {
 
 async function pollAnalysis(jobId, maxWait = 240000) {
   const start = Date.now();
+  let consecutiveFails = 0;
   while (Date.now() - start < maxWait) {
     await new Promise(r => setTimeout(r, 2000));
-    const res = await fetch(`${API}/analyze/status/${jobId}`, {
-      headers: { ...authHeaders() }
-    });
-    if (!res.ok) throw new Error("분석 상태 확인 실패");
-    const data = await res.json();
-    if (data.status === "done")  return data.result;
-    if (data.status === "error") throw new Error(data.error || "분석 오류");
-    // pending / running → 계속 대기
+    try {
+      const res = await fetch(`${API}/analyze/status/${jobId}`, {
+        headers: { ...authHeaders() }
+      });
+      if (res.status === 404) {
+        // 서버에서 job이 사라짐 — 호출측에서 히스토리 복구 시도
+        const err = new Error("job not found");
+        err.code = "JOB_NOT_FOUND";
+        throw err;
+      }
+      if (!res.ok) {
+        consecutiveFails += 1;
+        if (consecutiveFails >= 5) throw new Error("분석 상태 확인 실패");
+        continue;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        // done 응답(차트 base64)이 끊기면 JSON 파싱 실패 — 재시도
+        consecutiveFails += 1;
+        console.warn("[pollAnalysis] JSON parse fail, retry", parseErr);
+        if (consecutiveFails >= 5) throw new Error("분석 결과 수신에 실패했습니다. 히스토리에서 확인해 주세요.");
+        continue;
+      }
+      consecutiveFails = 0;
+      if (data.status === "done") {
+        if (data.result) return data.result;
+        // result 없이 doc_id만 온 경우
+        if (data.doc_id) {
+          const err = new Error("result missing");
+          err.code = "RESULT_MISSING";
+          err.docId = data.doc_id;
+          throw err;
+        }
+        throw new Error("분석 결과가 비어 있습니다.");
+      }
+      if (data.status === "error") throw new Error(data.error || "분석 오류");
+    } catch (e) {
+      if (e.code === "JOB_NOT_FOUND" || e.code === "RESULT_MISSING") throw e;
+      if (e.message && /분석 상태|분석 결과|분석 오류|비어/.test(e.message)) throw e;
+      consecutiveFails += 1;
+      console.warn("[pollAnalysis] transient fail", e);
+      if (consecutiveFails >= 5) throw e;
+    }
   }
   throw new Error("분석 시간이 길어지고 있습니다(4분). 잠시 후 히스토리에서 결과를 확인하거나 다시 시도해주세요.");
 }
 
+async function recoverAnalysisFromHistory(ticker, period, startedAtMs) {
+  // 로그인 유저 — 폴링 실패 시 방금 저장된 분석을 히스토리에서 복구
+  if (!currentUser || !ticker) return null;
+  try {
+    const res = await fetch(`${API}/history/${encodeURIComponent(ticker)}`, {
+      headers: { ...authHeaders() },
+    });
+    if (!res.ok) return null;
+    const items = await res.json();
+    const list = Array.isArray(items) ? items : (items.items || []);
+    const cutoff = (startedAtMs || Date.now()) - 15 * 60 * 1000;
+    const hit = list.find((it) => {
+      if (period && it.period && it.period !== period) return false;
+      const t = Date.parse(it.created_at);
+      if (!Number.isFinite(t)) return false;
+      return t >= cutoff;
+    });
+    if (!hit?._id) return null;
+    const full = await fetch(`${API}/analysis/${hit._id}`, { headers: { ...authHeaders() } });
+    if (!full.ok) return null;
+    const doc = await full.json();
+    return analysisDocToRenderData(doc);
+  } catch (e) {
+    console.warn("[recoverAnalysis] fail", e);
+    return null;
+  }
+}
+
+function analysisDocToRenderData(doc) {
+  if (!doc) return null;
+  const sessionPx = doc.regular_price ?? doc.current_price;
+  return {
+    doc_id: doc._id || doc.doc_id || "",
+    ticker: doc.ticker,
+    current_price: sessionPx,
+    regular_price: sessionPx,
+    extended_price: doc.extended_price,
+    has_gap: doc.has_gap,
+    gap_pct: doc.gap_pct,
+    price_basis: doc.price_basis || "session_close",
+    change_pct: doc.change_pct,
+    indicators: doc.indicators || {},
+    valuation: doc.valuation || {},
+    chart_image: doc.chart_b64 || doc.chart_image || "",
+    news: doc.news || [],
+    analysis: doc.analysis || "",
+    signal: doc.signal || "WATCH",
+    signal_engine: doc.signal_engine || {},
+    signal_change: doc.signal_change,
+    earnings: doc.earnings || doc.earnings_snapshot || {},
+    data_date: doc.data_date || (doc.created_at || "").slice(0, 10),
+    chat_history: doc.chat_history || [],
+    is_saved: true,
+    period: doc.period,
+  };
+}
+
 function renderResults(data) {
+  if (!data) throw new Error("렌더할 분석 데이터가 없습니다.");
   document.getElementById("loading").style.display = "none";
   const existingTopDisclaimer = document.getElementById("analysis-top-disclaimer");
   if (existingTopDisclaimer) existingTopDisclaimer.remove();
@@ -2021,7 +2163,7 @@ function renderResults(data) {
     투자 결정 전 공식 IR을 확인하세요.
   `;
   document.getElementById("results").prepend(topDisclaimer);
-  const inds = data.indicators;
+  const inds = data.indicators || {};
 
   // 캐시된 분석이면 안내 배너 표시
   const existingNotice = document.getElementById("cached-notice");
@@ -2041,11 +2183,15 @@ function renderResults(data) {
     if (signalArea) signalArea.before(notice);
   }
 
-  // 갭 경고 배너 (확장시간 1% 이상 변동 시)
+  // 갭 경고 배너 — 분석은 종가 기준, 장외는 참고 호가
   const existingGap = document.getElementById("gap-notice");
   if (existingGap) existingGap.remove();
-  if (data.has_gap && data.gap_pct) {
-    const isDown = data.gap_pct < 0;
+  const sessionPx = data.regular_price ?? data.current_price;
+  const extPx = data.extended_price;
+  const gapPct = data.gap_pct;
+  const showGap = data.has_gap && gapPct != null && sessionPx != null && extPx != null;
+  if (showGap) {
+    const isDown = gapPct < 0;
     const gapNotice = document.createElement("div");
     gapNotice.id = "gap-notice";
     gapNotice.style.cssText = `
@@ -2059,12 +2205,13 @@ function renderResults(data) {
       <span style="font-size:15px">${isDown ? "⚠️" : "🚀"}</span>
       <span>
         <strong style="color:${isDown ? "var(--red)" : "var(--green)"}">
-          확장시간 ${data.gap_pct > 0 ? "+" : ""}${data.gap_pct}% 갭 감지
+          장외 갭 ${gapPct > 0 ? "+" : ""}${gapPct}%
         </strong>
-        — 정규장 종가 ${fmtDollar(data.regular_price)} → 현재 ${fmtDollar(data.extended_price)}
-        <span style="color:var(--dim); margin-left:4px; font-size:11px">
-          (실적발표 등 장외 변동)
-        </span>
+        — 분석 기준(정규장 종가) ${fmtDollar(sessionPx)}
+        → 장외/프리 호가 ${fmtDollar(extPx)}
+        <div style="color:var(--dim); margin-top:4px; font-size:11px; line-height:1.4">
+          지지·저항·트리거는 종가 기준입니다. 장외 급변 시 레벨 재검토가 필요할 수 있습니다.
+        </div>
       </span>
     `;
     const signalArea = document.getElementById("signal-area");
@@ -2076,15 +2223,22 @@ function renderResults(data) {
     : new Date().toLocaleDateString("ko-KR");
   document.getElementById("res-ticker").textContent =
     data.ticker + "  ·  " + (data.period || "1D") + "  ·  " + dataDate;
-  document.getElementById("res-price").textContent = fmtDollar(data.current_price);
+
+  const displayPx = sessionPx;
+  const priceEl = document.getElementById("res-price");
+  if (priceEl) {
+    priceEl.innerHTML = displayPx != null
+      ? `${fmtDollar(displayPx)}<span style="display:block;font-size:11px;font-weight:500;color:var(--dim);margin-top:2px">정규장 종가 (분석 기준)</span>`
+      : "—";
+  }
 
   const chEl = document.getElementById("res-change");
   const up = (data.change_pct ?? 0) >= 0;
-  chEl.textContent = (up?"▲ +":"▼ ") + (data.change_pct ?? "—") + "%";
+  chEl.textContent = (up?"▲ +":"▼ ") + (data.change_pct ?? "—") + "% · 일봉";
   chEl.className = "badge " + (up?"badge-up":"badge-dn");
   document.getElementById("res-ma-status").textContent =
-    (data.current_price != null && inds.ma200 != null)
-      ? (data.current_price > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래")
+    (displayPx != null && inds.ma200 != null)
+      ? (displayPx > inds.ma200 ? "▲ MA200 위" : "▼ MA200 아래")
       : "—";
   document.getElementById("res-vol-status").textContent = "MA20  " + fmtDollar(inds.ma20);
 
@@ -2108,12 +2262,12 @@ function renderResults(data) {
     <div class="ind-cell">
       <div class="ind-lbl">MA 60</div>
       <div class="ind-val c-blue">${fmtDollar(ma60val || null)}</div>
-      <div class="ind-sub c-muted">${(data.current_price ?? 0) > (ma60val || 0)?"▲ 위":"▼ 아래"}</div>
+      <div class="ind-sub c-muted">${(displayPx ?? 0) > (ma60val || 0)?"▲ 위":"▼ 아래"}</div>
     </div>
     <div class="ind-cell">
       <div class="ind-lbl">MA 200</div>
       <div class="ind-val c-yellow">${fmtDollar(inds.ma200)}</div>
-      <div class="ind-sub c-muted">${(data.current_price ?? 0) > (inds.ma200 ?? 0)?"▲ 위":"▼ 아래"}</div>
+      <div class="ind-sub c-muted">${(displayPx ?? 0) > (inds.ma200 ?? 0)?"▲ 위":"▼ 아래"}</div>
     </div>`;
 
   document.getElementById("res-chart").src = "data:image/png;base64," + data.chart_image;
@@ -2820,10 +2974,44 @@ async function loadSavedAnalysis(docId) {
     if (tickerEl) tickerEl.textContent =
       doc.ticker + "  ·  " + (doc.period || "") + "  ·  " + (doc.created_at || "").slice(0, 10);
 
-    // 현재가 표시
-    const savedPrice = doc.current_price || inds.ma20 || null;
+    // 현재가 표시 — 정규장 종가(분석 기준)
+    const savedPrice = doc.regular_price || doc.current_price || inds.ma20 || null;
     const priceEl = document.getElementById("res-price");
-    if (priceEl) priceEl.textContent = savedPrice ? fmtDollar(savedPrice) : "—";
+    if (priceEl) {
+      priceEl.innerHTML = savedPrice
+        ? `${fmtDollar(savedPrice)}<span style="display:block;font-size:11px;font-weight:500;color:var(--dim);margin-top:2px">정규장 종가 (분석 기준)</span>`
+        : "—";
+    }
+
+    // 저장된 분석에도 장외 갭이 있으면 배너 표시
+    const existingGapSaved = document.getElementById("gap-notice");
+    if (existingGapSaved) existingGapSaved.remove();
+    if (doc.has_gap && doc.gap_pct != null && doc.extended_price != null && savedPrice != null) {
+      const isDown = doc.gap_pct < 0;
+      const gapNotice = document.createElement("div");
+      gapNotice.id = "gap-notice";
+      gapNotice.style.cssText = `
+        background:${isDown ? "rgba(248,113,113,0.08)" : "rgba(52,211,153,0.08)"};
+        border:1px solid ${isDown ? "rgba(248,113,113,0.3)" : "rgba(52,211,153,0.3)"};
+        border-radius:8px; padding:10px 14px; margin-bottom:14px;
+        font-size:12px; color:var(--muted);
+        display:flex; align-items:center; gap:8px;
+      `;
+      gapNotice.innerHTML = `
+        <span style="font-size:15px">${isDown ? "⚠️" : "🚀"}</span>
+        <span>
+          <strong style="color:${isDown ? "var(--red)" : "var(--green)"}">
+            장외 갭 ${doc.gap_pct > 0 ? "+" : ""}${doc.gap_pct}%
+          </strong>
+          — 분석 기준(종가) ${fmtDollar(savedPrice)} → 장외 ${fmtDollar(doc.extended_price)}
+          <div style="color:var(--dim); margin-top:4px; font-size:11px">
+            지지·저항은 종가 기준 · 장외 급변 시 재검토 필요할 수 있음
+          </div>
+        </span>
+      `;
+      const signalArea = document.getElementById("signal-area");
+      if (signalArea) signalArea.before(gapNotice);
+    }
 
     // 배지
     const chEl = document.getElementById("res-change");

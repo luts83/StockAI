@@ -298,44 +298,76 @@ def get_summary_stats(df: pd.DataFrame, ticker: str = "") -> dict:
     }
 
 
-def get_extended_price(ticker: str) -> dict:
-    """프리/애프터마켓 포함 현재가 수집"""
+def get_extended_price(ticker: str, session_close: float | None = None) -> dict:
+    """정규장 종가와 프리/애프터 호가를 분리 수집.
+
+    regular_price / session_close = 일봉 종가(분석 기준)
+    extended_price = 확장시간 1분봉 최신가(참고 호가)
+    last_price는 장외가일 수 있어 regular로 쓰지 않음.
+    """
     try:
-        info           = yf.Ticker(ticker).fast_info
-        regular_price  = round(float(info.last_price), 2)
-        previous_close = round(float(info.previous_close), 2)
+        t = yf.Ticker(ticker)
+        info = t.fast_info
+        previous_close = None
+        try:
+            previous_close = round(float(info.previous_close), 2)
+        except Exception:
+            previous_close = None
 
         extended_price = None
         try:
-            df_1m = yf.Ticker(ticker).history(
-                period="1d", interval="1m", prepost=True
-            )
+            df_1m = t.history(period="1d", interval="1m", prepost=True)
             if df_1m is not None and not df_1m.empty:
                 extended_price = round(float(df_1m["Close"].iloc[-1]), 2)
         except Exception:
             pass
 
+        regular_price = None
+        if session_close is not None:
+            try:
+                regular_price = round(float(session_close), 2)
+            except (TypeError, ValueError):
+                regular_price = None
+        if regular_price is None:
+            try:
+                df_d = t.history(period="5d", interval="1d")
+                if df_d is not None and not df_d.empty:
+                    regular_price = round(float(df_d["Close"].iloc[-1]), 2)
+            except Exception:
+                pass
+        if regular_price is None and previous_close is not None:
+            regular_price = previous_close
+
         gap_pct = None
-        if extended_price and regular_price:
-            gap_pct = round(
-                (extended_price - regular_price) / regular_price * 100, 2
-            )
+        has_gap = False
+        if extended_price is not None and regular_price is not None and regular_price > 0:
+            gap_pct = round((extended_price - regular_price) / regular_price * 100, 2)
+            if abs(gap_pct) < 0.15:
+                # 사실상 동일 호가 — 장외 별도 표시 불필요
+                extended_price = None
+                gap_pct = None
+            else:
+                has_gap = abs(gap_pct) >= 1.0
 
         return {
-            "regular_price":  regular_price,
+            "regular_price": regular_price,
+            "session_close": regular_price,
             "extended_price": extended_price,
             "previous_close": previous_close,
-            "has_gap":        bool(gap_pct and abs(gap_pct) >= 1.0),
-            "gap_pct":        gap_pct,
+            "has_gap": has_gap,
+            "gap_pct": gap_pct,
+            "price_basis": "session_close",
         }
     except Exception as e:
         print(f"[extended_price] {ticker} 오류: {e}")
-        return {}
+        return {"price_basis": "session_close"}
 
 
 def get_chat_live_snapshot(ticker: str, baseline_price: float = None) -> dict:
     """채팅용 실시간 시세 + 최신 기술지표 스냅샷 (질문 시점 기준)."""
-    snap = get_extended_price(ticker)
+    # 일봉 종가를 먼저 구해 regular로 고정
+    session_close = None
+    snap: dict = {"price_basis": "session_close"}
     snap.setdefault("indicators", None)
     snap.setdefault("data_as_of", None)
     snap.setdefault("vs_baseline_pct", None)
@@ -346,6 +378,7 @@ def get_chat_live_snapshot(ticker: str, baseline_price: float = None) -> dict:
             df = calculate_indicators(df)
             latest = df.iloc[-1]
             close = float(latest["Close"])
+            session_close = round(close, 2)
             snap["data_as_of"] = df.index[-1].strftime("%Y-%m-%d")
             snap["indicators"] = {
                 "rsi": round(_last_valid(df["RSI"], 50.0), 1),
@@ -356,18 +389,29 @@ def get_chat_live_snapshot(ticker: str, baseline_price: float = None) -> dict:
                 "ma200": round(_last_valid(df["MA200"], close), 2),
                 "bb_upper": round(_last_valid(df["BB_Upper"], close), 2),
                 "bb_lower": round(_last_valid(df["BB_Lower"], close), 2),
-                "daily_close": round(close, 2),
+                "daily_close": session_close,
             }
     except Exception as e:
         print(f"[chat_snapshot] 지표 {ticker} 오류: {e}")
 
-    current = snap.get("extended_price") or snap.get("regular_price")
+    px = get_extended_price(ticker, session_close=session_close)
+    snap.update(px)
+    if session_close is not None:
+        snap["regular_price"] = session_close
+        snap["session_close"] = session_close
+
+    live_quote = snap.get("extended_price") or snap.get("regular_price")
+    snap["live_quote"] = live_quote
+    snap["live_quote_session"] = (
+        "extended" if snap.get("extended_price") is not None else "regular"
+    )
+
     try:
         baseline = float(baseline_price) if baseline_price is not None else None
     except (TypeError, ValueError):
         baseline = None
-    if current and baseline and baseline > 0:
-        snap["vs_baseline_pct"] = round((current - baseline) / baseline * 100, 2)
+    if live_quote and baseline and baseline > 0:
+        snap["vs_baseline_pct"] = round((live_quote - baseline) / baseline * 100, 2)
 
     return snap
 

@@ -176,6 +176,127 @@ def test_needs_sync_when_suspect_in_db(monkeypatch):
     assert _needs_sync("IREN", profile) is True
 
 
+def test_needs_earnings_call_refresh_wrong_direction():
+    from earnings import _needs_earnings_call_refresh
+
+    rec = {
+        "earnings_call": {
+            "summary": "실적 발표 후 주가는 2.00% 상승했습니다.",
+        },
+    }
+    move = {"next_day_pct": -12.5, "label": "발표 다음 거래일 종가 ▼12.50%"}
+    assert _needs_earnings_call_refresh(rec, move) is True
+
+
+def test_apply_price_move_strips_wrong_reaction():
+    from earnings import _apply_price_move_to_call_summary
+
+    data = {
+        "summary": "매출 미스. 실적 발표 후 주가는 2.00% 상승했습니다.",
+        "highlights": ["주가 2% 상승", "AI 확대"],
+    }
+    move = {
+        "next_day_pct": -12.53,
+        "reaction_pct": -12.53,
+        "timing": "amc",
+        "label": "장마감 후 발표 · 다음 거래일 종가 ▼12.53%",
+    }
+    out = _apply_price_move_to_call_summary(data, move)
+    assert "2.00% 상승" not in out["summary"]
+    assert "▼12.53" in out["market_reaction_note"]
+    assert any("12.53" in h for h in out["highlights"])
+
+
+def test_filter_earnings_call_news_drops_old_quarter():
+    from earnings import _filter_earnings_call_news
+
+    items = [
+        {"title": "Earnings call transcript: IREN Q2 2025 sees revenue drop, stock falls"},
+        {"title": "IREN Q4 FY26 Earnings Call Highlights - MarketBeat"},
+    ]
+    out = _filter_earnings_call_news(items, "IREN", "2026-08-27")
+    titles = " ".join(x["title"] for x in out)
+    assert "Q2 2025" not in titles or out[0]["title"].startswith("IREN Q4")
+
+
+def test_nasdaq_fill_missing_eps():
+    from earnings import apply_nasdaq_supplement
+
+    history = [{
+        "ticker": "IREN",
+        "date": "2026-08-27",
+        "period_end": "2026-06-30",
+        "actual_eps": None,
+        "estimate_eps": -0.455,
+        "date_note": "EPS·컨센서스 — yfinance 반영 대기 (발표일은 IR 기준)",
+        "source": "yfinance_info",
+    }]
+    nasdaq = [{
+        "ticker": "IREN",
+        "date": "2026-08-27",
+        "period_end": "2026-06-30",
+        "actual_eps": -0.41,
+        "estimate_eps": -0.5,
+        "eps_surprise_pct": 18.0,
+        "actual_revenue": 137_225_000.0,
+        "source": "nasdaq_surprise",
+    }]
+    out = apply_nasdaq_supplement(history, nasdaq)
+    assert out[0]["actual_eps"] == -0.41
+    assert out[0]["estimate_eps"] == -0.5
+    assert out[0]["actual_revenue"] == 137_225_000.0
+    assert "반영 대기" not in (out[0].get("date_note") or "")
+
+
+def test_merge_keeps_existing_eps_when_incoming_null():
+    from database import merge_earnings_payload
+
+    existing = {"actual_eps": -0.41, "estimate_eps": -0.5, "source": "nasdaq_surprise"}
+    incoming = {"actual_eps": None, "estimate_eps": -0.455, "source": "yfinance_info"}
+    out = merge_earnings_payload(existing, incoming)
+    assert out["actual_eps"] == -0.41
+    assert out["estimate_eps"] == -0.5
+
+
+def test_call_refresh_on_revenue_miss_claim():
+    from earnings import _needs_earnings_call_refresh
+
+    rec = {
+        "actual_eps": -0.41,
+        "estimate_eps": -0.5,
+        "eps_surprise_pct": 18.0,
+        "actual_revenue": 137_225_000.0,
+        "earnings_call": {
+            "summary": "IREN이 Q4 2026 실적을 발표했으며, 매출이 예상을 하회했으나 AI 클라우드가 확대 중입니다. 실적 발표 후 주가는 2.00% 상승했습니다.",
+            "highlights": ["Q4 2026 매출 미스", "주가 2% 상승"],
+        },
+    }
+    move = {"reaction_pct": -12.5, "next_day_pct": -12.5, "label": "▼12.50%"}
+    assert _needs_earnings_call_refresh(rec, move) is True
+
+
+def test_template_call_from_facts():
+    from earnings import _template_call_from_facts
+
+    facts = {
+        "actual_eps": -0.41,
+        "estimate_eps": -0.5,
+        "eps_surprise_pct": 18.0,
+        "actual_revenue": 137_225_000.0,
+    }
+    move = {
+        "reaction_pct": -12.53,
+        "timing": "amc",
+        "label": "장마감 후 발표 · 다음 거래일 종가 ▼12.53%",
+    }
+    out = _template_call_from_facts("IREN", "2026-08-27", facts, move)
+    assert "-0.41" in out["summary"]
+    assert "상회" in out["summary"]
+    assert "매출 미스" not in out["summary"]
+    assert "2.00%" not in out["summary"]
+    assert "▼12.53" in out["market_reaction_note"]
+
+
 def test_call_ui_highlight():
     recent = (date.today() - timedelta(days=5)).isoformat()
     call = {"earnings_date": recent, "summary": "ok"}

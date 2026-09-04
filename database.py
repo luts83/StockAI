@@ -89,6 +89,33 @@ def _earnings_record_id(ticker: str, earnings_date: str) -> str:
     return f"{(ticker or '').upper()}_{(earnings_date or '')[:10]}"
 
 
+_EARNINGS_KEEP_IF_NULL = (
+    "actual_eps",
+    "estimate_eps",
+    "eps_surprise_pct",
+    "actual_revenue",
+    "estimate_revenue",
+    "revenue_surprise_pct",
+    "period_end",
+    "post_earnings_move",
+    "announce_timing",
+)
+
+
+def merge_earnings_payload(existing: dict, record: dict) -> dict:
+    """yfinance 지연 행(actual_eps=None)이 Nasdaq으로 채운 숫자를 덮어쓰지 않게."""
+    payload = dict(existing or {})
+    payload.update(record or {})
+    for k in _EARNINGS_KEEP_IF_NULL:
+        if payload.get(k) is None and (existing or {}).get(k) is not None:
+            payload[k] = existing[k]
+    if payload.get("actual_eps") is not None:
+        note = str(payload.get("date_note") or "")
+        if "반영 대기" in note or "동기화 중" in note:
+            payload.pop("date_note", None)
+    return payload
+
+
 def upsert_earnings_record(record: dict) -> str:
     ticker = (record.get("ticker") or "").upper()
     edate = (record.get("date") or "")[:10]
@@ -96,8 +123,7 @@ def upsert_earnings_record(record: dict) -> str:
         raise ValueError("ticker and date required")
     rid = _earnings_record_id(ticker, edate)
     existing = get_db()["earnings_history"].find_one({"_id": rid}) or {}
-    payload = dict(existing)
-    payload.update(record)
+    payload = merge_earnings_payload(existing, record)
     payload["_id"] = rid
     payload["ticker"] = ticker
     payload["date"] = edate
@@ -208,16 +234,28 @@ def save_analysis(ticker: str, period: str, indicators: dict,
                   data_date: str = None,
                   llm_signal: str = None,
                   signal_engine: dict = None,
-                  earnings_snapshot: dict = None) -> str:
+                  earnings_snapshot: dict = None,
+                  regular_price: float = None,
+                  extended_price: float = None,
+                  has_gap: bool = False,
+                  gap_pct: float = None,
+                  price_basis: str = "session_close") -> str:
     db = get_db()
     doc_id = f"{ticker}_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # current_price = 정규장 종가(분석 기준). 장외가는 extended_price에만.
+    session_px = regular_price if regular_price is not None else current_price
     doc = {
         "_id":           doc_id,
         "ticker":        ticker,
         "period":        period,
         "created_at":    datetime.now().isoformat(),
         "data_date":     data_date,
-        "current_price": current_price,
+        "current_price": session_px,
+        "regular_price": session_px,
+        "extended_price": extended_price,
+        "has_gap":       bool(has_gap),
+        "gap_pct":       gap_pct,
+        "price_basis":   price_basis or "session_close",
         "change_pct":    change_pct,
         "indicators":    indicators,
         "valuation":     valuation or {},
@@ -255,24 +293,39 @@ def get_today_public_analysis(ticker: str, period: str) -> dict | None:
 
 def save_public_analysis(ticker: str, period: str, indicators: dict,
                           analysis: str, signal: str, news: list, chart_b64: str,
-                          current_price: float, change_pct: float, valuation: dict) -> None:
+                          current_price: float, change_pct: float, valuation: dict,
+                          regular_price: float = None,
+                          extended_price: float = None,
+                          has_gap: bool = False,
+                          gap_pct: float = None,
+                          price_basis: str = "session_close",
+                          data_date: str = None,
+                          earnings_snapshot: dict = None) -> None:
     """비로그인용 공용 캐시 저장 (별도 컬렉션, 당일 1회)"""
     from datetime import timezone
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
+    session_px = regular_price if regular_price is not None else current_price
     doc = {
         "ticker":        ticker,
         "period":        period,
         "date":          today,
         "created_at":    now.isoformat(),
+        "data_date":     data_date,
         "indicators":    indicators,
         "analysis":      analysis,
         "signal":        signal,
         "news":          news,
         "chart_b64":     chart_b64,
-        "current_price": current_price,
+        "current_price": session_px,
+        "regular_price": session_px,
+        "extended_price": extended_price,
+        "has_gap":       bool(has_gap),
+        "gap_pct":       gap_pct,
+        "price_basis":   price_basis or "session_close",
         "change_pct":    change_pct,
         "valuation":     valuation or {},
+        "earnings_snapshot": earnings_snapshot or {},
     }
     # upsert: 같은 날 같은 ticker+period면 덮어쓰지 않고 존재하는 게 있으면 유지
     get_db()["public_cache"].update_one(

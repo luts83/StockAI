@@ -200,15 +200,59 @@ def cache_is_fresh(doc: dict, ticker: str, live_price: Optional[float] = None):
 
 
 async def _live_price_for_cache(ticker: str) -> Optional[float]:
+    """캐시 무효화용 라이브 호가 — 장외가 있으면 그 값(큰 갭 감지)."""
     try:
         ext = await asyncio.to_thread(get_extended_price, ticker)
-        px = ext.get("extended_price") or ext.get("regular_price") or ext.get("price")
+        px = ext.get("extended_price") or ext.get("regular_price") or ext.get("session_close")
         if px is None and ext.get("last_price") is not None:
             px = ext["last_price"]
         return float(px) if px is not None else None
     except Exception as e:
         print(f"[cache] live price fail {ticker}: {e}")
         return None
+
+
+def _session_price_from_doc(doc: dict | None) -> float | None:
+    """리포트 분석 기준가 = 정규장 종가."""
+    if not doc:
+        return None
+    for key in ("regular_price", "session_close", "current_price"):
+        try:
+            v = doc.get(key)
+            if v is not None:
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+async def _price_fields_for_response(doc: dict, ticker: str) -> dict:
+    """캐시/저장 응답용 — 종가 기준 + 최신 장외 갭 갱신."""
+    session_px = _session_price_from_doc(doc)
+    try:
+        live = await asyncio.to_thread(get_extended_price, ticker, session_px)
+    except Exception:
+        live = {}
+    reg = live.get("regular_price") or session_px
+    ext = live.get("extended_price")
+    if ext is None:
+        ext = doc.get("extended_price")
+    gap = live.get("gap_pct")
+    has_gap = live.get("has_gap")
+    if gap is None and reg and ext and float(reg) > 0:
+        try:
+            gap = round((float(ext) - float(reg)) / float(reg) * 100, 2)
+            has_gap = abs(gap) >= 1.0
+        except (TypeError, ValueError):
+            pass
+    return {
+        "current_price": reg,
+        "regular_price": reg,
+        "extended_price": ext,
+        "has_gap": bool(has_gap),
+        "gap_pct": gap,
+        "price_basis": "session_close",
+    }
 
 
 class NewsSummaryRequest(BaseModel):
@@ -382,10 +426,11 @@ async def analyze(
                 earnings_disp = await asyncio.to_thread(
                     get_earnings_display_bundle, ticker, pub.get("earnings_snapshot")
                 )
+                price_fields = await _price_fields_for_response(pub, ticker)
                 return {
                     "doc_id":         "",
                     "ticker":         pub["ticker"],
-                    "current_price":  pub.get("current_price"),
+                    **price_fields,
                     "change_pct":     pub.get("change_pct", 0),
                     "indicators":     pub.get("indicators", {}),
                     "valuation":      pub.get("valuation", {}),
@@ -425,10 +470,11 @@ async def analyze(
                     ticker,
                     existing.get("earnings_snapshot"),
                 )
+                price_fields = await _price_fields_for_response(existing, ticker)
                 return {
                     "doc_id":          existing["_id"],
                     "ticker":          existing["ticker"],
-                    "current_price":   existing.get("current_price"),
+                    **price_fields,
                     "change_pct":      existing.get("change_pct", 0),
                     "indicators":      existing.get("indicators", {}),
                     "valuation":       existing.get("valuation", {}),
@@ -507,12 +553,27 @@ async def _run_analysis_job(job_id: str, ticker: str,
         except Exception as e:
             print(f"[feedback] context 실패: {e}")
 
+        # 장외 갭은 LLM에 참고로 주입하되, 분석 기준가는 일봉 종가 고정
+        regular_price_val = safe(df["Close"].iloc[-1])
+        extended = await asyncio.to_thread(
+            get_extended_price, ticker, regular_price_val
+        )
+        price_session = {
+            "session_close": regular_price_val,
+            "regular_price": regular_price_val,
+            "extended_price": extended.get("extended_price"),
+            "has_gap": extended.get("has_gap", False),
+            "gap_pct": extended.get("gap_pct"),
+            "price_basis": "session_close",
+        }
+
         analysis_raw = await analyze_with_claude(
             chart_b64, df, ticker, news_items, valuation,
             analysis_date=analysis_date,
             earnings_context=earnings_bundle,
             signal_engine=signal_meta or None,
             feedback_context=feedback_context,
+            price_session=price_session,
         )
         llm_signal = extract_signal(analysis_raw)
         analysis = clean_analysis(analysis_raw)
@@ -523,8 +584,6 @@ async def _run_analysis_job(job_id: str, ticker: str,
             signal = llm_signal
             signal_meta = {"signal": signal, "llm_signal": llm_signal, "engine_failed": True}
 
-        extended = await asyncio.to_thread(get_extended_price, ticker)
-
         indicators = {
             "rsi":         safe(df["RSI"].iloc[-1]),
             "macd":        safe(df["MACD"].iloc[-1], 4),
@@ -534,13 +593,15 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "ma200":       safe(df["MA200"].iloc[-1]),
         }
 
-        regular_price_val  = safe(df["Close"].iloc[-1])
         extended_price_val = extended.get("extended_price")
-        current_price_val  = extended_price_val or regular_price_val
+        # 분석·저장·성과 기준가는 항상 정규장 종가
+        current_price_val  = regular_price_val
         change_pct_val     = safe(
             (df["Close"].iloc[-1] - df["Close"].iloc[-2])
             / df["Close"].iloc[-2] * 100
         )
+        has_gap_val = bool(extended.get("has_gap", False))
+        gap_pct_val = extended.get("gap_pct")
         doc_id = ""
         signal_change = None
         if user_id:
@@ -565,6 +626,11 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 llm_signal=llm_signal,
                 signal_engine=signal_meta,
                 earnings_snapshot=earnings_bundle,
+                regular_price=regular_price_val,
+                extended_price=extended_price_val,
+                has_gap=has_gap_val,
+                gap_pct=gap_pct_val,
+                price_basis="session_close",
             )
             # SIGNAL 변경 시 자동 비교·피드백 저장
             try:
@@ -621,16 +687,26 @@ async def _run_analysis_job(job_id: str, ticker: str,
                 current_price=current_price_val,
                 change_pct=change_pct_val,
                 valuation=valuation,
+                regular_price=regular_price_val,
+                extended_price=extended_price_val,
+                has_gap=has_gap_val,
+                gap_pct=gap_pct_val,
+                price_basis="session_close",
+                data_date=analysis_date,
+                earnings_snapshot=earnings_bundle,
             )
 
-        job.result = {
+        # JSON 직렬화 가능한 결과만 보관 (NaN/ObjectId 등으로 status 폴링 500 방지)
+        from database import _json_safe
+        job.result = _json_safe({
             "doc_id":          doc_id,
             "ticker":          ticker,
             "current_price":   current_price_val,
             "regular_price":   regular_price_val,
             "extended_price":  extended_price_val,
-            "has_gap":         extended.get("has_gap", False),
-            "gap_pct":         extended.get("gap_pct"),
+            "has_gap":         has_gap_val,
+            "gap_pct":         gap_pct_val,
+            "price_basis":     "session_close",
             "change_pct":      change_pct_val,
             "indicators":      indicators,
             "valuation":       valuation,
@@ -644,7 +720,7 @@ async def _run_analysis_job(job_id: str, ticker: str,
             "data_date":       analysis_date,
             "signal_change":   signal_change,
             "earnings":          earnings_bundle,
-        }
+        })
         job.status = "done"
         elapsed = asyncio.get_event_loop().time() - t0
         print(
@@ -670,7 +746,13 @@ async def analyze_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     if job.status == "done":
-        return {"status": "done", "result": job.result}
+        # doc_id를 최상단에 두어 대용량 result 수신 실패 시 클라이언트가 히스토리로 복구 가능
+        result = job.result or {}
+        return {
+            "status": "done",
+            "doc_id": (result or {}).get("doc_id") or "",
+            "result": result,
+        }
     if job.status == "error":
         return {"status": "error", "error": job.error}
     return {"status": job.status}
@@ -680,31 +762,46 @@ def _build_chat_live_context(snap: dict, news_live, doc, data_date: str) -> str:
     """채팅 system 프롬프트용 실시간 시세·지표·뉴스 블록."""
     live_blocks = []
     ticker = doc["ticker"]
-    baseline = doc.get("current_price")
+    baseline = _session_price_from_doc(doc)
     try:
         if snap and (snap.get("regular_price") or snap.get("extended_price")):
-            reg = snap.get("regular_price")
+            reg = snap.get("regular_price") or snap.get("session_close")
             ext = snap.get("extended_price")
             prev = snap.get("previous_close")
-            effective = ext or reg
+            live_quote = snap.get("live_quote") or ext or reg
             chg = None
             if reg is not None and prev:
-                chg = round((reg - prev) / prev * 100, 2)
+                try:
+                    chg = round((float(reg) - float(prev)) / float(prev) * 100, 2)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    chg = None
             lines = [
                 "[실시간 스냅샷 — 질문 시점, 서버가 방금 조회]",
-                f"- 유효 현재가: ${effective}"
-                + (f" (정규장 ${reg}, 전일 대비 {chg:+.2f}%)" if reg and chg is not None else ""),
+                f"- 정규장 종가(지표·레벨 기준): ${reg}"
+                + (f" (전일 대비 {chg:+.2f}%)" if chg is not None else ""),
             ]
-            if ext and reg and ext != reg:
-                lines.append(f"- 프리/애프터: ${ext}")
+            if ext is not None and reg is not None and ext != reg:
+                gap = snap.get("gap_pct")
+                gap_txt = f", 종가 대비 {gap:+.2f}%" if gap is not None else ""
+                lines.append(f"- 장외/프리 참고 호가: ${ext}{gap_txt}")
+                lines.append(
+                    "  ※ '지금 가격' 질문에만 장외호가 사용. "
+                    "지지/저항·트리거·무효화 레벨은 리포트 정규장 종가 기준으로만 인용."
+                )
+            elif live_quote is not None:
+                lines.append(f"- 유효 현재가: ${live_quote} (정규장)")
             if prev:
                 lines.append(f"- 전일종가: ${prev}")
             if snap.get("has_gap") and snap.get("gap_pct") is not None:
-                lines.append(f"- 장외 갭: {snap['gap_pct']:+.2f}%")
-            lines.append(f"- 분석 리포트 기준가({data_date}): ${baseline}")
+                lines.append(f"- 장외 갭: {snap['gap_pct']:+.2f}% (종가 대비)")
+            lines.append(f"- 분석 리포트 기준가({data_date}, 정규장 종가): ${baseline}")
             vs = snap.get("vs_baseline_pct")
-            if vs is not None:
-                lines.append(f"- 리포트 대비 변동: {vs:+.2f}% (${baseline} → ${effective})")
+            if vs is not None and live_quote is not None and baseline is not None:
+                quote_label = "장외호가" if ext and ext != reg else "종가"
+                lines.append(
+                    f"- 리포트 종가 대비 변동: {vs:+.2f}% "
+                    f"(${baseline} → {quote_label} ${live_quote})"
+                )
 
             ind = snap.get("indicators") or {}
             if ind:
@@ -810,8 +907,9 @@ async def chat_stream(
     _now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
 
     # 시세·지표·뉴스 병렬 조회 (질문 시점 스냅샷)
+    _baseline = _session_price_from_doc(doc)
     snap, news_live = await asyncio.gather(
-        asyncio.to_thread(get_chat_live_snapshot, ticker, doc.get("current_price")),
+        asyncio.to_thread(get_chat_live_snapshot, ticker, _baseline),
         asyncio.to_thread(fetch_news, ticker, False),
         return_exceptions=True,
     )
@@ -842,7 +940,7 @@ async def chat_stream(
         f"[분석 메타데이터]\n"
         f"- 분석 대상: {ticker}\n"
         f"- 분석 리포트 작성일: {_data_date}\n"
-        f"- 리포트 당시 기준가: ${doc.get('current_price', '—')}\n"
+        f"- 리포트 분석 기준가(정규장 종가): ${_baseline if _baseline is not None else doc.get('current_price', '—')}\n"
         f"- 리포트 당시 RSI/MACD: {saved_inds.get('rsi', '—')} / {saved_inds.get('macd', '—')}\n"
         f"- 서버 시각(UTC): {_now_utc}\n"
         f"\n"
@@ -856,22 +954,24 @@ async def chat_stream(
         f"3. 서론/인사 없이 결론부터.\n"
         f"4. 숫자 인용은 꼭 필요한 1~3개만.\n"
         f"\n"
-        f"5. 실시간 우선 규칙 (가장 중요)\n"
-        f"   - '지금 가격', '오늘', '최근', '분석 이후' 질문 → 위 실시간 스냅샷만 근거.\n"
-        f"   - 리포트의 옛 가격·RSI·MACD를 현재가처럼 말하지 말 것.\n"
-        f"   - 리포트와 실시간이 다르면 '리포트({_data_date}) 이후 ~% 변동, RSI ~→~'처럼 변화를 설명.\n"
-        f"   - Yahoo/구글/HTS 확인 안내 금지. 서버가 이미 조회함.\n"
-        f"   - '실시간 조회 불가'라고 말하지 말 것.\n"
-        f"   - 뉴스가 급등 원인으로 보이면 헤드라인 1~2개만 인용.\n"
+        f"5. 가격 세션 규칙 (가장 중요 — 혼동 금지)\n"
+        f"   - 리포트의 지지/저항/매수·하락 전환/무효화 레벨은 **정규장 종가 기준**으로만 인용.\n"
+        f"   - 장외/프리 호가로 그 레벨을 다시 쓰거나 '현재가 $장외가이므로 저항이 ~'처럼 재해석 금지.\n"
+        f"   - '지금 가격' 질문 → 장외호가가 있으면 장외호가 + 종가 대비 갭%를 함께 말함.\n"
+        f"   - 장외 갭이 크면: '리포트는 종가 기준이며, 장외 급변으로 레벨 재검토가 필요'라고만 명시.\n"
+        f"   - 리포트와 실시간 종가/장외가 숫자를 뒤섞어 변명하지 말 것.\n"
+        f"   - 지표(RSI/MACD/MA) '지금' 값은 실시간 스냅샷의 일봉 종가 지표를 사용.\n"
+        f"   - Yahoo/구글/HTS 확인 안내 금지. '실시간 조회 불가'라고 말하지 말 것.\n"
+        f"   - 뉴스가 급등·급락 원인으로 보이면 헤드라인 1~2개만 인용.\n"
         f"\n"
         f"6. 리포트 참고 규칙\n"
-        f"   - 아래 리포트는 {_data_date} 스냅샷. 시나리오·저항/지지·트리거·종합 의견 참고용.\n"
+        f"   - 아래 리포트는 {_data_date} 정규장 종가 스냅샷. 시나리오·저항/지지·트리거·종합 의견 참고용.\n"
         f"   - 제공되지 않은 실적 수치·어닝콜 발언·재무 세부 수치 생성 금지.\n"
         f"{earn_block}"
         f"\n"
         f"질문 섹션: {req.section}\n"
         f"\n"
-        f"=== 2순위: 기존 분석 리포트 ({_data_date} 기준, 참고용) ===\n"
+        f"=== 2순위: 기존 분석 리포트 ({_data_date} 종가 기준, 참고용) ===\n"
         f"{doc['analysis']}\n"
         f"=== 리포트 종료 ==="
     )

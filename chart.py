@@ -189,7 +189,8 @@ def generate_chart(df: pd.DataFrame, ticker: str) -> str:
     plt.setp(ax_rsi.get_xticklabels(),  visible=False)
     plt.setp(ax_macd.get_xticklabels(), visible=False)
 
-    plt.tight_layout(pad=1.0)
+    # sharex + GridSpec은 tight_layout과 호환되지 않음 → UserWarning 방지
+    fig.subplots_adjust(left=0.08, right=0.96, top=0.96, bottom=0.05, hspace=0.07)
 
     buf = io.BytesIO()
     # dpi=130: 웹에서 과도하지 않고, 모바일 레티나에서도 선명
@@ -290,7 +291,7 @@ def generate_chart_for_card(df: pd.DataFrame, ticker: str) -> str:
     plt.setp(ax_main.get_xticklabels(), visible=False)
     plt.setp(ax_rsi.get_xticklabels(),  visible=False)
 
-    plt.tight_layout(pad=1.0)
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.94, bottom=0.06, hspace=0.07)
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=150, facecolor=DARK_BG, bbox_inches="tight")

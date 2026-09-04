@@ -275,7 +275,11 @@ OUTPUT_RULE = """
 3. 섹션별 핵심만 — 과도한 나열 금지
 4. 투자자 유형별 액션은 각 3줄 이내
 5. ** 볼드는 반드시 여닫기 쌍으로 (**텍스트**) — 홀로 시작/끝 금지
+6. 가격 기준: 기술분석·지지/저항·트리거·목표가의 "현재가"는 **정규장 종가**만 사용.
+   장외/프리마켓 호가가 있어도 레벨을 장외가로 다시 쓰지 말 것.
+   장외 갭이 있으면 별도 문장으로 "종가 대비 장외 ±N% — 레벨 재검토 필요"만 명시.
 """
+
 
 def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           valuation: dict = None,
@@ -283,7 +287,8 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
                           earnings_context: dict = None,
                           volume_profile: dict = None,
                           signal_engine: dict = None,
-                          feedback_context: str = "") -> str:
+                          feedback_context: str = "",
+                          price_session: dict = None) -> str:
     news_text = "\n".join([
         f"- [{item['source']}] {item['title']}"
         for item in news_items[:15] if item.get("title")
@@ -441,6 +446,24 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 {feedback_context.strip()}
 """
 
+    ps = price_session or {}
+    session_px = ps.get("session_close") or ps.get("regular_price") or stats.get("price")
+    ext_px = ps.get("extended_price")
+    gap = ps.get("gap_pct")
+    price_lines = [
+        f"- 분석 기준가 (정규장 종가): ${session_px}",
+        "  ※ 아래 지지/저항·트리거·MA 비교는 모두 이 종가 기준. 장외가로 재작성 금지.",
+    ]
+    if ext_px is not None and gap is not None:
+        price_lines.append(
+            f"- 장외/프리 참고 호가: ${ext_px} (종가 대비 {gap:+.2f}%)"
+        )
+        if abs(gap) >= 1.0:
+            price_lines.append(
+                "  ※ 장외 갭 ≥1% — 본문에 '종가 기준 분석 + 장외 급변으로 레벨 재검토 필요'를 명시할 것. "
+                "장외가를 현재가/$지지선으로 바꿔 쓰지 말 것."
+            )
+
     return f"""다음 주식을 분석해줘.
 
 [분석 기준일: {analysis_date or "오늘"} — 반드시 이 날짜 기준으로만 분석할 것]
@@ -452,7 +475,7 @@ def build_analysis_prompt(ticker: str, stats: dict, news_items: List[Dict],
 ## 종목: {ticker}
 
 ### 현재 지표
-- 현재가: ${stats['price']}
+{chr(10).join(price_lines)}
 - 최근 5일 등락률: {_pct(stats.get('change_5d'))}
 - 최근 20일 등락률: {_pct(stats.get('change_20d'))}
 - 최근 1개월 등락률: {_pct(stats.get('change_1m'))}
@@ -531,7 +554,8 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               analysis_date: str = "",
                               earnings_context: dict = None,
                               signal_engine: dict = None,
-                              feedback_context: str = "") -> str:
+                              feedback_context: str = "",
+                              price_session: dict = None) -> str:
     """Claude Vision API로 차트 + 뉴스 + 밸류에이션 + 어닝 종합 분석"""
     from volume_profile import compute_volume_profile
     stats  = get_summary_stats(df, ticker=ticker)
@@ -541,7 +565,8 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                                    earnings_context=earnings_context,
                                    volume_profile=vp,
                                    signal_engine=signal_engine,
-                                   feedback_context=feedback_context)
+                                   feedback_context=feedback_context,
+                                   price_session=price_session)
 
     try:
         message = _get_client().messages.create(
