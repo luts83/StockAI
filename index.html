@@ -965,8 +965,12 @@ async function parseHttpError(res) {
 
 function formatFetchError(err) {
   const msg = err?.message || String(err);
-  if (/failed to fetch|network error|load failed|networkrequestfailed/i.test(msg))
-    return "네트워크 연결이 끊겼습니다. Wi-Fi 확인 후 다시 시도해 주세요.";
+  if (/failed to fetch|network error|load failed|networkrequestfailed/i.test(msg)) {
+    if (IS_LOCAL) {
+      return "서버에 연결하지 못했습니다. 로컬 API(localhost:8000)가 실행 중인지 확인하세요.";
+    }
+    return "서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.";
+  }
   return msg;
 }
 
@@ -1059,9 +1063,33 @@ const ENTRY_STANCE_KR = {
   ENTRY_AVOID: "진입 회피",
 };
 const ACTION_KR = {
-  entry: { BUY: "매수", WAIT: "대기", AVOID: "회피" },
+  entry: { BUY: "매수", SCALE_IN: "분할매수", WAIT: "대기", AVOID: "회피", REDUCE: "축소", EXIT: "청산" },
   holding: { HOLD: "보유", REDUCE: "비중 축소", EXIT: "청산" },
-  trading: { BUY: "매수", WAIT: "대기", NO_CHASE: "추격 금지" },
+  trading: { BUY: "매수", SCALE_IN: "분할매수", WAIT: "대기", NO_CHASE: "추격 금지" },
+};
+const ENTRY_ACTION_KR = {
+  BUY: "매수",
+  SCALE_IN: "분할매수",
+  WAIT: "대기",
+  REDUCE: "비중축소",
+  EXIT: "청산",
+};
+const BOTTOMING_KR = {
+  NORMAL: "정상",
+  OBSERVE: "관찰",
+  BOTTOMING_WATCH: "바닥 관찰",
+  OVERSOLD_WATCH: "과매도(바닥 미확정)",
+  BOTTOMING_HIGH: "강한 바닥 후보",
+  REVERSAL_CANDIDATE: "반전 후보",
+  LOW: "낮음",
+  WATCH: "관찰",
+  HIGH: "높음",
+};
+const EXTENSION_KR = {
+  COMPRESSED: "압축",
+  NORMAL: "정상",
+  EXTENDED: "이격",
+  OVEREXTENDED: "과열",
 };
 const REASON_CODE_KR = {
   below_ma20: "MA20 하회",
@@ -1085,7 +1113,12 @@ function fmtExpReturn(v) {
 }
 
 function buildSignalSubLine(eng, sigDisplay) {
-  const trend = TREND_LABEL_KR[eng.trend_label] || eng.trend_label;
+  const trend = TREND_LABEL_KR[eng.trend_label || eng.trend] || eng.trend_label || eng.trend;
+  const ea = ENTRY_ACTION_KR[eng.entry_action] || eng.entry_action;
+  if (trend && ea) {
+    const chase = eng.chase_blocked ? " · 추격차단" : "";
+    return `${trend} · Entry ${ea}${chase} — 추세와 진입은 별개`;
+  }
   const stance = ENTRY_STANCE_KR[eng.entry_stance] || eng.entry_stance;
   if (eng.trend_label && eng.entry_stance) {
     return `${trend} · ${stance} — 추세와 진입 타이밍은 별개로 봅니다`;
@@ -1093,7 +1126,15 @@ function buildSignalSubLine(eng, sigDisplay) {
   return sigDisplay.sub;
 }
 
-function buildSignalActionSummary(actions) {
+function buildSignalActionSummary(actions, eng = {}) {
+  const pos = eng.position_actions || {};
+  if (pos.holder || pos.new_investor) {
+    const scale = pos.scale_in || {};
+    const scaleTxt = scale.target_position_pct
+      ? ` · 목표포지션 대비 ${scale.target_position_pct}%`
+      : "";
+    return `보유자 ${pos.holder || "—"} · 신규 ${pos.new_investor || "—"} · 단기 ${pos.trader || "—"}${scaleTxt}`;
+  }
   if (!actions || !actions.entry) return "";
   const e = ACTION_KR.entry[actions.entry] || actions.entry;
   const h = ACTION_KR.holding[actions.holding] || actions.holding;
@@ -1267,7 +1308,7 @@ function buildSignalBoxHtml({ signal, sigDisplay, eng = {}, confidence = "", sig
       ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid ${confColor};color:${confColor};margin-left:8px">신뢰도 ${confidence}</span>`
       : "");
 
-  const actionSummary = buildSignalActionSummary(eng.actions);
+  const actionSummary = buildSignalActionSummary(eng.actions, eng);
   const actionSummaryLine = actionSummary
     ? `<div style="font-size:13px;color:var(--text);margin-top:6px;font-weight:600">${actionSummary}</div>`
     : "";
@@ -1297,21 +1338,41 @@ function buildSignalBoxHtml({ signal, sigDisplay, eng = {}, confidence = "", sig
       </div>`;
   }
 
-  const scoreBreak = (scores.trend != null) ? `
-    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(5,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
-      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">추세</div><div style="color:var(--text);font-weight:700">${scores.trend}</div><div style="color:var(--muted);margin-top:2px;font-size:9px">${TREND_LABEL_KR[eng.trend_label] || eng.trend_label || ""}</div></div>
-      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">모멘텀</div><div style="color:var(--text);font-weight:700">${scores.momentum ?? "—"}</div></div>
-      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">거래량</div><div style="color:var(--text);font-weight:700">${scores.participation ?? "—"}</div></div>
-      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">진입</div><div style="color:var(--text);font-weight:700">${scores.entry_quality ?? "—"}</div><div style="color:var(--muted);margin-top:2px;font-size:9px">${ENTRY_STANCE_KR[eng.entry_stance] || eng.entry_stance || ""}</div></div>
-      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center"><div style="color:var(--dim)">손익비</div><div style="color:var(--text);font-weight:700">${scores.risk_reward ?? "—"}</div></div>
+  const scoreBreak = (scores.trend != null || eng.entry_score != null) ? `
+    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(3,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Trend</div>
+        <div style="color:var(--text);font-weight:700">${eng.trend_score ?? scores.trend ?? "—"}</div>
+        <div style="color:var(--muted);margin-top:2px;font-size:9px">${TREND_LABEL_KR[eng.trend_label || eng.trend] || eng.trend || ""}</div>
+      </div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Bottoming</div>
+        <div style="color:var(--text);font-weight:700">${eng.bottoming_score ?? scores.bottoming ?? "—"}</div>
+        <div style="color:var(--muted);margin-top:2px;font-size:9px">O ${eng.oversold_score ?? "—"} / S ${eng.stabilization_score ?? "—"}</div>
+        <div style="color:var(--muted);font-size:9px">${BOTTOMING_KR[eng.bottoming] || eng.bottoming || ""}</div>
+      </div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Entry</div>
+        <div style="color:var(--text);font-weight:700">${eng.entry_score ?? scores.entry_score ?? "—"}</div>
+        <div style="color:var(--muted);margin-top:2px;font-size:9px">${ENTRY_ACTION_KR[eng.entry_action] || eng.entry_action || ENTRY_STANCE_KR[eng.entry_stance] || ""}</div>
+        ${eng.chase_blocked ? `<div style="color:var(--yellow);font-size:9px;margin-top:2px">chase blocked</div>` : ""}
+      </div>
+    </div>
+    <div style="margin-top:4px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Momentum</div><div style="color:var(--text);font-weight:600">${eng.momentum || scores.momentum || "—"}</div></div>
+      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Valuation</div><div style="color:var(--text);font-weight:600">${eng.valuation || "—"}</div></div>
+      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Extension</div><div style="color:var(--text);font-weight:600">${EXTENSION_KR[eng.extension_state] || eng.extension_state || "—"}</div></div>
+      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">State</div><div style="color:var(--text);font-weight:600;font-size:9px">${(eng.market_state || "").replace(/^S\d_/, "") || "—"}</div></div>
     </div>` : "";
 
-  const actionLine = (actions.entry) ? `
+  const actionLine = (eng.entry_action || actions.entry) ? `
     <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
-      <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">신규 ${ACTION_KR.entry[actions.entry] || actions.entry}</span>
-      <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">보유 ${ACTION_KR.holding[actions.holding] || actions.holding}</span>
-      <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">단기 ${ACTION_KR.trading[actions.trading] || actions.trading}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">Entry ${ENTRY_ACTION_KR[eng.entry_action] || ACTION_KR.entry[actions.entry] || eng.entry_action || actions.entry}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">보유 ${(eng.position_actions || {}).holder || ACTION_KR.holding[actions.holding] || actions.holding || "—"}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(167,139,250,0.12);color:#a78bfa">신규 ${(eng.position_actions || {}).new_investor || "—"}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">단기 ${(eng.position_actions || {}).trader || ACTION_KR.trading[actions.trading] || actions.trading || "—"}</span>
       ${eng.rvol != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">RVOL ${Number(eng.rvol).toFixed(2)}</span>` : ""}
+      ${eng.fundamental_view ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">Fund ${eng.fundamental_view}</span>` : ""}
     </div>` : "";
 
   const er = eng.expected_return || {};
@@ -2030,6 +2091,27 @@ function notifyAnalysisDone(ticker) {
   }
 }
 
+async function fetchJobChart(jobId, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`${API}/analyze/chart/${jobId}`, {
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 409) return "";
+        throw new Error(`chart http ${res.status}`);
+      }
+      const data = await res.json();
+      return data.chart_image || "";
+    } catch (e) {
+      console.warn("[fetchJobChart] retry", i + 1, e);
+      if (i === retries - 1) return "";
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  return "";
+}
+
 async function pollAnalysis(jobId, maxWait = 240000) {
   const start = Date.now();
   let consecutiveFails = 0;
@@ -2054,7 +2136,6 @@ async function pollAnalysis(jobId, maxWait = 240000) {
       try {
         data = await res.json();
       } catch (parseErr) {
-        // done 응답(차트 base64)이 끊기면 JSON 파싱 실패 — 재시도
         consecutiveFails += 1;
         console.warn("[pollAnalysis] JSON parse fail, retry", parseErr);
         if (consecutiveFails >= 5) throw new Error("분석 결과 수신에 실패했습니다. 히스토리에서 확인해 주세요.");
@@ -2062,7 +2143,15 @@ async function pollAnalysis(jobId, maxWait = 240000) {
       }
       consecutiveFails = 0;
       if (data.status === "done") {
-        if (data.result) return data.result;
+        if (data.result) {
+          const result = data.result;
+          // 차트는 status에서 빠지므로 별도 요청 (실패해도 본문은 표시)
+          if (data.has_chart && !result.chart_image) {
+            result.chart_image = await fetchJobChart(jobId);
+          }
+          if (data.doc_id && !result.doc_id) result.doc_id = data.doc_id;
+          return result;
+        }
         // result 없이 doc_id만 온 경우
         if (data.doc_id) {
           const err = new Error("result missing");

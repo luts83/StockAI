@@ -79,6 +79,8 @@ app.add_middleware(
         "https://luts83.github.io",
         "https://web-production-3b251.up.railway.app",
     ],
+    # Live Server 등 로컬 임의 포트 → API CORS 차단으로 Failed to fetch 되는 경우 방지
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
@@ -536,7 +538,26 @@ async def _run_analysis_job(job_id: str, ticker: str,
                     valuation=valuation,
                 )
             )
-            signal_meta = decide_signal(feat)
+            prev_market_state = None
+            fund_view = None
+            try:
+                if user_id:
+                    prev_for_state = get_previous_analysis(
+                        ticker, req.period, user_id=user_id
+                    )
+                else:
+                    prev_for_state = get_today_public_analysis(ticker, req.period)
+                if prev_for_state:
+                    peng = prev_for_state.get("signal_engine") or {}
+                    prev_market_state = peng.get("market_state")
+                    fund_view = peng.get("fundamental_view")
+            except Exception as e:
+                print(f"[signal_engine] prev state lookup 실패: {e}")
+            signal_meta = decide_signal(
+                feat,
+                prev_market_state=prev_market_state,
+                fundamental_view=fund_view,
+            )
             signal = signal_meta.get("signal") or "WATCH_FLAT"
             feat["signal"] = signal
         except Exception as e:
@@ -741,21 +762,42 @@ async def _run_analysis_job(job_id: str, ticker: str,
 
 @app.get("/analyze/status/{job_id}")
 async def analyze_status(job_id: str):
-    """분석 진행 상태 폴링"""
+    """분석 진행 상태 폴링.
+
+    done 응답에서 chart_image(base64)는 제외한다.
+    차트는 GET /analyze/chart/{job_id} 로 따로 받아 폴링 타임아웃·Failed to fetch 를 줄인다.
+    """
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     if job.status == "done":
-        # doc_id를 최상단에 두어 대용량 result 수신 실패 시 클라이언트가 히스토리로 복구 가능
-        result = job.result or {}
+        result = dict(job.result or {})
+        has_chart = bool(result.get("chart_image"))
+        result.pop("chart_image", None)
         return {
             "status": "done",
-            "doc_id": (result or {}).get("doc_id") or "",
+            "doc_id": result.get("doc_id") or "",
+            "has_chart": has_chart,
             "result": result,
         }
     if job.status == "error":
         return {"status": "error", "error": job.error}
     return {"status": job.status}
+
+
+@app.get("/analyze/chart/{job_id}")
+async def analyze_chart(job_id: str):
+    """폴링용 — done job의 차트 base64만 반환."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status != "done":
+        raise HTTPException(status_code=409, detail="analysis not ready")
+    result = job.result or {}
+    chart = result.get("chart_image") or ""
+    if not chart:
+        raise HTTPException(status_code=404, detail="chart not found")
+    return {"chart_image": chart}
 
 
 def _build_chat_live_context(snap: dict, news_live, doc, data_date: str) -> str:

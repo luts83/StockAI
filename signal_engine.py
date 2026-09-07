@@ -1,9 +1,11 @@
 """
-Signal Engine v3.
+Signal Engine v4.
 
-Trend Score ≠ Entry Score.
-상승 추세가 강해도 과확장이면 STRONG_BULLISH + ENTRY_WAIT / NO-CHASE 가능.
-SELL은 과열이 아니라 추세 붕괴 + 하락 확률 우위일 때만.
+Trend ≠ Entry ≠ Bottoming.
+Bottoming = Oversold(cap) + Stabilization — 과매도 ≠ 바닥 확정.
+Valuation(멀티플) ≠ Extension(기술 과열).
+Chase guard는 entry_score를 수정하지 않음.
+SELL softener는 Bottoming>=60 단독 적용 금지.
 
 LLM은 설명층. 최종 signal / actions 는 엔진이 결정한다.
 """
@@ -11,7 +13,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-ENGINE_VERSION = "signal_engine_v3"
+from signal_v4 import (
+    enrich_v4,
+    map_entry_to_legacy_signal,
+    soften_sell_candidate,
+)
+
+ENGINE_VERSION = "signal_engine_v4"
 
 SIGNALS = (
     "BUY",
@@ -629,38 +637,52 @@ def build_actions(
     features: dict,
     *,
     overextended: bool,
+    entry_action: str | None = None,
+    position_actions: dict | None = None,
+    chase_blocked: bool = False,
 ) -> dict:
-    """투자자 행동별 Action."""
+    """투자자 행동별 Action (v4 entry_action 우선)."""
     label = scored.get("trend_label") or "NEUTRAL"
     stance = scored.get("entry_stance") or "ENTRY_WAIT"
     bullish = label in ("STRONG_BULLISH", "BULLISH")
     bearish = label in ("STRONG_BEARISH", "BEARISH")
     breakdown = _trend_breakdown(features, scored.get("scores") or {})
+    pos = position_actions or {}
 
-    # ENTRY
-    if signal == "BUY":
+    ea = (entry_action or "").upper()
+    if ea == "BUY":
         entry = "BUY"
-    elif signal in ("SELL", "AVOID") or stance == "ENTRY_AVOID" or signal == "WATCH_RISK":
-        entry = "AVOID"
+    elif ea == "SCALE_IN":
+        entry = "SCALE_IN"
+    elif ea in ("EXIT", "REDUCE") or signal in ("SELL", "AVOID") or stance == "ENTRY_AVOID":
+        entry = "AVOID" if ea == "EXIT" or signal in ("SELL", "AVOID") else "WAIT"
+        if ea == "REDUCE":
+            entry = "WAIT"
+    elif chase_blocked or signal == "WATCH_RISK":
+        entry = "AVOID" if signal == "WATCH_RISK" else "WAIT"
     else:
         entry = "WAIT"
 
     # HOLDING
-    if signal == "SELL" or breakdown:
+    if ea == "EXIT" or signal == "SELL" or breakdown:
         holding = "EXIT"
-    elif overextended and bullish:
+    elif ea == "REDUCE" or (overextended and bullish):
         holding = "REDUCE"
+    elif pos.get("holder") in ("HOLD", "REDUCE", "EXIT"):
+        holding = pos["holder"]
     elif bearish and (scored.get("scores") or {}).get("momentum", 0) < 0:
         holding = "REDUCE"
     else:
         holding = "HOLD"
 
     # TRADING
-    if signal == "BUY":
+    if ea == "BUY" and not chase_blocked:
         trading = "BUY"
-    elif overextended and bullish:
+    elif ea == "SCALE_IN" and not chase_blocked:
+        trading = "SCALE_IN"
+    elif chase_blocked or overextended and bullish:
         trading = "NO_CHASE"
-    elif signal == "SELL":
+    elif signal == "SELL" or ea == "EXIT":
         trading = "WAIT"
     else:
         trading = "WAIT"
@@ -677,8 +699,10 @@ def decide_signal(
     *,
     thr_override: dict | None = None,
     config: dict | None = None,
+    prev_market_state: str | None = None,
+    fundamental_view: str | None = None,
 ) -> dict:
-    """최종 시그널 + 분리 Score + Actions + Triggers (+ calibration)."""
+    """최종 시그널 + v4 Bottoming/Entry/Extension + Actions + Triggers."""
     import math
     from signal_calibration import calibrated_p_up, calibrated_confidence
 
@@ -698,7 +722,7 @@ def decide_signal(
     entry_min = thr.get("entry_min", 8)
 
     deploy = (config or {}).get("deploy_flags") or {}
-    buy_enabled = deploy.get("buy_enabled", True)  # config 없으면 허용(threshold가 억제)
+    buy_enabled = deploy.get("buy_enabled", True)
     sell_enabled = deploy.get("sell_enabled", True)
 
     gates = hard_gates(features)
@@ -710,15 +734,25 @@ def decide_signal(
     label = scored["trend_label"]
     stance = scored["entry_stance"]
 
+    # trend_score -100..100 → 0..100 display
+    trend_score_100 = _clip((trend_s + 100) / 2.0, 0, 100)
+
+    v4 = enrich_v4(
+        features,
+        trend_label=label,
+        trend_score_100=trend_score_100,
+        prev_market_state=prev_market_state,
+        fundamental_view=fundamental_view,
+    )
+
     overextended = (
         not gates.get("entry", True)
         or entry_s < -10
         or (_g(features, "volatility", "bb_position") or 0) > 0.9
+        or v4.get("extension_state") in ("EXTENDED", "OVEREXTENDED")
     )
 
-    # ── 확률 (캘리브레이션 기반; LLM 임의 확률 금지)
     p_up = calibrated_p_up(score, config)
-    # downside: 낮은 score / 추세 붕괴 쪽에 가중
     breakdown = _trend_breakdown(features, scores)
     p_down_raw = 1 / (1 + math.exp(score / 25))
     if breakdown:
@@ -734,17 +768,29 @@ def decide_signal(
     }
     downside_advantage = prob["down"] >= prob["up"] + 0.05
 
-    # ── SELL: 과열 금지. 추세 붕괴 + 하락 우위
     sell_candidate = bool(
         sell_enabled
         and breakdown
         and downside_advantage
         and (trend_s <= sell_max or score <= sell_max or trend_s <= -25)
     )
+    soft = soften_sell_candidate(
+        sell_candidate=sell_candidate,
+        trend_label=label,
+        bottoming=v4["bottoming_detail"],
+        hard_override=v4["hard_sell_override"],
+    )
+    sell_candidate = soft["sell_candidate"]
+    softened_sell = soft["softened"]
+    if softened_sell:
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["sell_softened_bottoming"]
 
-    # ── BUY: 추세 + 진입품질 + gate + deploy
+    # v4 entry_action 우선 — legacy BUY는 entry_action==BUY 이고 deploy/gate 허용일 때만
+    entry_action = v4["entry_action"]
     buy_candidate = bool(
         buy_enabled
+        and entry_action == "BUY"
+        and not v4["chase_blocked"]
         and score >= buy_min
         and entry_s >= entry_min
         and gates["buy_allowed"]
@@ -752,29 +798,61 @@ def decide_signal(
         and scores["directional"] >= 10
     )
 
-    signal = "WATCH_FLAT"
     if buy_candidate:
         signal = "BUY"
-    elif sell_candidate:
+        entry_action = "BUY"
+    elif sell_candidate and entry_action == "EXIT":
         signal = "SELL"
-    else:
-        signal = classify_watch(
-            score, features, gates,
-            watch_up_min=watch_up_min,
-            watch_down_max=watch_down_max,
-            trend_score=trend_s,
+    elif sell_candidate and not softened_sell and entry_action in ("EXIT", "REDUCE"):
+        signal = "SELL" if entry_action == "EXIT" else map_entry_to_legacy_signal(
+            entry_action=entry_action,
+            trend_label=label,
+            softened_sell=softened_sell,
+            gates=gates,
         )
-        # 강세 + 진입 대기 → 반드시 WATCH_UP (Score 낮아도 추세 반영)
-        if label in ("STRONG_BULLISH", "BULLISH") and stance in ("ENTRY_WAIT", "ENTRY_AVOID"):
+    else:
+        # v4 action → legacy watch 매핑 (엔진 권한)
+        signal = map_entry_to_legacy_signal(
+            entry_action=entry_action,
+            trend_label=label,
+            softened_sell=softened_sell,
+            gates=gates,
+        )
+        if label in ("STRONG_BULLISH", "BULLISH") and entry_action == "WAIT":
             if signal not in ("WATCH_RISK", "WATCH_DOWN"):
                 signal = "WATCH_UP"
             scored["reason_codes"] = list(scored["reason_codes"]) + ["trend_ok_entry_wait"]
-        if score >= buy_min and not gates["buy_allowed"]:
-            signal = "WATCH_UP" if gates.get("risk", True) else "WATCH_RISK"
-            scored["reason_codes"] = list(scored["reason_codes"]) + ["buy_gate_blocked"]
-        if not buy_enabled and score >= buy_min and gates["buy_allowed"]:
+        if not buy_enabled and entry_action == "BUY":
             signal = "WATCH_UP"
+            entry_action = "WAIT"
             scored["reason_codes"] = list(scored["reason_codes"]) + ["buy_deploy_disabled"]
+            v4 = {**v4, "entry_action": "WAIT"}
+            v4["position_actions"] = {
+                **v4["position_actions"],
+                "new_investor": "WAIT",
+                "trader": "NO_CHASE" if v4["chase_blocked"] else "WAIT",
+            }
+
+    # chase: score 불변, action만 WAIT
+    if v4["chase_blocked"] and entry_action in ("BUY", "SCALE_IN"):
+        entry_action = "WAIT"
+        v4 = {**v4, "entry_action": "WAIT", "entry_decision_note": "chase_blocked"}
+        signal = map_entry_to_legacy_signal(
+            entry_action="WAIT",
+            trend_label=label,
+            softened_sell=softened_sell,
+            gates=gates,
+        )
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["chase_blocked"]
+
+    scores = {
+        **scores,
+        "bottoming": v4["bottoming_score"],
+        "oversold": v4["oversold_score"],
+        "stabilization": v4["stabilization_score"],
+        "entry_score": v4["entry_score"],
+        "trend_score_100": v4["trend_score"],
+    }
 
     conf = calibrated_confidence(score, signal, config)
 
@@ -782,8 +860,32 @@ def decide_signal(
     expected_return = emp.get("expected_return") or {}
     expected_dd = emp.get("expected_drawdown") or {}
 
+    # entry_stance를 v4와 정합
+    if entry_action == "BUY":
+        stance = "ENTRY_READY"
+    elif entry_action == "SCALE_IN":
+        stance = "ENTRY_READY"
+    elif entry_action in ("EXIT",) or v4["chase_blocked"]:
+        stance = "ENTRY_AVOID" if entry_action == "EXIT" else "ENTRY_WAIT"
+    else:
+        stance = "ENTRY_WAIT"
+    scored["entry_stance"] = stance
+
     triggers = build_triggers(features, scored, signal)
-    actions = build_actions(signal, scored, features, overextended=overextended)
+    # Thesis invalidation vs risk control 분리
+    triggers["thesis_invalidation"] = triggers.get("invalidation")
+    triggers["risk_control"] = (
+        "보유자 손절·비중은 thesis invalidation과 별도. "
+        "ATR/지지 기준 개인 리스크 한도 적용."
+    )
+
+    actions = build_actions(
+        signal, scored, features,
+        overextended=overextended,
+        entry_action=entry_action,
+        position_actions=v4.get("position_actions"),
+        chase_blocked=bool(v4.get("chase_blocked")),
+    )
 
     rs = features.get("relative_strength") or {}
     regime = _g(features, "market_regime", "regime")
@@ -834,15 +936,40 @@ def decide_signal(
         },
         "market_regime": regime,
         "rvol": _rvol(features),
+        "rvol_note": v4.get("rvol_note"),
         "components": scored["components"],
         "reason_codes": scored["reason_codes"],
         "gate_status": gates,
-        "engine_version": (config or {}).get("engine_version") or ENGINE_VERSION,
+        "engine_version": ENGINE_VERSION,
         "thresholds": thr,
         "deploy_flags": {
             "buy_enabled": bool(buy_enabled),
             "sell_enabled": bool(sell_enabled),
         },
+        # ── v4 fields
+        "fundamental_view": v4["fundamental_view"],
+        "trend": v4["trend"],
+        "momentum": v4["momentum"],
+        "bottoming": v4["bottoming"],
+        "bottoming_score": v4["bottoming_score"],
+        "bottoming_label": v4["bottoming_label"],
+        "oversold_score": v4["oversold_score"],
+        "stabilization_score": v4["stabilization_score"],
+        "valuation": v4["valuation"],
+        "extension_state": v4["extension_state"],
+        "entry_action": entry_action,
+        "entry_score": v4["entry_score"],
+        "entry_score_band": v4["entry_score_band"],
+        "chase_blocked": v4["chase_blocked"],
+        "chase_reasons": v4["chase_reasons"],
+        "trend_score": v4["trend_score"],
+        "market_state": v4["market_state"],
+        "market_state_meta": v4["market_state_meta"],
+        "position_actions": v4["position_actions"],
+        "false_breakdown": v4["false_breakdown"],
+        "hard_sell_override": v4["hard_sell_override"],
+        "sell_softened": softened_sell,
+        "entry_decision_note": v4.get("entry_decision_note"),
     }
 
 
@@ -981,23 +1108,46 @@ def format_engine_for_prompt(meta: dict | None) -> str:
     prob = meta.get("probability") or {}
     er = meta.get("expected_return") or {}
     ed = meta.get("expected_drawdown") or {}
+    pos = meta.get("position_actions") or {}
+    scale = pos.get("scale_in") or {}
     lines = [
-        f"- 최종 SIGNAL(엔진): {meta.get('signal')}",
-        f"- Trend: {meta.get('trend_label')} (score={scores.get('trend')})",
-        f"- Entry stance: {meta.get('entry_stance')} (entry_quality={scores.get('entry_quality')}, rr={scores.get('risk_reward')})",
-        f"- Scores: mom={scores.get('momentum')}, participation(RVOL)={scores.get('participation')}, "
-        f"composite={meta.get('score')}",
-        f"- RVOL: {meta.get('rvol')}",
-        f"- Actions: ENTRY={actions.get('entry')} / HOLDING={actions.get('holding')} / TRADING={actions.get('trading')}",
-        f"- 확률(캘리브): up={prob.get('up')} flat={prob.get('flat')} down={prob.get('down')} "
-        f"(source={meta.get('probability_source')})",
+        "=== Signal Engine v4 (덮어쓰기 금지) ===",
+        f"- Fundamental: {meta.get('fundamental_view', 'NEUTRAL')}",
+        f"- Trend: {meta.get('trend') or meta.get('trend_label')} (trend_score={meta.get('trend_score')})",
+        f"- Momentum: {meta.get('momentum')}",
+        f"- Bottoming: {meta.get('bottoming')} "
+        f"(score={meta.get('bottoming_score')}, oversold={meta.get('oversold_score')}, "
+        f"stabilization={meta.get('stabilization_score')}) — 과매도≠바닥확정",
+        f"- Valuation: {meta.get('valuation')} (멀티플만 — MA/BB/RSI 아님)",
+        f"- Extension: {meta.get('extension_state')} (기술 과열/압축)",
+        f"- Entry Score: {meta.get('entry_score')} (chase로 점수 깎지 않음)",
+        f"- Chase blocked: {meta.get('chase_blocked')} reasons={meta.get('chase_reasons')}",
+        f"- Entry Action: {meta.get('entry_action')}",
+        f"- Market State: {meta.get('market_state')}",
+        f"- Position: holder={pos.get('holder')} / new={pos.get('new_investor')} / "
+        f"trader={pos.get('trader')}",
+        f"- Scale-in: {scale.get('label')} target_position_pct={scale.get('target_position_pct')} "
+        f"(sizing_basis={scale.get('sizing_basis')} — 포트폴리오 전체 비중 아님)",
+        f"- 호환 SIGNAL: {meta.get('signal')}",
+        f"- Legacy scores: mom={scores.get('momentum')}, participation={scores.get('participation')}, "
+        f"entry_quality={scores.get('entry_quality')}, composite={meta.get('score')}",
+        f"- RVOL: {meta.get('rvol')} → {meta.get('rvol_note')}",
+        f"- Actions(legacy): ENTRY={actions.get('entry')} / HOLDING={actions.get('holding')} / "
+        f"TRADING={actions.get('trading')}",
+        f"- 확률(캘리브): up={prob.get('up')} flat={prob.get('flat')} down={prob.get('down')}",
         f"- Expected Return 5/10/20d: {er.get('5d')} / {er.get('10d')} / {er.get('20d')}",
         f"- Expected DD 5/10/20d: {ed.get('5d')} / {ed.get('10d')} / {ed.get('20d')}",
         f"- BUY Trigger: {trig.get('buy_trigger')}",
         f"- DOWN Trigger: {trig.get('down_trigger')}",
-        f"- Invalidation: {trig.get('invalidation')}",
-        f"- reason_codes: {', '.join((meta.get('reason_codes') or [])[:10])}",
-        "- 규칙: 위 SIGNAL/Actions/확률을 덮어쓰지 말 것. 설명·시나리오·밸류/뉴스 해석만.",
-        "- 과확장(RSI·BB·PSR)은 Entry Risk / NO-CHASE로만 서술. 단독 SELL 금지.",
+        f"- Thesis Invalidation: {trig.get('thesis_invalidation') or trig.get('invalidation')}",
+        f"- Risk Control: {trig.get('risk_control')}",
+        f"- False breakdown: {meta.get('false_breakdown')}",
+        f"- Hard sell override: {meta.get('hard_sell_override')}",
+        f"- Sell softened: {meta.get('sell_softened')}",
+        f"- reason_codes: {', '.join((meta.get('reason_codes') or [])[:12])}",
+        "- 규칙: Fundamental/Trend/Momentum/Bottoming/Valuation/Entry/Position 을 덮어쓰지 말 것.",
+        "- RVOL<1 = 기관 이탈 단정 금지. '거래량 확인 부족'으로만 서술.",
+        "- Extension 과열은 Entry WAIT/NO-CHASE. Valuation과 섞지 말 것.",
+        "- Invalidation(thesis)과 Risk Control(손절)을 분리해 서술.",
     ]
     return "\n".join(lines)

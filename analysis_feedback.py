@@ -44,8 +44,15 @@ def _snap(doc: dict) -> dict:
         "price": _f(doc.get("current_price")),
         "change_pct": _f(doc.get("change_pct")),
         "score": _f(eng.get("score")),
-        "trend_label": eng.get("trend_label"),
+        "trend_label": eng.get("trend_label") or eng.get("trend"),
         "entry_stance": eng.get("entry_stance"),
+        "entry_action": eng.get("entry_action"),
+        "bottoming_score": _f(eng.get("bottoming_score")),
+        "entry_score": _f(eng.get("entry_score")),
+        "momentum_state": eng.get("momentum"),
+        "extension_state": eng.get("extension_state"),
+        "chase_blocked": eng.get("chase_blocked"),
+        "market_state": eng.get("market_state"),
         "momentum": _f(scores.get("momentum")),
         "entry_quality": _f(scores.get("entry_quality")),
         "trend": _f(scores.get("trend")),
@@ -58,22 +65,32 @@ def build_feature_delta(prev: dict, nxt: dict) -> dict:
     keys_num = (
         "rsi", "macd", "price", "change_pct", "score",
         "momentum", "entry_quality", "trend", "rvol",
+        "bottoming_score", "entry_score",
     )
     delta = {
         "prev": a,
         "next": b,
         "diff": {},
         "label_changes": {},
+        "plus": [],
+        "minus": [],
     }
     for k in keys_num:
         pa, pb = a.get(k), b.get(k)
         if pa is not None and pb is not None:
-            delta["diff"][k] = round(pb - pa, 4)
+            d = round(pb - pa, 4)
+            delta["diff"][k] = d
+            if k in ("bottoming_score", "entry_score", "trend", "momentum", "rvol") and abs(d) >= 0.5:
+                (delta["plus"] if d > 0 else delta["minus"]).append(f"{k} {pa}->{pb}")
         else:
             delta["diff"][k] = None
-    for k in ("trend_label", "entry_stance", "signal"):
+    for k in (
+        "trend_label", "entry_stance", "signal", "entry_action",
+        "momentum_state", "extension_state", "market_state", "chase_blocked",
+    ):
         if a.get(k) != b.get(k):
             delta["label_changes"][k] = {"from": a.get(k), "to": b.get(k)}
+            delta["plus"].append(f"{k}: {a.get(k)}→{b.get(k)}")
     return delta
 
 
