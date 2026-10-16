@@ -1070,9 +1070,28 @@ const ACTION_KR = {
 const ENTRY_ACTION_KR = {
   BUY: "매수",
   SCALE_IN: "분할매수",
+  HOLD: "보유",
   WAIT: "대기",
   REDUCE: "비중축소",
+  REDUCE_TACTICAL: "전술 축소",
   EXIT: "청산",
+};
+const VALUE_REGIME_KR = {
+  UNDERVALUED: "저평가",
+  FAIR: "적정",
+  OVERVALUED: "고평가",
+  BUBBLE: "거품",
+};
+const THESIS_KR = {
+  INTACT: "유지",
+  WARNING: "경고",
+  BROKEN: "훼손",
+};
+const SPATIAL_KR = {
+  AT_HVN_SUPPORT: "HVN 지지",
+  IN_LVN_VACUUM: "LVN 진공",
+  AT_RESISTANCE: "저항",
+  UNKNOWN: "미확인",
 };
 const BOTTOMING_KR = {
   NORMAL: "정상",
@@ -1088,6 +1107,10 @@ const BOTTOMING_KR = {
 const EXTENSION_KR = {
   COMPRESSED: "압축",
   NORMAL: "정상",
+  NEUTRAL: "중립",
+  OVERSOLD: "과매도",
+  OVERBOUGHT: "과매수",
+  WEAK_TREND: "약세",
   EXTENDED: "이격",
   OVEREXTENDED: "과열",
 };
@@ -1338,8 +1361,35 @@ function buildSignalBoxHtml({ signal, sigDisplay, eng = {}, confidence = "", sig
       </div>`;
   }
 
-  const scoreBreak = (scores.trend != null || eng.entry_score != null) ? `
-    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(3,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+  const ss = eng.state_summary || {};
+  const dec = eng.decision || {};
+  const rat = eng.rationale || {};
+  const valueState = ss.value_regime || eng.value_regime;
+  const thesisState = ss.thesis_status || eng.thesis_status;
+  const spatialState = ss.spatial_support || eng.spatial_support;
+  const stateGrid = (valueState || thesisState || eng.entry_action) ? `
+    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Value</div>
+        <div style="color:var(--text);font-weight:700;font-size:11px">${VALUE_REGIME_KR[valueState] || valueState || "—"}</div>
+      </div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Extension</div>
+        <div style="color:var(--text);font-weight:700;font-size:11px">${EXTENSION_KR[ss.extension_state || eng.extension_state] || ss.extension_state || eng.extension_state || "—"}</div>
+      </div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Thesis</div>
+        <div style="color:var(--text);font-weight:700;font-size:11px">${THESIS_KR[thesisState] || thesisState || "—"}</div>
+      </div>
+      <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
+        <div style="color:var(--dim)">Spatial</div>
+        <div style="color:var(--text);font-weight:700;font-size:10px">${SPATIAL_KR[spatialState] || spatialState || "—"}</div>
+      </div>
+    </div>` : "";
+
+  const scoreBreak = (scores.trend != null || eng.entry_score != null || valueState) ? `
+    ${stateGrid}
+    <div style="margin-top:4px;display:grid;grid-template-columns:repeat(3,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
       <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
         <div style="color:var(--dim)">Trend</div>
         <div style="color:var(--text);font-weight:700">${eng.trend_score ?? scores.trend ?? "—"}</div>
@@ -1352,28 +1402,36 @@ function buildSignalBoxHtml({ signal, sigDisplay, eng = {}, confidence = "", sig
         <div style="color:var(--muted);font-size:9px">${BOTTOMING_KR[eng.bottoming] || eng.bottoming || ""}</div>
       </div>
       <div style="background:var(--border);padding:6px;border-radius:6px;text-align:center">
-        <div style="color:var(--dim)">Entry</div>
-        <div style="color:var(--text);font-weight:700">${eng.entry_score ?? scores.entry_score ?? "—"}</div>
-        <div style="color:var(--muted);margin-top:2px;font-size:9px">${ENTRY_ACTION_KR[eng.entry_action] || eng.entry_action || ENTRY_STANCE_KR[eng.entry_stance] || ""}</div>
+        <div style="color:var(--dim)">Action</div>
+        <div style="color:var(--text);font-weight:700;font-size:11px">${ENTRY_ACTION_KR[dec.action || eng.entry_action] || dec.action || eng.entry_action || "—"}</div>
+        <div style="color:var(--muted);margin-top:2px;font-size:9px">${dec.target_tranche || eng.sub_action || ""}</div>
         ${eng.chase_blocked ? `<div style="color:var(--yellow);font-size:9px;margin-top:2px">chase blocked</div>` : ""}
       </div>
     </div>
     <div style="margin-top:4px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;font-size:10px;font-family:'JetBrains Mono',monospace">
       <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Momentum</div><div style="color:var(--text);font-weight:600">${eng.momentum || scores.momentum || "—"}</div></div>
       <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Valuation</div><div style="color:var(--text);font-weight:600">${eng.valuation || "—"}</div></div>
-      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Extension</div><div style="color:var(--text);font-weight:600">${EXTENSION_KR[eng.extension_state] || eng.extension_state || "—"}</div></div>
+      <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">Type</div><div style="color:var(--text);font-weight:600">${eng.signal_type || "—"}</div></div>
       <div style="background:var(--border);padding:5px;border-radius:6px;text-align:center"><div style="color:var(--dim)">State</div><div style="color:var(--text);font-weight:600;font-size:9px">${(eng.market_state || "").replace(/^S\d_/, "") || "—"}</div></div>
     </div>` : "";
 
-  const actionLine = (eng.entry_action || actions.entry) ? `
+  const sizingLine = (dec.sizing_guide || actions.sizing_guide || rat.next_trigger) ? `
+    <div style="margin-top:8px;font-size:12px;line-height:1.45;color:var(--text)">
+      ${dec.sizing_guide || actions.sizing_guide ? `<div><span style="color:var(--dim)">Sizing</span> · ${dec.sizing_guide || actions.sizing_guide}</div>` : ""}
+      ${rat.invalidation_condition || (eng.triggers || {}).thesis_invalidation ? `<div style="margin-top:4px;color:var(--muted)"><span style="color:var(--dim)">Invalidation</span> · ${rat.invalidation_condition || (eng.triggers || {}).thesis_invalidation}</div>` : ""}
+      ${rat.next_trigger || (eng.triggers || {}).next_trigger ? `<div style="margin-top:4px;color:var(--muted)"><span style="color:var(--dim)">Next</span> · ${rat.next_trigger || (eng.triggers || {}).next_trigger}</div>` : ""}
+    </div>` : "";
+
+  const actionLine = (eng.entry_action || dec.action || actions.entry) ? `
     <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
-      <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">Entry ${ENTRY_ACTION_KR[eng.entry_action] || ACTION_KR.entry[actions.entry] || eng.entry_action || actions.entry}</span>
+      <span style="padding:3px 8px;border-radius:6px;background:rgba(52,211,153,0.1);color:var(--green)">Action ${ENTRY_ACTION_KR[dec.action || eng.entry_action] || ACTION_KR.entry[actions.entry] || dec.action || eng.entry_action || actions.entry}</span>
       <span style="padding:3px 8px;border-radius:6px;background:rgba(77,159,255,0.1);color:var(--blue)">보유 ${(eng.position_actions || {}).holder || ACTION_KR.holding[actions.holding] || actions.holding || "—"}</span>
       <span style="padding:3px 8px;border-radius:6px;background:rgba(167,139,250,0.12);color:#a78bfa">신규 ${(eng.position_actions || {}).new_investor || "—"}</span>
       <span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.1);color:var(--yellow)">단기 ${(eng.position_actions || {}).trader || ACTION_KR.trading[actions.trading] || actions.trading || "—"}</span>
       ${eng.rvol != null ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">RVOL ${Number(eng.rvol).toFixed(2)}</span>` : ""}
       ${eng.fundamental_view ? `<span style="padding:3px 8px;border-radius:6px;border:1px solid var(--border2);color:var(--muted)">Fund ${eng.fundamental_view}</span>` : ""}
-    </div>` : "";
+      ${eng.signal_type === "REDUCE" ? `<span style="padding:3px 8px;border-radius:6px;background:rgba(251,191,36,0.15);color:var(--yellow)">TRIM (≠SELL)</span>` : ""}
+    </div>${sizingLine}` : "";
 
   const er = eng.expected_return || {};
   const horizonLine = (er["5d"] != null || er["10d"] != null) ? `

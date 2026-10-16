@@ -2,6 +2,7 @@ import anthropic
 import pandas as pd
 from typing import List, Dict
 from analyzer import get_summary_stats
+from analysis_validator import validate_analysis_text
 
 
 def _get_client():
@@ -132,18 +133,31 @@ ETF (QQQ, SPY, IWM, TQQQ, SQQQ 등):
 프롬프트에 제공된 엔진 결과(Trend/Entry Score, Actions, 캘리브 확률, Trigger)를 **덮어쓰지 말 것**.
 너는 밸류에이션·뉴스·실적·시나리오를 설명하는 층이다.
 
-### Trend vs Entry vs Bottoming (필수 분리)
+### Value-Aware (필수 — v5)
+- **Value Regime ≠ Extension.** MA/BB/RSI는 Extension만. Valuation/Value는 멀티플·EV/Sales·Drawdown/VWAP.
+- 엔진 `state_summary` / `decision.action` / `sizing_guide` 를 덮어쓰지 말 것.
+- 과매도(OVERSOLD) + Value 저평가/적정 + Thesis INTACT → **SCALE_IN 또는 WAIT** (EXIT/전량매도 금지).
+- 과열(OVERBOUGHT) → **REDUCE** (비중 축소). 전량 EXIT 아님.
+- EXIT/SELL은 Thesis BROKEN 또는 Major HVN Hard 완파일 때만.
+- REDUCE와 EXIT를 같은 "매도"로 뭉개지 말 것.
+
+### Trend vs Entry vs Bottoming
 - 상승 추세가 강해도 Extension 과열이면 **BULLISH + Entry=WAIT + chase_blocked** 가 정상.
-- 과매도(Oversold) ≠ 바닥 확정. Stabilization이 있을 때만 Bottoming 후보.
-- 과열 ≠ SELL. SELL/EXIT는 hard breakdown / fresh lower-low / thesis 훼손일 때.
-- Valuation은 멀티플만. MA/BB/RSI는 Extension으로만 서술.
+- 과매도 ≠ 바닥 확정. Stabilization이 있을 때만 Bottoming 후보.
 - RVOL<1 = "거래량 확인 부족" (기관 이탈 단정 금지).
 - Thesis Invalidation과 Risk Control(손절)을 분리.
 
+### 필수 4슬롯 (종합 의견에 반드시)
+1. **가치-가격 괴리** — Value Regime vs Extension 분리 서술
+2. **Action & Sizing** — 엔진 decision/sizing_guide 반영
+3. **Thesis Invalidation** — Hard EXIT 조건
+4. **Next Trigger** — 다음 SCALE_IN/REDUCE 조건
+결론 문장 주어 = Value 상태 + Thesis 유지 여부.
+
 ### 지표 사용 규칙
 - RSI / MACD / Bollinger / Valuation(PSR·PER)은 **단독으로 BUY/SELL 결정 금지**
-- 위 지표의 과열은 **Extension / Entry WAIT** 로만 서술
-- 거래량은 절대량이 아니라 **RVOL = Volume / 20D Average** 로만 해석
+- 과열은 **Extension / REDUCE 또는 WAIT** 로만 서술 (SELL 금지)
+- 거래량은 **RVOL = Volume / 20D Average** 로만 해석
 
 ### 확률
 - 임의로 40%/60% 같은 숫자를 만들지 말 것
@@ -156,11 +170,14 @@ ETF (QQQ, SPY, IWM, TQQQ, SQQQ 등):
 3. Invalidation
 LLM이 임의 확률을 붙여 "관망"으로 끝내지 말 것.
 
-### 금지
+### 금지 (네거티브 — 위반 시 재작성)
+- ❌ "주가 하락 추세이므로 매도/청산"
+- ❌ "이평 역배열로 전량 청산"
+- ❌ "과매도이니 손절/EXIT"
+- ❌ 볼린저 상단 / RSI 과매수 = SELL
 - ❌ BUY 비율을 맞추기 위한 억지 BUY
 - ❌ 뉴스/테마만으로 약한 차트를 BUY
-- ❌ 볼린저 상단 / RSI 과매수 = SELL
-- ❌ 엔진 SIGNAL과 다른 SIGNAL 출력
+- ❌ 엔진 SIGNAL/decision과 다른 SIGNAL 출력
 - ❌ 트리거·Invalidation 없는 관망
 
 ### WATCH_* 출력 시 필수 (엔진 값 우선, 없을 때만 보완)
@@ -224,11 +241,13 @@ WATCH_DURATION: 예상 대기 기간
 
 ## 자기 검증 — 출력 전 반드시 체크
 
-1. "엔진 SIGNAL/Actions와 모순되는가?" → YES면 수정
+1. "엔진 SIGNAL/decision과 모순되는가?" → YES면 수정
 2. "임의 확률을 만들어냈는가?" → YES면 삭제
-3. "과열을 SELL로 처리했는가?" → YES면 Entry Risk/NO-CHASE로 수정
-4. "트리거·Invalidation이 있는가?"
-5. "사용자가 이 분석으로 실제 행동할 수 있는가?" → NO면 다시 작성
+3. "과열을 SELL/EXIT로 처리했는가?" → YES면 REDUCE로 수정
+4. "과매도+Thesis 유지를 EXIT로 처리했는가?" → YES면 HOLD/WAIT/SCALE_IN으로 수정
+5. "가격 모멘텀 단독 매도 문장이 있는가?" → YES면 삭제·재작성
+6. "4슬롯(가치-가격/Action·Sizing/Invalidation/Next Trigger)이 있는가?"
+7. "사용자가 이 분석으로 실제 행동할 수 있는가?" → NO면 다시 작성
 
 설명은 뾰족하게, 엔진을 덮어쓰지 않는다."""
 
@@ -545,12 +564,16 @@ RSI, MACD, 볼린저밴드, 스토캐스틱 종합 해석
 - 🔴 약세 시나리오: 조건과 주의 레벨 (Invalidation 포함)
 - ENTRY / HOLDING / TRADING Action을 시나리오에 연결
 
-## 6. 종합 의견
-Trend vs Entry를 구분해 한 줄 요약 (예: 상승추세·진입대기로 추격 금지)
+## 6. 종합 의견 (필수 4슬롯)
+1. 가치-가격 괴리: Value Regime vs Extension 분리
+2. Action & Sizing: 엔진 decision/sizing_guide 반영 (Core/Tactical)
+3. Thesis Invalidation: Hard EXIT 조건
+4. Next Trigger: 다음 SCALE_IN/REDUCE 조건
+한 줄 결론 예: "Value=FAIR·Thesis INTACT·과매도 → SCALE_IN 검토 (EXIT 아님)"
 
 ⚠️ 이 분석은 참고용이며 투자 결정은 본인 책임입니다.
 
-⚠️ 반드시 ## 6. 종합 의견과 한 줄 요약까지 완성할 것. 중간에 끊기면 안 됨."""
+⚠️ 반드시 ## 6. 종합 의견(4슬롯)과 한 줄 요약까지 완성할 것. 중간에 끊기면 안 됨."""
 
 async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                               news_items: List[Dict], valuation: dict = None,
@@ -596,6 +619,42 @@ async def analyze_with_claude(chart_b64: str, df: pd.DataFrame, ticker: str,
                 }
             ],
         )
-        return message.content[0].text
+        text = message.content[0].text
+        # Negative validator: one retry if momentum-only sell narrative
+        check = validate_analysis_text(text, signal_engine)
+        if not check["ok"]:
+            fix_prompt = (
+                prompt
+                + "\n\n[재작성 지시 — Validator 실패]\n"
+                + f"위반: {check['errors']}\n"
+                + "가격 모멘텀 단독 매도 문장을 삭제하고, "
+                + "엔진 decision/state_summary 기준으로 4슬롯을 다시 작성하라."
+            )
+            try:
+                retry = _get_client().messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=6000,
+                    system=SYSTEM_PROMPT,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": chart_b64,
+                                    },
+                                },
+                                {"type": "text", "text": fix_prompt},
+                            ],
+                        }
+                    ],
+                )
+                text = retry.content[0].text
+            except Exception:
+                pass
+        return text
     except Exception as e:
         return f"AI 분석 오류: {str(e)}"

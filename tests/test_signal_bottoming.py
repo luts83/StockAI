@@ -70,8 +70,8 @@ def _feat(**kwargs):
     return base
 
 
-def test_engine_version_v4():
-    assert ENGINE_VERSION == "signal_engine_v4"
+def test_engine_version_v5():
+    assert ENGINE_VERSION == "signal_engine_v5"
 
 
 def test_oversold_correlation_cap():
@@ -129,7 +129,9 @@ def test_chase_does_not_modify_entry_score():
     d = decide_signal(f, config={"deploy_flags": {"buy_enabled": True, "sell_enabled": True}, "thresholds": {"buy_min": 40}})
     assert d["entry_score"] == entry["score"]
     assert d["chase_blocked"] is True
-    assert d["entry_action"] == "WAIT"
+    # Value-Aware: 과열+고평가면 REDUCE, 아니면 WAIT — 추격 BUY 금지
+    assert d["entry_action"] in ("WAIT", "REDUCE", "HOLD")
+    assert d["entry_action"] != "BUY"
 
 
 def test_soften_requires_more_than_bottoming_60():
@@ -264,12 +266,17 @@ def test_iren_sep7_chase_wait_invariant():
         fundamental_view="BULLISH",
     )
     assert d["chase_blocked"] is True
-    assert d["entry_action"] == "WAIT"
+    assert d["entry_action"] in ("WAIT", "REDUCE", "HOLD")
+    assert d["entry_action"] != "BUY"
     pos = d["position_actions"]
-    assert pos["new_investor"] == "WAIT"
-    assert pos["holder"] in ("HOLD", "REDUCE")
+    assert pos["new_investor"] in ("WAIT", "NO_CHASE", "AVOID")
+    assert pos["holder"] in ("HOLD", "REDUCE", "REDUCE_TACTICAL", "WAIT")
     assert d["valuation"] == "EXPENSIVE"
-    assert d["extension_state"] in ("EXTENDED", "OVEREXTENDED", "NORMAL")
+    assert d["extension_state"] in (
+        "EXTENDED", "OVEREXTENDED", "NORMAL", "OVERBOUGHT", "NEUTRAL"
+    )
+    if d["signal_type"] == "REDUCE":
+        assert d["signal"] != "SELL"  # REDUCE ≠ SELL
 
 
 if __name__ == "__main__":

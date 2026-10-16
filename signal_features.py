@@ -18,8 +18,9 @@ import pandas as pd
 import yfinance as yf
 
 from volume_profile import compute_volume_profile
+from signal_value import compute_spatial_support
 
-FEATURES_VERSION = "features_v1"
+FEATURES_VERSION = "features_v2"
 
 SECTOR_ETF_MAP = {
     "technology": "XLK",
@@ -291,12 +292,48 @@ def extract_features_from_df(
         rs[f"vs_qqq_{n}d"] = _safe(stock_r - qqq_r, 6) if stock_r is not None and qqq_r is not None else None
         rs[f"vs_sector_{n}d"] = _safe(stock_r - sec_r, 6) if stock_r is not None and sec_r is not None else None
 
+    # 5d RS z-score vs sector (rolling history of RS differentials)
+    vs_sector_5d_z = None
+    if not sect.empty and len(closes) >= 40:
+        try:
+            sect_c = sect["Close"].astype(float)
+            sect_c.index = pd.to_datetime(sect_c.index).tz_localize(None)
+            aligned = pd.concat(
+                [closes.rename("s"), sect_c.rename("e")], axis=1, join="inner"
+            ).dropna()
+            if len(aligned) >= 40:
+                rs5_series = aligned["s"].pct_change(5) - aligned["e"].pct_change(5)
+                rs5_series = rs5_series.dropna()
+                if len(rs5_series) >= 20:
+                    mu = float(rs5_series.tail(60).mean()) if len(rs5_series) >= 20 else 0.0
+                    sd = float(rs5_series.tail(60).std()) or 0.04
+                    last_rs = float(rs5_series.iloc[-1])
+                    vs_sector_5d_z = _safe((last_rs - mu) / sd, 3)
+        except Exception:
+            vs_sector_5d_z = None
+
+    # 52w drawdown + 200d VWAP deviation (Value Track B inputs — not MA/BB/RSI)
+    look_252 = closes.tail(252) if len(closes) >= 30 else closes
+    hi_52 = float(look_252.max()) if len(look_252) else None
+    drawdown_52w = _pct(close, hi_52) if hi_52 and hi_52 > 0 else None
+    vs_vwap_200 = None
+    if "Volume" in work.columns and len(work) >= 40:
+        w200 = work.tail(min(200, len(work)))
+        vol = w200["Volume"].astype(float).clip(lower=0)
+        vsum = float(vol.sum())
+        if vsum > 0:
+            vwap200 = float((w200["Close"].astype(float) * vol).sum() / vsum)
+            vs_vwap_200 = _pct(close, vwap200) if vwap200 > 0 else None
+
     hist_prev = None
     if macd_hist is not None and "MACD_Hist" in work.columns and len(work) >= 2:
         prev = work["MACD_Hist"].iloc[-2]
         if pd.notna(prev):
             hist_prev = float(prev)
 
+    spatial = compute_spatial_support(work, atr=atr, lookback=120, n_bins=24)
+
+    val_in = valuation or {}
     features = {
         "_id": analysis_id,
         "analysis_id": analysis_id,
@@ -311,6 +348,8 @@ def extract_features_from_df(
             "low": _safe(low, 4),
             "close": _safe(close, 4),
             "volume": _safe(volume, 0),
+            "drawdown_from_52w_high": drawdown_52w,
+            "vs_vwap_200": vs_vwap_200,
         },
         "trend": {
             "ma20": _safe(ma20, 4),
@@ -353,6 +392,7 @@ def extract_features_from_df(
             "rvol": vol_ratio,  # Volume / 20D avg — 절대 거래량 threshold 대체
         },
         "volume_profile": compute_volume_profile(work),
+        "spatial": spatial,
         "returns": {
             "ret_1d": _ret_n(closes, 1),
             "ret_5d": rs.get("ret_5d"),
@@ -371,6 +411,7 @@ def extract_features_from_df(
             "vs_sector_5d": rs.get("vs_sector_5d"),
             "vs_sector_10d": rs.get("vs_sector_10d"),
             "vs_sector_20d": rs.get("vs_sector_20d"),
+            "vs_sector_5d_z": vs_sector_5d_z,
         },
         "market_regime": classify_market_regime(spy, asof_ts),
         "news": {
@@ -379,10 +420,23 @@ def extract_features_from_df(
         },
         "valuation": {
             "sector": sector_name or None,
-            "trailing_pe": _safe((valuation or {}).get("per") or (valuation or {}).get("trailing_pe"), 2),
-            "forward_pe": _safe((valuation or {}).get("forward_per") or (valuation or {}).get("forward_pe"), 2),
-            "peg": _safe((valuation or {}).get("peg"), 2),
-        } if valuation or sector_name else {},
+            "trailing_pe": _safe(val_in.get("per") or val_in.get("trailing_pe"), 2),
+            "forward_pe": _safe(val_in.get("forward_per") or val_in.get("forward_pe"), 2),
+            "peg": _safe(val_in.get("peg"), 2),
+            "psr": _safe(val_in.get("psr") or val_in.get("priceToSalesTrailing12Months"), 4),
+            "forward_ev_sales": _safe(
+                val_in.get("forward_ev_sales") or val_in.get("enterpriseToRevenue"), 4
+            ),
+            "ev_sales": _safe(val_in.get("ev_sales") or val_in.get("enterpriseToRevenue"), 4),
+            "peer_ev_sales_median": _safe(val_in.get("peer_ev_sales_median"), 4),
+            "peer_psr_median": _safe(val_in.get("peer_psr_median"), 4),
+            "ev_sales_z": _safe(val_in.get("ev_sales_z") or val_in.get("psr_z"), 3),
+            "drawdown_52w": drawdown_52w,
+            "vs_vwap_200": vs_vwap_200,
+        } if val_in or sector_name or drawdown_52w is not None else {
+            "drawdown_52w": drawdown_52w,
+            "vs_vwap_200": vs_vwap_200,
+        },
     }
     if not analysis_id:
         features.pop("_id", None)

@@ -1,11 +1,10 @@
 """
-Signal Engine v4.
+Signal Engine v5 — Value-Aware.
 
-Trend ≠ Entry ≠ Bottoming.
-Bottoming = Oversold(cap) + Stabilization — 과매도 ≠ 바닥 확정.
-Valuation(멀티플) ≠ Extension(기술 과열).
-Chase guard는 entry_score를 수정하지 않음.
-SELL softener는 Bottoming>=60 단독 적용 금지.
+Trend ≠ Entry ≠ Bottoming ≠ Value Regime.
+Value Regime ≠ Extension (MA/BB/RSI never enter Valuation).
+Gate 1–4: Hard EXIT → OVERSOLD scale/wait → OVERBOUGHT reduce → HOLD.
+REDUCE ≠ SELL in DB (signal_type).
 
 LLM은 설명층. 최종 signal / actions 는 엔진이 결정한다.
 """
@@ -18,8 +17,9 @@ from signal_v4 import (
     map_entry_to_legacy_signal,
     soften_sell_candidate,
 )
+from signal_value import route_value_aware
 
-ENGINE_VERSION = "signal_engine_v4"
+ENGINE_VERSION = "signal_engine_v5"
 
 SIGNALS = (
     "BUY",
@@ -701,8 +701,10 @@ def decide_signal(
     config: dict | None = None,
     prev_market_state: str | None = None,
     fundamental_view: str | None = None,
+    portfolio: dict | None = None,
+    scale_in_count_cycle: int = 0,
 ) -> dict:
-    """최종 시그널 + v4 Bottoming/Entry/Extension + Actions + Triggers."""
+    """최종 시그널 + Value-Aware Gate + v4 Bottoming/Entry + Actions + Triggers."""
     import math
     from signal_calibration import calibrated_p_up, calibrated_confidence
 
@@ -745,11 +747,28 @@ def decide_signal(
         fundamental_view=fundamental_view,
     )
 
+    # ── Value-Aware Gate 1–4 (authoritative for action)
+    va = route_value_aware(
+        features,
+        portfolio=portfolio,
+        fundamental_view=fundamental_view,
+        scale_in_count_cycle=scale_in_count_cycle,
+    )
+    va_action = (va.get("decision") or {}).get("action") or "HOLD"
+    va_sub = (va.get("decision") or {}).get("sub_action") or va_action
+    state_summary = va.get("state_summary") or {}
+    # Sync extension display with value-aware extension (OVERSOLD/OVERBOUGHT)
+    va_ext = state_summary.get("extension_state")
+    if va_ext in ("OVERSOLD", "OVERBOUGHT", "NEUTRAL", "WEAK_TREND"):
+        # keep v4 EXTENDED labels for UI when overbought-ish; prefer VA for decision
+        pass
+
     overextended = (
         not gates.get("entry", True)
         or entry_s < -10
         or (_g(features, "volatility", "bb_position") or 0) > 0.9
         or v4.get("extension_state") in ("EXTENDED", "OVEREXTENDED")
+        or va_ext == "OVERBOUGHT"
     )
 
     p_up = calibrated_p_up(score, config)
@@ -785,57 +804,106 @@ def decide_signal(
     if softened_sell:
         scored["reason_codes"] = list(scored["reason_codes"]) + ["sell_softened_bottoming"]
 
-    # v4 entry_action 우선 — legacy BUY는 entry_action==BUY 이고 deploy/gate 허용일 때만
-    entry_action = v4["entry_action"]
+    # Value-aware blocks momentum-only EXIT/SELL
+    if va_action in ("HOLD", "WAIT", "SCALE_IN", "BUY", "REDUCE") and va_action != "EXIT":
+        if sell_candidate and not v4.get("hard_sell_override"):
+            sell_candidate = False
+            softened_sell = True
+            scored["reason_codes"] = list(scored["reason_codes"]) + [
+                "sell_blocked_value_aware"
+            ]
+
+    # Map VA action → entry_action (engine authority)
+    entry_action = {
+        "BUY": "BUY",
+        "SCALE_IN": "SCALE_IN",
+        "HOLD": "HOLD",
+        "WAIT": "WAIT",
+        "REDUCE": "REDUCE",
+        "EXIT": "EXIT",
+    }.get(va_action, v4["entry_action"])
+
+    signal_type = va.get("signal_type") or "WATCH"
+    sub_action = va.get("decision", {}).get("sub_action") or va_sub
+    signal = va.get("legacy_signal") or "WATCH_FLAT"
+
+    # BUY deploy / chase / score gates still apply for INITIAL BUY
     buy_candidate = bool(
         buy_enabled
-        and entry_action == "BUY"
+        and entry_action in ("BUY", "SCALE_IN")
         and not v4["chase_blocked"]
-        and score >= buy_min
-        and entry_s >= entry_min
-        and gates["buy_allowed"]
-        and label in ("STRONG_BULLISH", "BULLISH", "NEUTRAL")
-        and scores["directional"] >= 10
+        and (
+            entry_action == "SCALE_IN"
+            or (
+                score >= buy_min
+                and entry_s >= entry_min
+                and gates["buy_allowed"]
+                and label in ("STRONG_BULLISH", "BULLISH", "NEUTRAL")
+                and scores["directional"] >= 10
+            )
+        )
     )
 
-    if buy_candidate:
+    if entry_action == "SCALE_IN" and buy_enabled and not v4["chase_blocked"]:
         signal = "BUY"
-        entry_action = "BUY"
-    elif sell_candidate and entry_action == "EXIT":
+        signal_type = "BUY"
+        sub_action = "SCALE_IN"
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["value_aware_scale_in"]
+    elif entry_action == "BUY" and buy_candidate:
+        signal = "BUY"
+        signal_type = "BUY"
+        sub_action = "INITIAL"
+    elif entry_action == "EXIT" and sell_enabled:
+        # Hard EXIT only when VA says EXIT (thesis broken / HVN break)
         signal = "SELL"
-    elif sell_candidate and not softened_sell and entry_action in ("EXIT", "REDUCE"):
-        signal = "SELL" if entry_action == "EXIT" else map_entry_to_legacy_signal(
-            entry_action=entry_action,
-            trend_label=label,
-            softened_sell=softened_sell,
-            gates=gates,
-        )
+        signal_type = "SELL"
+        sub_action = "EXIT"
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["value_aware_hard_exit"]
+    elif entry_action == "REDUCE":
+        # §10.6: REDUCE ≠ SELL — UI may show TRIM/WATCH_DOWN; DB signal_type=REDUCE
+        signal = "WATCH_DOWN"
+        signal_type = "REDUCE"
+        sub_action = sub_action if str(sub_action).startswith("REDUCE") else "REDUCE"
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["value_aware_reduce"]
     else:
-        # v4 action → legacy watch 매핑 (엔진 권한)
-        signal = map_entry_to_legacy_signal(
-            entry_action=entry_action,
-            trend_label=label,
-            softened_sell=softened_sell,
-            gates=gates,
-        )
+        # HOLD / WAIT — legacy watch mapping, never SELL from momentum alone
+        if signal not in SIGNALS or signal == "SELL":
+            signal = map_entry_to_legacy_signal(
+                entry_action=entry_action if entry_action in (
+                    "BUY", "SCALE_IN", "WAIT", "HOLD", "REDUCE", "EXIT"
+                ) else "WAIT",
+                trend_label=label,
+                softened_sell=softened_sell,
+                gates=gates,
+            )
         if label in ("STRONG_BULLISH", "BULLISH") and entry_action == "WAIT":
             if signal not in ("WATCH_RISK", "WATCH_DOWN"):
                 signal = "WATCH_UP"
             scored["reason_codes"] = list(scored["reason_codes"]) + ["trend_ok_entry_wait"]
-        if not buy_enabled and entry_action == "BUY":
-            signal = "WATCH_UP"
-            entry_action = "WAIT"
-            scored["reason_codes"] = list(scored["reason_codes"]) + ["buy_deploy_disabled"]
-            v4 = {**v4, "entry_action": "WAIT"}
-            v4["position_actions"] = {
-                **v4["position_actions"],
-                "new_investor": "WAIT",
-                "trader": "NO_CHASE" if v4["chase_blocked"] else "WAIT",
-            }
+        signal_type = "WATCH"
+        if entry_action == "WAIT":
+            sub_action = "WAIT_SUPPORT"
+        elif entry_action == "HOLD":
+            sub_action = "HOLD"
 
-    # chase: score 불변, action만 WAIT
+    if not buy_enabled and entry_action in ("BUY", "SCALE_IN"):
+        signal = "WATCH_UP" if entry_action == "BUY" else "WATCH_FLAT"
+        entry_action = "WAIT"
+        signal_type = "WATCH"
+        sub_action = "WAIT_SUPPORT"
+        scored["reason_codes"] = list(scored["reason_codes"]) + ["buy_deploy_disabled"]
+        v4 = {**v4, "entry_action": "WAIT"}
+        v4["position_actions"] = {
+            **v4["position_actions"],
+            "new_investor": "WAIT",
+            "trader": "NO_CHASE" if v4["chase_blocked"] else "WAIT",
+        }
+
+    # chase: score 불변, action만 WAIT (SCALE_IN/BUY)
     if v4["chase_blocked"] and entry_action in ("BUY", "SCALE_IN"):
         entry_action = "WAIT"
+        signal_type = "WATCH"
+        sub_action = "WAIT_SUPPORT"
         v4 = {**v4, "entry_action": "WAIT", "entry_decision_note": "chase_blocked"}
         signal = map_entry_to_legacy_signal(
             entry_action="WAIT",
@@ -844,6 +912,40 @@ def decide_signal(
             gates=gates,
         )
         scored["reason_codes"] = list(scored["reason_codes"]) + ["chase_blocked"]
+
+    # Sync v4 entry_action with VA decision for downstream UI
+    v4 = {**v4, "entry_action": entry_action}
+    # Position actions from VA sizing
+    sizing = (va.get("decision") or {}).get("sizing_guide") or ""
+    tranche = (va.get("decision") or {}).get("target_tranche") or "CORE"
+    if entry_action == "SCALE_IN":
+        v4["position_actions"] = {
+            **v4.get("position_actions", {}),
+            "holder": "SCALE_IN",
+            "new_investor": "WAIT",
+            "trader": "SCALE_IN",
+        }
+    elif entry_action == "REDUCE":
+        v4["position_actions"] = {
+            **v4.get("position_actions", {}),
+            "holder": "REDUCE_TACTICAL" if "TACTICAL" in str(sub_action) else "REDUCE",
+            "new_investor": "NO_CHASE",
+            "trader": "TRIM",
+        }
+    elif entry_action == "EXIT":
+        v4["position_actions"] = {
+            **v4.get("position_actions", {}),
+            "holder": "EXIT",
+            "new_investor": "AVOID",
+            "trader": "EXIT",
+        }
+    elif entry_action in ("HOLD", "WAIT"):
+        v4["position_actions"] = {
+            **v4.get("position_actions", {}),
+            "holder": "HOLD" if entry_action == "HOLD" else "WAIT",
+            "new_investor": "WAIT",
+            "trader": "WAIT",
+        }
 
     scores = {
         **scores,
@@ -860,7 +962,7 @@ def decide_signal(
     expected_return = emp.get("expected_return") or {}
     expected_dd = emp.get("expected_drawdown") or {}
 
-    # entry_stance를 v4와 정합
+    # entry_stance를 VA/v4와 정합
     if entry_action == "BUY":
         stance = "ENTRY_READY"
     elif entry_action == "SCALE_IN":
@@ -872,8 +974,13 @@ def decide_signal(
     scored["entry_stance"] = stance
 
     triggers = build_triggers(features, scored, signal)
-    # Thesis invalidation vs risk control 분리
-    triggers["thesis_invalidation"] = triggers.get("invalidation")
+    # Thesis invalidation vs risk control 분리 — VA stubs preferred
+    stubs = va.get("rationale_stubs") or {}
+    triggers["thesis_invalidation"] = (
+        stubs.get("invalidation_condition") or triggers.get("invalidation")
+    )
+    triggers["invalidation"] = triggers["thesis_invalidation"]
+    triggers["next_trigger"] = stubs.get("next_trigger")
     triggers["risk_control"] = (
         "보유자 손절·비중은 thesis invalidation과 별도. "
         "ATR/지지 기준 개인 리스크 한도 적용."
@@ -886,12 +993,23 @@ def decide_signal(
         position_actions=v4.get("position_actions"),
         chase_blocked=bool(v4.get("chase_blocked")),
     )
+    if sizing:
+        actions = {
+            **actions,
+            "sizing_guide": sizing,
+            "target_tranche": tranche,
+        }
 
     rs = features.get("relative_strength") or {}
     regime = _g(features, "market_regime", "regime")
 
+    # Prefer VA extension for report state; keep v4 extension_state for compat
+    report_extension = va_ext or v4["extension_state"]
+
     return {
         "signal": signal,
+        "signal_type": signal_type,
+        "sub_action": sub_action,
         "signal_strength": int(_clip(abs(score), 0, 100)),
         "score": score,
         "scores": scores,
@@ -946,6 +1064,18 @@ def decide_signal(
             "buy_enabled": bool(buy_enabled),
             "sell_enabled": bool(sell_enabled),
         },
+        # ── Value-Aware (v5)
+        "state_summary": state_summary,
+        "decision": va.get("decision"),
+        "rationale": {
+            "value_vs_price": stubs.get("value_vs_price"),
+            "invalidation_condition": stubs.get("invalidation_condition"),
+            "next_trigger": stubs.get("next_trigger"),
+        },
+        "value_regime": state_summary.get("value_regime"),
+        "thesis_status": state_summary.get("thesis_status"),
+        "spatial_support": state_summary.get("spatial_support"),
+        "value_aware": va,
         # ── v4 fields
         "fundamental_view": v4["fundamental_view"],
         "trend": v4["trend"],
@@ -956,7 +1086,7 @@ def decide_signal(
         "oversold_score": v4["oversold_score"],
         "stabilization_score": v4["stabilization_score"],
         "valuation": v4["valuation"],
-        "extension_state": v4["extension_state"],
+        "extension_state": report_extension,
         "entry_action": entry_action,
         "entry_score": v4["entry_score"],
         "entry_score_band": v4["entry_score_band"],
@@ -969,7 +1099,7 @@ def decide_signal(
         "false_breakdown": v4["false_breakdown"],
         "hard_sell_override": v4["hard_sell_override"],
         "sell_softened": softened_sell,
-        "entry_decision_note": v4.get("entry_decision_note"),
+        "entry_decision_note": v4.get("entry_decision_note") or (va.get("decision") or {}).get("note"),
     }
 
 
@@ -1110,25 +1240,38 @@ def format_engine_for_prompt(meta: dict | None) -> str:
     ed = meta.get("expected_drawdown") or {}
     pos = meta.get("position_actions") or {}
     scale = pos.get("scale_in") or {}
+    ss = meta.get("state_summary") or {}
+    dec = meta.get("decision") or {}
+    rat = meta.get("rationale") or {}
     lines = [
-        "=== Signal Engine v4 (덮어쓰기 금지) ===",
+        "=== Signal Engine v5 Value-Aware (덮어쓰기 금지) ===",
+        f"- state_summary: Value={ss.get('value_regime') or meta.get('value_regime')} | "
+        f"Extension={ss.get('extension_state') or meta.get('extension_state')} | "
+        f"Thesis={ss.get('thesis_status') or meta.get('thesis_status')} | "
+        f"Spatial={ss.get('spatial_support') or meta.get('spatial_support')}",
+        f"- decision.action: {dec.get('action') or meta.get('entry_action')} "
+        f"(tranche={dec.get('target_tranche')}, gate={dec.get('gate')})",
+        f"- sizing_guide: {dec.get('sizing_guide') or actions.get('sizing_guide')}",
+        f"- signal_type / sub_action: {meta.get('signal_type')} / {meta.get('sub_action')} "
+        f"(REDUCE≠SELL)",
+        f"- 호환 SIGNAL(UI): {meta.get('signal')}",
+        f"- rationale.value_vs_price: {rat.get('value_vs_price')}",
+        f"- rationale.invalidation: {rat.get('invalidation_condition') or trig.get('thesis_invalidation')}",
+        f"- rationale.next_trigger: {rat.get('next_trigger') or trig.get('next_trigger')}",
         f"- Fundamental: {meta.get('fundamental_view', 'NEUTRAL')}",
         f"- Trend: {meta.get('trend') or meta.get('trend_label')} (trend_score={meta.get('trend_score')})",
         f"- Momentum: {meta.get('momentum')}",
         f"- Bottoming: {meta.get('bottoming')} "
         f"(score={meta.get('bottoming_score')}, oversold={meta.get('oversold_score')}, "
         f"stabilization={meta.get('stabilization_score')}) — 과매도≠바닥확정",
-        f"- Valuation: {meta.get('valuation')} (멀티플만 — MA/BB/RSI 아님)",
-        f"- Extension: {meta.get('extension_state')} (기술 과열/압축)",
+        f"- Valuation(legacy label): {meta.get('valuation')} (멀티플만 — MA/BB/RSI 아님)",
         f"- Entry Score: {meta.get('entry_score')} (chase로 점수 깎지 않음)",
         f"- Chase blocked: {meta.get('chase_blocked')} reasons={meta.get('chase_reasons')}",
-        f"- Entry Action: {meta.get('entry_action')}",
         f"- Market State: {meta.get('market_state')}",
         f"- Position: holder={pos.get('holder')} / new={pos.get('new_investor')} / "
         f"trader={pos.get('trader')}",
         f"- Scale-in: {scale.get('label')} target_position_pct={scale.get('target_position_pct')} "
         f"(sizing_basis={scale.get('sizing_basis')} — 포트폴리오 전체 비중 아님)",
-        f"- 호환 SIGNAL: {meta.get('signal')}",
         f"- Legacy scores: mom={scores.get('momentum')}, participation={scores.get('participation')}, "
         f"entry_quality={scores.get('entry_quality')}, composite={meta.get('score')}",
         f"- RVOL: {meta.get('rvol')} → {meta.get('rvol_note')}",
@@ -1139,15 +1282,16 @@ def format_engine_for_prompt(meta: dict | None) -> str:
         f"- Expected DD 5/10/20d: {ed.get('5d')} / {ed.get('10d')} / {ed.get('20d')}",
         f"- BUY Trigger: {trig.get('buy_trigger')}",
         f"- DOWN Trigger: {trig.get('down_trigger')}",
-        f"- Thesis Invalidation: {trig.get('thesis_invalidation') or trig.get('invalidation')}",
         f"- Risk Control: {trig.get('risk_control')}",
         f"- False breakdown: {meta.get('false_breakdown')}",
         f"- Hard sell override: {meta.get('hard_sell_override')}",
         f"- Sell softened: {meta.get('sell_softened')}",
         f"- reason_codes: {', '.join((meta.get('reason_codes') or [])[:12])}",
-        "- 규칙: Fundamental/Trend/Momentum/Bottoming/Valuation/Entry/Position 을 덮어쓰지 말 것.",
-        "- RVOL<1 = 기관 이탈 단정 금지. '거래량 확인 부족'으로만 서술.",
-        "- Extension 과열은 Entry WAIT/NO-CHASE. Valuation과 섞지 말 것.",
-        "- Invalidation(thesis)과 Risk Control(손절)을 분리해 서술.",
+        "- 규칙: Value≠Extension. 가격↓=매도 / 가격↑=매수 서사 금지.",
+        "- EXIT/SELL은 Thesis BROKEN 또는 Major HVN 완파(Hard)일 때만.",
+        "- OVERSOLD+Value 저평가/적정+Thesis INTACT → SCALE_IN/WAIT (EXIT 금지).",
+        "- OVERBOUGHT+고평가 → REDUCE (전량 EXIT 아님). REDUCE≠SELL.",
+        "- 필수 4슬롯: 가치-가격 괴리 / Action&Sizing / Invalidation / Next Trigger.",
+        "- RVOL<1 = 기관 이탈 단정 금지. Invalidation과 Risk Control 분리.",
     ]
     return "\n".join(lines)

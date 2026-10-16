@@ -410,3 +410,95 @@ def build_outcomes_from_docs(docs: list[dict], progress: bool = True) -> list[di
                 "updated_at": datetime.utcnow().isoformat(),
             })
     return [o for o in outcomes if o]
+
+
+def summarize_value_aware_kpi(
+    analyses: Iterable[dict],
+    *,
+    horizon: int = 5,
+    rebound_thresh: float = 0.08,
+) -> dict:
+    """
+    Value-aware KPI (P4).
+    Uses signal_engine fields on analysis docs + optional return_{h}d on outcomes.
+    REDUCE counted separately from SELL (signal_type).
+    """
+    rows = list(analyses or [])
+    false_sell = []  # EXIT while thesis/value intact context → rebound
+    missed_scale = []
+    reduce_hit = []
+    premature_reduce = []
+
+    for doc in rows:
+        eng = doc.get("signal_engine") or {}
+        st = (eng.get("signal_type") or signal_family(doc.get("signal") or "")).upper()
+        sub = (eng.get("sub_action") or "").upper()
+        ss = eng.get("state_summary") or {}
+        thesis = (ss.get("thesis_status") or eng.get("thesis_status") or "").upper()
+        value = (ss.get("value_regime") or eng.get("value_regime") or "").upper()
+        ext = (ss.get("extension_state") or eng.get("extension_state") or "").upper()
+        action = ((eng.get("decision") or {}).get("action") or eng.get("entry_action") or "").upper()
+        ret = doc.get(f"return_{horizon}d")
+        if ret is None and isinstance(doc.get("returns"), dict):
+            ret = doc["returns"].get(f"{horizon}d")
+
+        intactish = thesis in ("INTACT", "WARNING", "")
+        cheapish = value in ("UNDERVALUED", "FAIR", "")
+
+        if st == "SELL" or action == "EXIT":
+            if intactish and cheapish and ret is not None and ret >= rebound_thresh:
+                false_sell.append(doc)
+
+        if (
+            ext in ("OVERSOLD",)
+            and cheapish
+            and thesis == "INTACT"
+            and action not in ("SCALE_IN", "BUY")
+            and ret is not None
+            and ret >= rebound_thresh
+        ):
+            missed_scale.append(doc)
+
+        if st == "REDUCE" or action == "REDUCE":
+            if ret is not None and ret < 0:
+                reduce_hit.append(doc)
+            elif ret is not None and ret >= rebound_thresh:
+                premature_reduce.append(doc)
+
+    n_sell = sum(
+        1
+        for d in rows
+        if ((d.get("signal_engine") or {}).get("signal_type") or "").upper() == "SELL"
+        or ((d.get("signal_engine") or {}).get("entry_action") or "").upper() == "EXIT"
+    )
+    n_reduce = sum(
+        1
+        for d in rows
+        if ((d.get("signal_engine") or {}).get("signal_type") or "").upper() == "REDUCE"
+    )
+
+    def _rate(num, den):
+        return _safe_float(num / den, 4) if den else None
+
+    return {
+        "horizon_d": horizon,
+        "n_docs": len(rows),
+        "value_aware_false_sell": {
+            "n": len(false_sell),
+            "rate_of_exits": _rate(len(false_sell), n_sell),
+        },
+        "missed_scale_in": {"n": len(missed_scale)},
+        "overbought_reduce_hit": {
+            "n": len(reduce_hit),
+            "rate_of_reduces": _rate(len(reduce_hit), n_reduce),
+        },
+        "premature_reduce_cost": {
+            "n": len(premature_reduce),
+            "rate_of_reduces": _rate(len(premature_reduce), n_reduce),
+        },
+        "notes": [
+            "False SELL: EXIT while thesis/value intact and rebound ≥ threshold.",
+            "Missed Scale-in: OVERSOLD+cheap+INTACT without SCALE_IN then rebound.",
+            "REDUCE uses signal_type=REDUCE (not merged with SELL).",
+        ],
+    }
